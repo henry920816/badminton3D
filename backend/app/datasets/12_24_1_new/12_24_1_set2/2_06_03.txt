@@ -1,0 +1,5 @@
+共 4 個基於2D方向分析的Segment:
+Segment 1: Frame 60-74 (Len=15, Direction=負向場, Hits=65)
+Segment 2: Frame 75-181 (Len=107, Direction=負向場, Hits=157)
+Segment 3: Frame 182-224 (Len=43, Direction=負向場, Hits=199)
+Segment 4: Frame 225-299 (Len=75, Direction=負向場, Hits=無), Landing Points: [299]

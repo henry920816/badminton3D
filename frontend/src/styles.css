@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+.vis-timeline { border: 1px solid #27272a !important; background: #09090b; }
+.vis-item { border-color: #3f3f46; }
+.vis-item.vis-selected { border-color: #a78bfa; }
+.vis-custom-time { background: rgba(250, 204, 21, 0.9); width: 2px !important; }

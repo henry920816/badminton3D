@@ -1,0 +1,14 @@
+共 13 個基於2D方向分析的Segment:
+Segment 1: Frame 32-48 (Len=17, Direction=正向場, Hits=35)
+Segment 2: Frame 49-148 (Len=100, Direction=正向場, Hits=120)
+Segment 3: Frame 149-175 (Len=27, Direction=負向場, Hits=169)
+Segment 4: Frame 176-252 (Len=77, Direction=正向場, Hits=240)
+Segment 5: Frame 253-303 (Len=51, Direction=負向場, Hits=287)
+Segment 6: Frame 304-352 (Len=49, Direction=正向場, Hits=342)
+Segment 7: Frame 353-428 (Len=76, Direction=負向場, Hits=405)
+Segment 8: Frame 429-459 (Len=31, Direction=正向場, Hits=450)
+Segment 9: Frame 460-496 (Len=37, Direction=負向場, Hits=486)
+Segment 10: Frame 497-548 (Len=52, Direction=正向場, Hits=534)
+Segment 11: Frame 549-605 (Len=57, Direction=負向場, Hits=596)
+Segment 12: Frame 606-636 (Len=31, Direction=正向場, Hits=622)
+Segment 13: Frame 637-733 (Len=97, Direction=負向場, Hits=無), Landing Points: [733]
