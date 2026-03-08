@@ -23,9 +23,8 @@ export default function App() {
       const tl = await api.getTimeline(matchId)
       setTimelineData(tl)
 
-      // preload first 10 seconds
       const start = 0
-      const end = Math.floor((10.0) * (m.fps || fps))
+      const end = m.duration_frame
       const pts = await api.getTraj(matchId, start, end)
       upsertTrajPoints(pts)
     })().catch(err => {

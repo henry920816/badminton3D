@@ -63,7 +63,9 @@ def seed_demo(db: Session):
             z = 0.0
             conf = 0.15
 
-        traj.append(BallTraj(match_id=match.id, frame=f, t_sec=t, x=x, y=y, z=z, confidence=conf))
+        speed = random.uniform(0.0, 150.0)
+
+        traj.append(BallTraj(match_id=match.id, frame=f, t_sec=t, x=x, y=y, z=z, speed=speed, confidence=conf))
 
     db.bulk_save_objects(traj)
 

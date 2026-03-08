@@ -22,12 +22,19 @@ export const useAppStore = create((set, get) => ({
   anomalies: [],
 
   // trajectory cache
-  trajByFrame: new Map(), // frame -> {frame,t_sec,x,y,z,confidence}
+  trajByFrame: new Map(), // frame -> {frame,t_sec,x,y,z,speed,confidence}
+
+  // timeline view
+  pxPerSec: 100, // zoom level
+  scrollLeft: 0, // pan offset
 
   // active selection
   activeItem: null, // {type, id}
 
   // actions
+  setZoom: (px) => set({ pxPerSec: px }),
+  setScrollLeft: (x) => set({ scrollLeft: x }),
+  
   setMatchMeta: (m) => set({
     fps: m.fps,
     durationSec: m.duration_sec,
@@ -70,6 +77,10 @@ export const useAppStore = create((set, get) => ({
   clearSelection: () => set({ selection: { inTime: null, outTime: null }}),
 
   setTimelineData: ({ rallies, hits, anomalies }) => set({ rallies, hits, anomalies }),
+
+  updateHit: (id, updates) => set(s => ({
+    hits: s.hits.map(h => h.id === id ? { ...h, ...updates } : h)
+  })),
 
   setActiveCamera: (id) => set({ activeCameraId: id }),
 

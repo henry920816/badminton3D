@@ -22,6 +22,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/badminton
       CORS_ORIGINS: http://localhost:5173
+    volumes:
+    - ./backend/app:/app/app
     ports:
     - 8000:8000
     depends_on:

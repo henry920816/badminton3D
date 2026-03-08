@@ -10,7 +10,7 @@ class Match(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(120), default="Demo Match")
     fps: Mapped[float] = mapped_column(Float, default=60.0)
-    duration_sec: Mapped[float] = mapped_column(Float, default=60.0)
+    duration_frame: Mapped[int] = mapped_column(Integer, default=3600)
     cameras: Mapped[dict] = mapped_column(JSON, default=list)  # [{"id":"cam1","label":"CAM 1","url":"..."}]
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -46,6 +46,7 @@ class BallTraj(Base):
     x: Mapped[float] = mapped_column(Float)
     y: Mapped[float] = mapped_column(Float)
     z: Mapped[float] = mapped_column(Float)
+    speed: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
 
 Index("idx_ball_match_frame", BallTraj.match_id, BallTraj.frame)

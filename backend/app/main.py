@@ -47,7 +47,7 @@ def get_match(match_id: int, db: Session = Depends(get_db)):
     m = db.get(Match, match_id)
     if not m:
         raise HTTPException(status_code=404, detail="match not found")
-    return MatchOut(id=m.id, title=m.title, fps=m.fps, duration_sec=m.duration_sec, cameras=m.cameras or [])
+    return MatchOut(id=m.id, title=m.title, fps=m.fps, duration_frame=m.duration_frame, cameras=m.cameras or [])
 
 @app.get("/matches/{match_id}/timeline", response_model=TimelineOut)
 def get_timeline(match_id: int, db: Session = Depends(get_db)):
@@ -101,7 +101,7 @@ def get_traj(match_id: int, start: int = 0, end: int = 999999999, db: Session = 
     ).order_by(BallTraj.frame)
 
     rows = q.all()
-    return [TrajPoint(frame=r.frame, t_sec=r.t_sec, x=r.x, y=r.y, z=r.z, confidence=r.confidence) for r in rows]
+    return [TrajPoint(frame=r.frame, t_sec=r.t_sec, x=r.x, y=r.y, z=r.z, speed=r.speed, confidence=r.confidence) for r in rows]
 
 @app.patch("/hits/{hit_id}")
 def patch_hit(hit_id: int, payload: HitPatch, db: Session = Depends(get_db)):
