@@ -13,7 +13,7 @@ from app.models import Match, Rally, Hit, BallTraj
 DATA_ROOT = "/app/app/datasets/12_24_1_new"
 
 # ✅ 這份資料是 frame-based；Match.fps 會用來在 API 回傳時計算秒
-FPS = 60.0
+FPS = 50.0
 
 
 def _safe_int(x, default=None):
