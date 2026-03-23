@@ -160,6 +160,7 @@ export default function TimelinePanel() {
   const trajMap = useAppStore(s => s.trajByFrame)
   const upsertTrajPoints = useAppStore(s => s.upsertTrajPoints)
 
+  const activeItem = useAppStore(s => s.activeItem)
   const setActiveItem = useAppStore(s => s.setActiveItem)
 
   const pxPerSec = useAppStore(s => s.pxPerSec) || 100
@@ -305,7 +306,44 @@ export default function TimelinePanel() {
 
       if (e.key === 'i' || e.key === 'I') setSelectionIn()
       if (e.key === 'o' || e.key === 'O') setSelectionOut()
-      if (e.key === 'Escape') clearSelection()
+      if (e.key === 'Escape') {
+        clearSelection()
+        setActiveItem(null, null)
+      }
+
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        const isRight = e.key === 'ArrowRight'
+        if (activeItem?.type === 'rally') {
+          e.preventDefault()
+          const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
+          const idx = sorted.findIndex(r => r.id === activeItem.id)
+          if (idx !== -1) {
+            const nextIdx = idx + (isRight ? 1 : -1)
+            if (nextIdx >= 0 && nextIdx < sorted.length) {
+              const r = sorted[nextIdx]
+              const s = r.start_frame / fps
+              setSelectionRange(s, r.end_frame / fps)
+              setCurrentTime(s)
+              setActiveItem('rally', r.id)
+              ensureTimeVisible(s, 'center')
+            }
+          }
+        } else if (activeItem?.type === 'hit') {
+          e.preventDefault()
+          const hit = hits.find(h => h.id === activeItem.id)
+          if (hit) {
+            const frame = hit.new_hit_frame ?? hit.hit_frame
+            const newFrame = frame + (isRight ? 1 : -1)
+            updateHit(hit.id, { new_hit_frame: newFrame })
+            setCurrentTime(newFrame / fps)
+          }
+        } else {
+          // Default: Move timeline by 1 frame
+          e.preventDefault()
+          const step = 1 / fps
+          setCurrentTime(Math.max(0, currentTime + (isRight ? step : -step)))
+        }
+      }
 
       if ((e.shiftKey && (e.key === 'N' || e.key === 'n')) || (e.shiftKey && (e.key === 'P' || e.key === 'p'))) {
         const forward = (e.key === 'N' || e.key === 'n')
@@ -522,11 +560,12 @@ export default function TimelinePanel() {
           const isLow = conf < 0.5
           const isHovered = hoveredHit === h.id || isDragging
 
-          ctx.fillStyle = isHovered ? '#fbbf24' : isLow ? '#f43f5e' : '#d4d4d8'
+          // Color logic: Default white, Hover Cyan (diff from speed line)
+          ctx.fillStyle = isHovered ? '#22d3ee' : isLow ? '#f43f5e' : '#d4d4d8'
           ctx.fillRect(hx - 1, trackTop, 2, track.height)
 
-          ctx.fillStyle = isHovered ? '#451a03' : 'rgba(39,39,42,0.9)'
-          ctx.strokeStyle = isLow ? '#f43f5e' : isHovered ? '#fbbf24' : '#52525b'
+          ctx.fillStyle = isHovered ? '#083344' : 'rgba(39,39,42,0.9)'
+          ctx.strokeStyle = isLow ? '#f43f5e' : isHovered ? '#22d3ee' : '#52525b'
           ctx.lineWidth = 1
 
           const text = h.shot_type || 'Hit'
@@ -539,7 +578,7 @@ export default function TimelinePanel() {
           ctx.fill()
           ctx.stroke()
 
-          ctx.fillStyle = isLow ? '#fda4af' : isHovered ? '#fde68a' : '#d4d4d8'
+          ctx.fillStyle = isLow ? '#fda4af' : isHovered ? '#67e8f9' : '#d4d4d8'
           ctx.textAlign = 'center'
           ctx.textBaseline = 'top'
           ctx.fillText(text, hx, trackTop + 8)
@@ -704,12 +743,23 @@ export default function TimelinePanel() {
 
   const getHitAtX = (x) => {
     const t = (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec
-    const clickZoneSec = 10 / pxPerSec
+    // Increase click zone/radius (e.g. 25px in seconds) for easier selection
+    const clickZoneSec = 5 / pxPerSec 
+    
+    let bestHit = null
+    let minDist = Infinity
+
     for (const h of hits) {
       const ht = (h.new_hit_frame ?? h.hit_frame) / fps
-      if (Math.abs(ht - t) < clickZoneSec) return h
+      const dist = Math.abs(ht - t)
+      
+      // Find the closest hit within the click zone
+      if (dist < clickZoneSec && dist < minDist) {
+        minDist = dist
+        bestHit = h
+      }
     }
-    return null
+    return bestHit
   }
 
   const getPlayheadX = () => currentTime * pxPerSec - scrollLeft + TRACK_LABELS_WIDTH
@@ -743,6 +793,10 @@ export default function TimelinePanel() {
               frameOffset: hit.new_hit_frame ?? hit.hit_frame
             })
             setActiveItem('hit', hit.id)
+            
+            // Snap current time to the hit's exact frame to "see" it immediately
+            const frame = hit.new_hit_frame ?? hit.hit_frame
+            setCurrentTime(frame / fps)
             return
           }
         } else if (track.id === 'rally') {
@@ -764,6 +818,7 @@ export default function TimelinePanel() {
     }
 
     clearSelection()
+    setActiveItem(null, null) // Clear active item when clicking empty space
     setCurrentTime(t)
     ensureTimeVisible(t, 'soft')
   }

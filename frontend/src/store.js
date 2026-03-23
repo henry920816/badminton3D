@@ -2,7 +2,7 @@ import { create } from 'zustand'
 
 export const useAppStore = create((set, get) => ({
   matchId: 1,
-  fps: 60,
+  fps: 50,
   durationSec: 0,
   cameras: [],
   activeCameraId: 'cam1',
