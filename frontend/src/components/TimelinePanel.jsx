@@ -902,7 +902,7 @@ export default function TimelinePanel() {
   }
 
   return (
-    <div className="h-full w-full relative flex flex-col bg-[#09090b] select-none">
+    <div className="h-[350px] w-full relative flex flex-col bg-[#09090b] select-none text-left">
       <div className="h-[42px] shrink-0 px-4 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20">
         <div className="text-xs text-zinc-200 font-bold bg-zinc-800/80 px-2 py-1 rounded tracking-wider border border-zinc-700">
           TIMELINE

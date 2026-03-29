@@ -101,7 +101,30 @@ def get_traj(match_id: int, start: int = 0, end: int = 999999999, db: Session = 
     ).order_by(BallTraj.frame)
 
     rows = q.all()
-    return [TrajPoint(frame=r.frame, t_sec=r.t_sec, x=r.x, y=r.y, z=r.z, speed=r.speed, confidence=r.confidence) for r in rows]
+    
+    # 計算球速: 與上一個有效點的距離 / 時間差
+    result = []
+    prev_r = None
+    for r in rows:
+        speed = None
+        if prev_r is not None:
+            dt = r.t_sec - prev_r.t_sec
+            if dt > 0:
+                dist = ((r.x - prev_r.x)**2 + (r.y - prev_r.y)**2 + (r.z - prev_r.z)**2) ** 0.5
+                speed = dist / dt
+        
+        result.append(TrajPoint(
+            frame=r.frame, 
+            t_sec=r.t_sec, 
+            x=r.x, 
+            y=r.y, 
+            z=r.z, 
+            speed=speed,
+            confidence=r.confidence
+        ))
+        prev_r = r
+
+    return result
 
 @app.patch("/hits/{hit_id}")
 def patch_hit(hit_id: int, payload: HitPatch, db: Session = Depends(get_db)):

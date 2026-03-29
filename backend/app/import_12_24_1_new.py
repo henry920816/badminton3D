@@ -31,6 +31,44 @@ def _safe_str(x, default=""):
     return str(x)
 
 
+def repair_zero_points(ball_data, mask_data):
+    """
+    方法三: 針對 (0,0,0) 的點，自動尋找前後最近的非零點進行線性內插。
+    """
+    pos = np.asarray(ball_data, dtype=np.float64).copy()[:, :3]
+    mask = np.asarray(mask_data).copy().astype(np.uint8)
+    
+    n = len(pos)
+    repaired = pos.copy()
+    repaired_mask = mask.copy()
+    
+    # 判斷是否為 (0,0,0) 或缺失值
+    # 這裡用距離小於極小值來判斷，避免浮點數誤差
+    is_zero = np.all(pos == 0, axis=1) | (np.linalg.norm(pos, axis=1) < 1e-7) | ~np.all(np.isfinite(pos), axis=1)
+    
+    valid_idx = np.where(~is_zero)[0]
+    zero_idx = np.where(is_zero)[0]
+    
+    if len(valid_idx) < 2:
+        # print(f"[{score}] 警告: 整個資料有效點不足 2 個，無法進行內插修補。")
+        return repaired, repaired_mask
+    
+    if len(zero_idx) == 0:
+        # print("[Method 3] 檢查完畢: 沒有發現均為 (0,0,0) 的點，不需要修補。")
+        return repaired, repaired_mask
+    
+    # 進行線性插值：對 XYZ 每個維度分別把 valid_idx 為底的點透過 np.interp 展開到所有的 index
+    t = np.arange(n)
+    for d in range(3):
+        repaired[:, d] = np.interp(t, valid_idx, pos[valid_idx, d])
+        
+    # 將修補過的部分 mask 設為 1
+    repaired_mask[zero_idx] = 1
+    
+    # print(f"[{score}] 成功修補了 {len(zero_idx)} 個為 (0,0,0) 或異常（NaN）的點。")
+    return repaired, repaired_mask
+
+
 def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame: int, set_name: str):
     """
     從 .npy 檔案中批量匯入 (Bulk Insert) 有效的 3D 軌跡點。
@@ -48,7 +86,6 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
     file_name = f"{score}.npy"
     ball_path = os.path.join(dataset_base, "ball_new", npy_folder, file_name)
     mask_path = os.path.join(dataset_base, "ball_final_mask_new", npy_folder, file_name)
-    speed_path = os.path.join(dataset_base, "ball_speed", npy_folder, file_name)
 
     if not (os.path.exists(ball_path) and os.path.exists(mask_path)):
         # print(f"Warning: Missing trajectory or mask file for {score}")
@@ -57,13 +94,12 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
     try:
         ball_data = np.load(ball_path)
         mask_data = np.load(mask_path)
-        if os.path.exists(speed_path):
-            speed_data = np.load(speed_path)
-        else:
-            speed_data = None
     except Exception as e:
         print(f"Error loading {file_name}: {e}")
         return
+
+    # 先修補軌跡中的 (0,0,0) 等異常值
+    ball_data, mask_data = repair_zero_points(ball_data, mask_data)
 
     # 找出所有 mask_data == 1 的索引位置陣列 -> (0, 3, 4, ...)
     valid_indices = np.where(mask_data == 1)[0]
@@ -81,13 +117,6 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
         
         x, y, z = ball_data[i]
         
-        # 讀取球速
-        speed = None
-        if speed_data is not None and i < len(speed_data):
-            s_val = speed_data[i]
-            if not math.isnan(s_val):
-                speed = float(s_val)
-
         # 過濾不合理的 nan 或極端值如果需要，亦可略過
         if math.isnan(x) or math.isnan(y) or math.isnan(z):
             continue
@@ -99,7 +128,6 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
             "x": float(x),
             "y": float(y),
             "z": float(z),
-            "speed": speed,
             "confidence": 1.0
         })
 
