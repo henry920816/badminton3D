@@ -146,6 +146,7 @@ export default function TimelinePanel() {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const scrollBarRef = useRef(null)
+  const rafPanRef = useRef(null)
 
   const matchId = useAppStore(s => s.matchId)
   const fps = useAppStore(s => s.fps) || 60
@@ -180,14 +181,11 @@ export default function TimelinePanel() {
   const [hoveredHit, setHoveredHit] = useState(null)
   const [draggingHit, setDraggingHit] = useState(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
-  const [isPanning, setIsPanning] = useState(false)
+  const [isPanning, setIsPanning] = useState(null)
 
   const TRACK_LABELS_WIDTH = 100
   const RULER_HEIGHT = 30
   const PLAYHEAD_GRAB_PX = 10
-  const AUTO_SCROLL_EDGE_PX = 50
-  const AUTO_SCROLL_KEEP_PX = 90
-  const AUTO_SCROLL_SMOOTH_FACTOR = 0.18
 
   const TRACKS = [
     { id: 'rally', label: 'Rally', height: 30, bg: '#18181b' },
@@ -205,54 +203,23 @@ export default function TimelinePanel() {
   )
 
   const clampScroll = (value) => Math.max(0, Math.min(value, maxScrollLeft))
+  const getUsableWidth = () => Math.max(0, dimensions.width - TRACK_LABELS_WIDTH)
+  const getFixedPlayheadX = () => TRACK_LABELS_WIDTH + getUsableWidth() / 2
+  const getTimeFromCanvasX = (x) => Math.max(0, (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec)
+  const getCenterTimeFromScroll = (nextScroll) => Math.max(0, (nextScroll + getUsableWidth() / 2) / pxPerSec)
 
-  const smoothMoveScroll = (targetScroll) => {
-    const clamped = clampScroll(targetScroll)
-    const next = scrollLeft + (clamped - scrollLeft) * AUTO_SCROLL_SMOOTH_FACTOR
-    if (Math.abs(next - scrollLeft) > 0.5) {
-      setScrollLeft(next)
-    }
+  const setScrollAndCenterTime = (nextScroll) => {
+    const clamped = clampScroll(nextScroll)
+    setScrollLeft(clamped)
+    setCurrentTime(getCenterTimeFromScroll(clamped))
   }
 
-  const ensureTimeVisible = (timeSec, mode = 'soft') => {
-    const visibleLeft = scrollLeft
-    const visibleRight = scrollLeft + Math.max(0, dimensions.width - TRACK_LABELS_WIDTH)
-    const timePx = timeSec * pxPerSec
-
-    let nextScroll = scrollLeft
-
-    if (mode === 'center') {
-      nextScroll = timePx - Math.max(0, dimensions.width - TRACK_LABELS_WIDTH) / 2
-    } else {
-      const leftBound = visibleLeft + AUTO_SCROLL_KEEP_PX
-      const rightBound = visibleRight - AUTO_SCROLL_KEEP_PX
-
-      if (timePx < leftBound) {
-        nextScroll = timePx - AUTO_SCROLL_KEEP_PX
-      } else if (timePx > rightBound) {
-        nextScroll = timePx - Math.max(0, dimensions.width - TRACK_LABELS_WIDTH) + AUTO_SCROLL_KEEP_PX
-      }
-    }
-
-    nextScroll = clampScroll(nextScroll)
-    if (Math.abs(nextScroll - scrollLeft) > 1) {
-      setScrollLeft(nextScroll)
-    }
-  }
-
-  const autoScrollDuringPointer = (x, timeSec) => {
-    const usableWidth = Math.max(0, dimensions.width - TRACK_LABELS_WIDTH)
+  const ensureTimeVisible = (timeSec) => {
+    const usableWidth = getUsableWidth()
     if (usableWidth <= 0) return
-
-    const rightEdge = dimensions.width - AUTO_SCROLL_EDGE_PX
-    const leftEdge = TRACK_LABELS_WIDTH + AUTO_SCROLL_EDGE_PX
-
-    if (x >= rightEdge) {
-      const target = timeSec * pxPerSec - (usableWidth - AUTO_SCROLL_KEEP_PX)
-      smoothMoveScroll(target)
-    } else if (x <= leftEdge) {
-      const target = timeSec * pxPerSec - AUTO_SCROLL_KEEP_PX
-      smoothMoveScroll(target)
+    const targetScroll = clampScroll(timeSec * pxPerSec - usableWidth / 2)
+    if (Math.abs(targetScroll - scrollLeft) > 0.5) {
+      setScrollLeft(targetScroll)
     }
   }
 
@@ -267,6 +234,16 @@ export default function TimelinePanel() {
   }, [])
 
   const isProgrammaticScrollRef = useRef(false)
+  const isSyncingFromScrollRef = useRef(false)
+
+  useEffect(() => {
+    if (dimensions.width === 0 || isSyncingFromScrollRef.current || isPanning) return
+    const targetScroll = clampScroll(currentTime * pxPerSec - getUsableWidth() / 2)
+    if (Math.abs(targetScroll - scrollLeft) <= 0.5) return
+    isProgrammaticScrollRef.current = true
+    setScrollLeft(targetScroll)
+  }, [currentTime, pxPerSec, dimensions.width, scrollLeft, isPanning])
+
   useEffect(() => {
     if (scrollBarRef.current && Math.abs(scrollBarRef.current.scrollLeft - scrollLeft) > 1) {
       isProgrammaticScrollRef.current = true
@@ -277,6 +254,7 @@ export default function TimelinePanel() {
   const fetchLockRef = useRef(false)
   useEffect(() => {
     if (dimensions.width === 0) return
+
     const startSec = Math.max(0, scrollLeft / pxPerSec)
     const endSec = (scrollLeft + dimensions.width - TRACK_LABELS_WIDTH) / pxPerSec
     const sF = Math.floor(startSec * fps) - 30
@@ -289,13 +267,15 @@ export default function TimelinePanel() {
 
     if (missing > 20 && !fetchLockRef.current) {
       fetchLockRef.current = true
-      api.getTraj(matchId, Math.max(0, sF), eF).then(pts => {
-        if (pts && pts.length > 0) upsertTrajPoints(pts)
-      }).catch(console.error)
+      api.getTraj(matchId, Math.max(0, sF), eF)
+        .then(pts => {
+          if (pts && pts.length > 0) upsertTrajPoints(pts)
+        })
+        .catch(console.error)
         .finally(() => {
           setTimeout(() => {
             fetchLockRef.current = false
-          }, 300)
+          }, 250)
         })
     }
   }, [scrollLeft, pxPerSec, dimensions.width, fps, matchId, trajMap, upsertTrajPoints])
@@ -325,7 +305,7 @@ export default function TimelinePanel() {
               setSelectionRange(s, r.end_frame / fps)
               setCurrentTime(s)
               setActiveItem('rally', r.id)
-              ensureTimeVisible(s, 'center')
+              ensureTimeVisible(s)
             }
           }
         } else if (activeItem?.type === 'hit') {
@@ -338,41 +318,20 @@ export default function TimelinePanel() {
             setCurrentTime(newFrame / fps)
           }
         } else {
-          // Default: Move timeline by 1 frame
           e.preventDefault()
           const step = 1 / fps
           setCurrentTime(Math.max(0, currentTime + (isRight ? step : -step)))
-        }
-      }
-
-      if ((e.shiftKey && (e.key === 'N' || e.key === 'n')) || (e.shiftKey && (e.key === 'P' || e.key === 'p'))) {
-        const forward = (e.key === 'N' || e.key === 'n')
-        const list = [...anomalies].sort((a, b) => a.start_frame - b.start_frame)
-        if (!list.length) return
-        const curF = Math.round(currentTime * fps)
-        let target = null
-        if (forward) {
-          target = list.find(a => a.start_frame > curF) || list[0]
-        } else {
-          target = [...list].reverse().find(a => a.end_frame < curF) || list[list.length - 1]
-        }
-        if (target) {
-          const s = target.start_frame / fps
-          setSelectionRange(s, target.end_frame / fps)
-          setCurrentTime(s)
-          setActiveItem('anomaly', target.id)
-          setScrollLeft(clampScroll(s * pxPerSec - dimensions.width / 2 + TRACK_LABELS_WIDTH))
         }
       }
     }
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [anomalies, currentTime, fps, pxPerSec, dimensions.width, setActiveItem, setCurrentTime, setSelectionRange, setSelectionIn, setSelectionOut, clearSelection, setScrollLeft])
+  }, [activeItem, rallies, hits, currentTime, fps, clearSelection, setActiveItem, setSelectionIn, setSelectionOut, setSelectionRange, updateHit, setCurrentTime])
 
   useEffect(() => {
     if (!isScrubbing && !draggingHit && !isPanning && playing) {
-      ensureTimeVisible(currentTime, 'soft')
+      ensureTimeVisible(currentTime)
     }
   }, [currentTime, playing, isScrubbing, draggingHit, isPanning, scrollLeft, pxPerSec, dimensions.width])
 
@@ -387,7 +346,9 @@ export default function TimelinePanel() {
     ctx.scale(scale, scale)
 
     const w = dimensions.width
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    const h = Math.max(dimensions.height, TOTAL_TRACKS_HEIGHT + RULER_HEIGHT)
+
+    ctx.clearRect(0, 0, w, h)
 
     const timeToX = (t) => t * pxPerSec - scrollLeft + TRACK_LABELS_WIDTH
     const xToTime = (x) => (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec
@@ -431,7 +392,6 @@ export default function TimelinePanel() {
       const trackBot = currentY + track.height
 
       if (track.id === 'rally') {
-        const rowH = track.height
         for (const r of rallies) {
           const sx = timeToX(r.start_frame / fps)
           const ex = timeToX(r.end_frame / fps)
@@ -443,7 +403,7 @@ export default function TimelinePanel() {
           else if (r.status === 'reviewing') color = 'rgba(2,132,199,0.5)'
 
           const barY = trackTop + 4
-          const barH = rowH - 8
+          const barH = track.height - 8
           const rectW = Math.max(1, ex - sx)
 
           ctx.fillStyle = color
@@ -466,6 +426,7 @@ export default function TimelinePanel() {
       if (track.valueFn && pts.length > 1) {
         let minV = Infinity
         let maxV = -Infinity
+
         for (const p of pts) {
           const v = track.valueFn(p)
           if (v == null) continue
@@ -535,6 +496,7 @@ export default function TimelinePanel() {
               ctx.lineTo(seg.pxs[seg.pxs.length - 1], trackBot)
               ctx.lineTo(seg.pxs[0], trackBot)
               ctx.closePath()
+
               const grad = ctx.createLinearGradient(0, trackTop, 0, trackBot)
               grad.addColorStop(0, track.fill)
               grad.addColorStop(1, 'rgba(0,0,0,0)')
@@ -547,8 +509,8 @@ export default function TimelinePanel() {
 
       if (track.id === 'speed_hit') {
         for (const h of hits) {
-          const isDragging = draggingHit?.id === h.id
-          const frame = isDragging && draggingHit.currentFrame !== undefined
+          const isDraggingThis = draggingHit?.id === h.id
+          const frame = isDraggingThis && draggingHit.currentFrame !== undefined
             ? draggingHit.currentFrame
             : (h.new_hit_frame ?? h.hit_frame)
 
@@ -556,11 +518,10 @@ export default function TimelinePanel() {
           const hx = timeToX(t)
           if (hx < TRACK_LABELS_WIDTH || hx > w) continue
 
-          const conf = h.confidence ?? 1.0
+          const conf = h.confidence ?? 1
           const isLow = conf < 0.5
-          const isHovered = hoveredHit === h.id || isDragging
+          const isHovered = hoveredHit === h.id || isDraggingThis
 
-          // Color logic: Default white, Hover Cyan (diff from speed line)
           ctx.fillStyle = isHovered ? '#22d3ee' : isLow ? '#f43f5e' : '#d4d4d8'
           ctx.fillRect(hx - 1, trackTop, 2, track.height)
 
@@ -619,21 +580,21 @@ export default function TimelinePanel() {
         ctx.setLineDash([4, 4])
         ctx.beginPath()
         ctx.moveTo(sx, RULER_HEIGHT)
-        ctx.lineTo(sx, canvas.height)
+        ctx.lineTo(sx, h)
         ctx.moveTo(ex, RULER_HEIGHT)
-        ctx.lineTo(ex, canvas.height)
+        ctx.lineTo(ex, h)
         ctx.stroke()
         ctx.setLineDash([])
       }
     }
 
-    const cx = timeToX(currentTime)
+    const cx = getFixedPlayheadX()
     if (cx >= TRACK_LABELS_WIDTH && cx <= w) {
       ctx.strokeStyle = '#38bdf8'
       ctx.lineWidth = 1.5
       ctx.beginPath()
       ctx.moveTo(cx, 0)
-      ctx.lineTo(cx, canvas.height)
+      ctx.lineTo(cx, h)
       ctx.stroke()
 
       ctx.fillStyle = '#38bdf8'
@@ -689,11 +650,11 @@ export default function TimelinePanel() {
     }
 
     ctx.fillStyle = '#09090b'
-    ctx.fillRect(0, 0, TRACK_LABELS_WIDTH, canvas.height)
+    ctx.fillRect(0, 0, TRACK_LABELS_WIDTH, h)
     ctx.strokeStyle = '#27272a'
     ctx.beginPath()
     ctx.moveTo(TRACK_LABELS_WIDTH, 0)
-    ctx.lineTo(TRACK_LABELS_WIDTH, canvas.height)
+    ctx.lineTo(TRACK_LABELS_WIDTH, h)
     ctx.stroke()
 
     ctx.fillStyle = '#52525b'
@@ -718,6 +679,7 @@ export default function TimelinePanel() {
 
     const handleWheel = (e) => {
       e.preventDefault()
+
       if (e.shiftKey) {
         const mouseX = e.offsetX
         if (mouseX < TRACK_LABELS_WIDTH) return
@@ -730,30 +692,27 @@ export default function TimelinePanel() {
 
         const newScroll = targetTime * newPx - (mouseX - TRACK_LABELS_WIDTH)
         setZoom(newPx)
-        setScrollLeft(clampScroll(newScroll))
+        setScrollAndCenterTime(newScroll)
       } else {
-        const deltaX = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : (e.ctrlKey || e.metaKey ? e.deltaY : e.deltaY)
-        setScrollLeft(clampScroll(scrollLeft + deltaX))
+        const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+        setScrollAndCenterTime(scrollLeft + delta)
       }
     }
 
     canvas.addEventListener('wheel', handleWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', handleWheel)
-  }, [scrollLeft, pxPerSec, setZoom, setScrollLeft, maxScrollLeft])
+  }, [scrollLeft, pxPerSec, setZoom])
 
   const getHitAtX = (x) => {
-    const t = (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec
-    // Increase click zone/radius (e.g. 25px in seconds) for easier selection
-    const clickZoneSec = 5 / pxPerSec 
-    
+    const t = getTimeFromCanvasX(x)
+    const clickZoneSec = 5 / pxPerSec
+
     let bestHit = null
     let minDist = Infinity
 
     for (const h of hits) {
       const ht = (h.new_hit_frame ?? h.hit_frame) / fps
       const dist = Math.abs(ht - t)
-      
-      // Find the closest hit within the click zone
       if (dist < clickZoneSec && dist < minDist) {
         minDist = dist
         bestHit = h
@@ -762,22 +721,22 @@ export default function TimelinePanel() {
     return bestHit
   }
 
-  const getPlayheadX = () => currentTime * pxPerSec - scrollLeft + TRACK_LABELS_WIDTH
+  const getPlayheadX = () => getFixedPlayheadX()
   const isNearPlayhead = (x) => Math.abs(x - getPlayheadX()) <= PLAYHEAD_GRAB_PX
 
   const handlePointerDown = (e) => {
     e.target.setPointerCapture(e.pointerId)
+
     const x = e.nativeEvent.offsetX
     const y = e.nativeEvent.offsetY
 
     if (x < TRACK_LABELS_WIDTH) return
 
-    const t = Math.max(0, (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec)
+    const t = getTimeFromCanvasX(x)
 
     if (isNearPlayhead(x) || y < RULER_HEIGHT) {
       setIsScrubbing(true)
       setCurrentTime(t)
-      autoScrollDuringPointer(x, t)
       return
     }
 
@@ -793,8 +752,7 @@ export default function TimelinePanel() {
               frameOffset: hit.new_hit_frame ?? hit.hit_frame
             })
             setActiveItem('hit', hit.id)
-            
-            // Snap current time to the hit's exact frame to "see" it immediately
+
             const frame = hit.new_hit_frame ?? hit.hit_frame
             setCurrentTime(frame / fps)
             return
@@ -807,7 +765,7 @@ export default function TimelinePanel() {
               setSelectionRange(startSec, endSec)
               setCurrentTime(startSec)
               setActiveItem('rally', r.id)
-              ensureTimeVisible(startSec, 'center')
+              ensureTimeVisible(startSec)
               return
             }
           }
@@ -818,9 +776,13 @@ export default function TimelinePanel() {
     }
 
     clearSelection()
-    setActiveItem(null, null) // Clear active item when clicking empty space
-    setCurrentTime(t)
-    ensureTimeVisible(t, 'soft')
+    setActiveItem(null, null)
+
+    setIsPanning({
+      pointerId: e.pointerId,
+      startX: x,
+      startScroll: scrollLeft
+    })
   }
 
   const handlePointerMove = (e) => {
@@ -829,17 +791,9 @@ export default function TimelinePanel() {
     const canvas = canvasRef.current
 
     if (isScrubbing) {
-      const t = Math.max(0, (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec)
+      const t = getTimeFromCanvasX(x)
       setCurrentTime(t)
-      autoScrollDuringPointer(x, t)
       if (canvas) canvas.style.cursor = 'ew-resize'
-      return
-    }
-
-    if (isPanning) {
-      const dx = x - isPanning.startX
-      setScrollLeft(clampScroll(isPanning.startScroll - dx))
-      if (canvas) canvas.style.cursor = 'grabbing'
       return
     }
 
@@ -851,9 +805,20 @@ export default function TimelinePanel() {
 
       setDraggingHit(prev => ({ ...prev, currentFrame: newFrame }))
       setCurrentTime(t)
-      autoScrollDuringPointer(x, t)
-
       if (canvas) canvas.style.cursor = 'ew-resize'
+      return
+    }
+
+    if (isPanning) {
+      const dx = x - isPanning.startX
+      const targetScroll = isPanning.startScroll - dx
+
+      if (rafPanRef.current) cancelAnimationFrame(rafPanRef.current)
+      rafPanRef.current = requestAnimationFrame(() => {
+        setScrollAndCenterTime(targetScroll)
+      })
+
+      if (canvas) canvas.style.cursor = 'grabbing'
       return
     }
 
@@ -870,21 +835,27 @@ export default function TimelinePanel() {
         if (canvas) canvas.style.cursor = 'ew-resize'
       } else if (!hit && hoveredHit) {
         setHoveredHit(null)
-        if (canvas) canvas.style.cursor = 'default'
+        if (canvas) canvas.style.cursor = 'grab'
       } else if (!hit && canvas) {
-        canvas.style.cursor = 'default'
+        canvas.style.cursor = 'grab'
       }
     } else {
       if (hoveredHit) setHoveredHit(null)
-      if (canvas) canvas.style.cursor = 'default'
+      if (canvas) canvas.style.cursor = 'grab'
     }
   }
 
   const handlePointerUp = (e) => {
     e.target.releasePointerCapture(e.pointerId)
     setIsScrubbing(false)
-    setIsPanning(false)
-    if (canvasRef.current) canvasRef.current.style.cursor = 'default'
+    setIsPanning(null)
+
+    if (rafPanRef.current) {
+      cancelAnimationFrame(rafPanRef.current)
+      rafPanRef.current = null
+    }
+
+    if (canvasRef.current) canvasRef.current.style.cursor = 'grab'
 
     if (draggingHit) {
       const hitId = draggingHit.id
@@ -902,13 +873,13 @@ export default function TimelinePanel() {
   }
 
   return (
-    <div className="h-[350px] w-full relative flex flex-col bg-[#09090b] select-none text-left">
+    <div className="h-full w-full relative flex flex-col bg-[#09090b] select-none">
       <div className="h-[42px] shrink-0 px-4 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20">
         <div className="text-xs text-zinc-200 font-bold bg-zinc-800/80 px-2 py-1 rounded tracking-wider border border-zinc-700">
           TIMELINE
         </div>
         <div className="text-xs text-zinc-500 font-mono">
-          <span className="text-zinc-300">Click</span> Jump | <span className="text-zinc-300">Drag blue line</span> Auto-scroll | <span className="text-zinc-300">Empty click</span> Clear selection
+          <span className="text-zinc-300">Drag empty area</span> Pan | <span className="text-zinc-300">Drag blue line</span> Scrub | <span className="text-zinc-300">Drag hit</span> Move hit
         </div>
         <PlaybackUI />
         {(draggingHit?.currentFrame !== undefined) && (
@@ -930,7 +901,7 @@ export default function TimelinePanel() {
             e.preventDefault()
             clearSelection()
           }}
-          style={{ touchAction: 'none' }}
+          style={{ touchAction: 'none', cursor: 'grab' }}
         />
       </div>
 
@@ -938,11 +909,17 @@ export default function TimelinePanel() {
         ref={scrollBarRef}
         className="h-[14px] w-full shrink-0 overflow-x-scroll overflow-y-hidden bg-zinc-950 border-t border-zinc-800"
         onScroll={(e) => {
+          const nextScroll = clampScroll(e.target.scrollLeft)
           if (isProgrammaticScrollRef.current) {
             isProgrammaticScrollRef.current = false
             return
           }
-          setScrollLeft(clampScroll(e.target.scrollLeft))
+          isSyncingFromScrollRef.current = true
+          setScrollLeft(nextScroll)
+          setCurrentTime(getCenterTimeFromScroll(nextScroll))
+          requestAnimationFrame(() => {
+            isSyncingFromScrollRef.current = false
+          })
         }}
       >
         <div style={{ width: `${(durationSec * pxPerSec) + TRACK_LABELS_WIDTH}px`, height: '1px' }} />
