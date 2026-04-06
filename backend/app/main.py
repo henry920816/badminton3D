@@ -8,7 +8,7 @@ from io import StringIO
 
 from .db import engine, get_db
 from .models import Base, Match, Rally, Hit, BallTraj, Anomaly
-from .schemas import MatchOut, TimelineOut, TrajPoint, HitPatch, AnomalyPatch
+from .schemas import MatchOut, TimelineOut, TrajPoint, HitPatch, AnomalyPatch, TrajRepairPayload
 from .seed import seed_demo
 
 app = FastAPI(title="Badminton 3D Debugger MVP", version="0.1.0")
@@ -163,6 +163,72 @@ def patch_anomaly(anomaly_id: int, payload: AnomalyPatch, db: Session = Depends(
 
     db.commit()
     return {"ok": True}
+
+@app.patch("/matches/{match_id}/traj/repair")
+def repair_traj(match_id: int, payload: TrajRepairPayload, db: Session = Depends(get_db)):
+    if not db.get(Match, match_id):
+        raise HTTPException(status_code=404, detail="match not found")
+        
+    start_frame = min(payload.start_frame, payload.end_frame)
+    end_frame = max(payload.start_frame, payload.end_frame)
+
+    if start_frame == end_frame:
+        return {"ok": True, "count": 0}
+
+    # Fetch boundary points
+    p_start = db.query(BallTraj).filter(BallTraj.match_id == match_id, BallTraj.frame == start_frame).first()
+    p_end = db.query(BallTraj).filter(BallTraj.match_id == match_id, BallTraj.frame == end_frame).first()
+
+    if not p_start or not p_end:
+        raise HTTPException(status_code=400, detail="Start or end frame not found in trajectory data")
+
+    # Fetch points in between
+    points = db.query(BallTraj).filter(
+        BallTraj.match_id == match_id,
+        BallTraj.frame > start_frame,
+        BallTraj.frame < end_frame
+    ).all()
+
+    frame_diff = end_frame - start_frame
+    
+    # Fetch adjacent points for Catmull-Rom Spline
+    p_pre = db.query(BallTraj).filter(BallTraj.match_id == match_id, BallTraj.frame < start_frame).order_by(BallTraj.frame.desc()).first()
+    p_post = db.query(BallTraj).filter(BallTraj.match_id == match_id, BallTraj.frame > end_frame).order_by(BallTraj.frame.asc()).first()
+
+    # Calculate tangents (M0 for start, M1 for end)
+    v0_x, v0_y, v0_z = p_end.x - p_start.x, p_end.y - p_start.y, p_end.z - p_start.z
+    if p_pre:
+        dt = end_frame - p_pre.frame
+        v0_x = (p_end.x - p_pre.x) / dt * frame_diff
+        v0_y = (p_end.y - p_pre.y) / dt * frame_diff
+        v0_z = (p_end.z - p_pre.z) / dt * frame_diff
+
+    v1_x, v1_y, v1_z = p_end.x - p_start.x, p_end.y - p_start.y, p_end.z - p_start.z
+    if p_post:
+        dt = p_post.frame - start_frame
+        v1_x = (p_post.x - p_start.x) / dt * frame_diff
+        v1_y = (p_post.y - p_start.y) / dt * frame_diff
+        v1_z = (p_post.z - p_start.z) / dt * frame_diff
+
+    count = 0
+    for p in points:
+        t = (p.frame - start_frame) / frame_diff
+        t2 = t * t
+        t3 = t2 * t
+        
+        # Cubic Hermite spline basis functions
+        h00 = 2 * t3 - 3 * t2 + 1
+        h10 = t3 - 2 * t2 + t
+        h01 = -2 * t3 + 3 * t2
+        h11 = t3 - t2
+        
+        p.x = h00 * p_start.x + h10 * v0_x + h01 * p_end.x + h11 * v1_x
+        p.y = h00 * p_start.y + h10 * v0_y + h01 * p_end.y + h11 * v1_y
+        p.z = h00 * p_start.z + h10 * v0_z + h01 * p_end.z + h11 * v1_z
+        count += 1
+
+    db.commit()
+    return {"ok": True, "count": count}
 
 @app.get("/export/csv")
 def export_csv(match_id: int, db: Session = Depends(get_db)):

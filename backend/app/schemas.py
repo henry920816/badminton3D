@@ -39,3 +39,7 @@ class AnomalyPatch(BaseModel):
     comment: Optional[str] = None
     severity: Optional[int] = None
     kind: Optional[str] = None
+
+class TrajRepairPayload(BaseModel):
+    start_frame: int
+    end_frame: int
