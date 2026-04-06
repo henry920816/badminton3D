@@ -133,10 +133,6 @@ export default function VideoPanel() {
 
   return (
     <div className="relative w-full h-full bg-black flex flex-col">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800 bg-zinc-950">
-        <div className="text-sm font-medium">Source Video</div>
-      </div>
-
       <div className="flex-1 flex items-center justify-center bg-black min-h-0">
         {!activeSrc && (
           <div className="text-zinc-400 text-sm px-4 text-center">
@@ -151,7 +147,6 @@ export default function VideoPanel() {
             className="max-h-full max-w-full"
             onTimeUpdate={onTimeUpdate}
             playsInline
-            controls
           />
         )}
       </div>
@@ -167,11 +162,6 @@ export default function VideoPanel() {
           />
         </label>
 
-        {fileNameMap[safeActiveCameraId] && (
-          <div className="mt-2 text-xs text-zinc-500 break-all">
-            {fileNameMap[safeActiveCameraId]}
-          </div>
-        )}
       </div>
     </div>
   )
