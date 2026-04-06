@@ -19,7 +19,6 @@ function PlaybackUI({
   const holdIntervalRef = useRef(null)
 
   const stepSmall = 1 / fps
-  const stepBig = 5 / fps
 
   const stopHold = () => {
     if (holdTimerRef.current) {
@@ -76,7 +75,9 @@ function PlaybackUI({
       </button>
 
       <button
-        onClick={() => setCurrentTime(Math.max(0, currentTime - stepSmall))}
+        onClick={() => {
+          setCurrentTime(Math.max(0, currentTime - stepSmall))
+        }}
         {...holdEvents(-stepSmall)}
         className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
         title="Prev frame"
@@ -87,7 +88,9 @@ function PlaybackUI({
       </button>
 
       <button
-        onClick={() => setCurrentTime(selection.inTime || 0)}
+        onClick={() => {
+          setCurrentTime(selection.inTime || 0)
+        }}
         className="w-7 h-7 flex items-center justify-center text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
         title="Replay from start"
       >
@@ -114,7 +117,9 @@ function PlaybackUI({
       </button>
 
       <button
-        onClick={() => setCurrentTime(currentTime + stepSmall)}
+        onClick={() => {
+          setCurrentTime(currentTime + stepSmall)
+        }}
         {...holdEvents(stepSmall)}
         className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
         title="Next frame"
@@ -154,6 +159,7 @@ export default function TimelinePanel() {
   const durationSec = useAppStore(s => s.durationSec) || 60
   const currentTime = useAppStore(s => s.currentTime)
   const setCurrentTime = useAppStore(s => s.setCurrentTime)
+  const playing = useAppStore(s => s.playing)
 
   const rallies = useAppStore(s => s.rallies) || []
   const hits = useAppStore(s => s.hits) || []
@@ -175,8 +181,6 @@ export default function TimelinePanel() {
   const setSelectionOut = useAppStore(s => s.setSelectionOut)
   const setSelectionRange = useAppStore(s => s.setSelectionRange)
   const clearSelection = useAppStore(s => s.clearSelection)
-
-  const playing = useAppStore(s => s.playing)
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
   const [hoveredHit, setHoveredHit] = useState(null)
