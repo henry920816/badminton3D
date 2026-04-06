@@ -2,7 +2,10 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useAppStore } from '../store.js'
 
-function PlaybackUI() {
+function PlaybackUI({
+  goPrevRally,
+  goNextRally,
+}) {
   const playing = useAppStore(s => s.playing)
   const togglePlaying = useAppStore(s => s.togglePlaying)
   const playbackRate = useAppStore(s => s.playbackRate)
@@ -53,13 +56,22 @@ function PlaybackUI() {
   return (
     <div className="flex items-center gap-3 ml-6 transition-opacity duration-300 opacity-100">
       <button
-        onClick={() => setCurrentTime(Math.max(0, currentTime - stepBig))}
-        {...holdEvents(-stepBig)}
-        className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
-        title="Backward"
+        onClick={goPrevRally}
+        className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
+        title="Previous rally"
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
           <path d="M11 18V6L2.5 12 11 18zm10 0V6l-8.5 6 8.5 6z" />
+        </svg>
+      </button>
+
+      <button
+        onClick={goNextRally}
+        className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
+        title="Next rally"
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M13 6v12l8.5-6L13 6zM3 6v12l8.5-6L3 6z" />
         </svg>
       </button>
 
@@ -109,17 +121,6 @@ function PlaybackUI() {
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
           <path d="M9 6v12l8.5-6L9 6zm-4 0h2v12H5z" />
-        </svg>
-      </button>
-
-      <button
-        onClick={() => setCurrentTime(currentTime + stepBig)}
-        {...holdEvents(stepBig)}
-        className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
-        title="Forward"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M13 6v12l8.5-6L13 6zM3 6v12l8.5-6L3 6z" />
         </svg>
       </button>
 
@@ -221,6 +222,65 @@ export default function TimelinePanel() {
     if (Math.abs(targetScroll - scrollLeft) > 0.5) {
       setScrollLeft(targetScroll)
     }
+  }
+
+  const goToRallyByIndex = (targetIdx) => {
+    const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
+    if (!sorted.length) return
+
+    const idx = Math.max(0, Math.min(sorted.length - 1, targetIdx))
+    const rally = sorted[idx]
+    const startSec = rally.start_frame / fps
+    const endSec = rally.end_frame / fps
+
+    setSelectionRange(startSec, endSec)
+    setCurrentTime(startSec)
+    setActiveItem('rally', rally.id)
+    ensureTimeVisible(startSec)
+  }
+
+  const goPrevRally = () => {
+    const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
+    if (!sorted.length) return
+
+    if (activeItem?.type === 'rally') {
+      const idx = sorted.findIndex(r => r.id === activeItem.id)
+      if (idx > 0) {
+        goToRallyByIndex(idx - 1)
+        return
+      }
+    }
+
+    const curFrame = Math.round(currentTime * fps)
+    let targetIdx = -1
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      if (sorted[i].start_frame < curFrame) {
+        targetIdx = i
+        break
+      }
+    }
+
+    if (targetIdx === -1) targetIdx = 0
+    goToRallyByIndex(targetIdx)
+  }
+
+  const goNextRally = () => {
+    const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
+    if (!sorted.length) return
+
+    if (activeItem?.type === 'rally') {
+      const idx = sorted.findIndex(r => r.id === activeItem.id)
+      if (idx !== -1 && idx < sorted.length - 1) {
+        goToRallyByIndex(idx + 1)
+        return
+      }
+    }
+
+    const curFrame = Math.round(currentTime * fps)
+    let targetIdx = sorted.findIndex(r => r.start_frame > curFrame)
+
+    if (targetIdx === -1) targetIdx = sorted.length - 1
+    goToRallyByIndex(targetIdx)
   }
 
   useEffect(() => {
@@ -879,9 +939,12 @@ export default function TimelinePanel() {
           TIMELINE
         </div>
         <div className="text-xs text-zinc-500 font-mono">
-          <span className="text-zinc-300">Drag empty area</span> Pan | <span className="text-zinc-300">Drag blue line</span> Scrub | <span className="text-zinc-300">Drag hit</span> Move hit
+          <span className="text-zinc-300">Drag empty area</span> Pan | <span className="text-zinc-300">Drag blue line</span> Scrub | <span className="text-zinc-300">Drag hit</span> Move hit | <span className="text-zinc-300">Rally buttons</span> Jump rally
         </div>
-        <PlaybackUI />
+        <PlaybackUI
+          goPrevRally={goPrevRally}
+          goNextRally={goNextRally}
+        />
         {(draggingHit?.currentFrame !== undefined) && (
           <div className="ml-3 text-xs text-amber-300 font-semibold px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 rounded">
             Hit #{draggingHit.id} → Frame {draggingHit.currentFrame}
