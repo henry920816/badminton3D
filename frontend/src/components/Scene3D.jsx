@@ -7,6 +7,8 @@ import { useAppStore } from '../store.js'
 function AnimatedTrajectory({ points }) {
   const currentTime = useAppStore(s => s.currentTime)
   const fps = useAppStore(s => s.fps) || 60
+  const selectedTrajFrames = useAppStore(s => s.selectedTrajFrames) || []
+  const toggleTrajFrameSelection = useAppStore(s => s.toggleTrajFrameSelection)
   
   const { pathVectors, trailVectors, ballPos } = useMemo(() => {
     if (!points || points.length < 2) return { pathVectors: [], trailVectors: [], ballPos: null };
@@ -82,6 +84,28 @@ function AnimatedTrajectory({ points }) {
           <pointLight distance={3} intensity={3} color="#fcd34d" />
         </mesh>
       )}
+      
+      {/* Clickable trajectory points for repair selection */}
+      {points.map(p => {
+        const isSelected = selectedTrajFrames.includes(p.frame);
+        // Only show small spheres or larger ones if selected
+        const radius = isSelected ? 0.06 : 0.02;
+        const color = isSelected ? '#08597e' : '#94a3b8';
+        const opacity = isSelected ? 1.0 : 0.4;
+         return (
+            <mesh 
+                key={p.frame} 
+                position={[p.x, -p.y, -p.z]} 
+                onClick={(e) => {
+                    e.stopPropagation();
+                    toggleTrajFrameSelection(p.frame);
+                }}
+            >
+                <sphereGeometry args={[radius, 8, 8]} />
+                <meshBasicMaterial color={color} transparent opacity={opacity} />
+            </mesh>
+         )
+      })}
     </group>
   );
 }
@@ -205,6 +229,38 @@ export default function Scene3D() {
   const trajMap = useAppStore(s => s.trajByFrame)
   const rallies = useAppStore(s => s.rallies) || []
   const currentTime = useAppStore(s => s.currentTime)
+  const matchId = useAppStore(s => s.matchId)
+  const selectedTrajFrames = useAppStore(s => s.selectedTrajFrames)
+  const clearTrajSelection = useAppStore(s => s.clearTrajSelection)
+  const [repairing, setRepairing] = React.useState(false)
+  const upsertTrajPoints = useAppStore(s => s.upsertTrajPoints)
+
+  const handleRepair = async () => {
+    if (selectedTrajFrames.length !== 2) return;
+    setRepairing(true);
+    try {
+      const { api } = await import('../api.js');
+      const start_frame = Math.min(...selectedTrajFrames);
+      const end_frame = Math.max(...selectedTrajFrames);
+      
+      const res = await api.repairTraj(matchId, {
+        start_frame: start_frame,
+        end_frame: end_frame
+      });
+      
+      // refetch the repaired points
+      const updatedPts = await api.getTraj(matchId, start_frame, end_frame);
+      upsertTrajPoints(updatedPts);
+      
+      alert(`修復成功！已更新 ${res.count} 個 frame 的資料。`);
+      clearTrajSelection();
+    } catch (e) {
+      console.error(e);
+      alert('修復失敗：' + String(e));
+    } finally {
+      setRepairing(false);
+    }
+  }
 
   const points = useMemo(() => {
     // If selection exists, prefer selection range
@@ -248,6 +304,31 @@ export default function Scene3D() {
 
   return (
     <div className="w-full h-full relative bg-zinc-950 overflow-hidden">
+      {selectedTrajFrames.length > 0 && (
+        <div className="absolute top-4 right-4 z-10 bg-zinc-900/50 border border-zinc-800/50 rounded p-3 text-sm shadow-xl flex flex-col gap-2 w-64 backdrop-blur-md">
+          <div className="text-zinc-200 font-semibold mb-1">修復軌跡資料 (三次赫米特插值)</div>
+          <div className="text-zinc-400 text-xs">
+            已選取點：{selectedTrajFrames.join(' 和 ')}<br/>
+            (請在畫面上點選兩個異常頭尾的軌跡點)
+          </div>
+          <div className="flex gap-2 mt-2">
+            <button 
+              onClick={handleRepair}
+              disabled={selectedTrajFrames.length !== 2 || repairing}
+              className="flex-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white rounded px-3 py-1 font-medium transition-colors"
+            >
+              {repairing ? '修復中...' : '執行修復'}
+            </button>
+            <button 
+              onClick={clearTrajSelection}
+              disabled={repairing}
+              className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-zinc-300 transition-colors"
+            >
+              清除
+            </button>
+          </div>
+        </div>
+      )}
       <Canvas camera={{ position: [8, 5, 8], fov: 55 }}>
         <ambientLight intensity={0.5} />
         <directionalLight position={[10, 20, 10]} intensity={1.5} castShadow />

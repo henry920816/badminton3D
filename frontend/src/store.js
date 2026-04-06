@@ -30,6 +30,9 @@ export const useAppStore = create((set, get) => ({
 
   // active selection
   activeItem: null, // {type, id}
+  
+  // trajectory point selection for repair
+  selectedTrajFrames: [],
 
   // actions
   setZoom: (px) => set({ pxPerSec: px }),
@@ -85,6 +88,19 @@ export const useAppStore = create((set, get) => ({
   setActiveCamera: (id) => set({ activeCameraId: id }),
 
   setActiveItem: (type, id) => set({ activeItem: { type, id }}),
+
+  toggleTrajFrameSelection: (frame) => set(s => {
+    let next = [...s.selectedTrajFrames];
+    if (next.includes(frame)) {
+      next = next.filter(f => f !== frame);
+    } else {
+      next.push(frame);
+      if (next.length > 2) next.shift(); // Keep only last 2 selections
+    }
+    return { selectedTrajFrames: next };
+  }),
+  
+  clearTrajSelection: () => set({ selectedTrajFrames: [] }),
 
   upsertTrajPoints: (points) => {
     const map = new Map(get().trajByFrame);
