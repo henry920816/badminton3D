@@ -3,21 +3,24 @@ import { useAppStore } from "../store"
 
 export default function VideoPanel() {
   const videoRef = useRef(null)
+  const syncFromVideoRef = useRef(false)
+  const lastAppliedTimeRef = useRef(null)
 
   const storeCameras = useAppStore((s) => s.cameras)
   const activeCameraId = useAppStore((s) => s.activeCameraId)
   const setActiveCamera = useAppStore((s) => s.setActiveCamera)
 
   const currentFrame = useAppStore((s) => s.currentFrame)
+  const currentTime = useAppStore((s) => s.currentTime)
   const setCurrentFrame = useAppStore((s) => s.setCurrentFrame)
+  const setCurrentTime = useAppStore((s) => s.setCurrentTime)
 
-  const fps = useAppStore((s) => s.fps)
+  const fps = useAppStore((s) => s.fps) || 60
   const playing = useAppStore((s) => s.playing)
   const setPlaying = useAppStore((s) => s.setPlaying)
   const previewRange = useAppStore((s) => s.previewRange)
 
   const [videoSrcMap, setVideoSrcMap] = useState({})
-  const [fileNameMap, setFileNameMap] = useState({})
 
   const cameras = useMemo(() => {
     if (Array.isArray(storeCameras) && storeCameras.length > 0) return storeCameras
@@ -58,14 +61,11 @@ export default function VideoPanel() {
       }
     })
 
-    setFileNameMap((prev) => ({
-      ...prev,
-      [camId]: file.name,
-    }))
-
+    lastAppliedTimeRef.current = 0
     setActiveCamera(camId)
     setPlaying(false)
     setCurrentFrame(0)
+    setCurrentTime(0)
   }
 
   useEffect(() => {
@@ -83,25 +83,101 @@ export default function VideoPanel() {
   useEffect(() => {
     const v = videoRef.current
     if (!v || !fps) return
+    if (syncFromVideoRef.current) return
 
-    const t = currentFrame / fps
-    if (Math.abs(v.currentTime - t) > 0.02) {
-      v.currentTime = t
+    const timeFromFrame = currentFrame / fps
+    const targetTime =
+      typeof currentTime === "number" && Number.isFinite(currentTime)
+        ? currentTime
+        : timeFromFrame
+
+    if (!Number.isFinite(targetTime)) return
+
+    const diffFromVideo = Math.abs(v.currentTime - targetTime)
+    const diffFromLastApplied =
+      lastAppliedTimeRef.current == null
+        ? Infinity
+        : Math.abs(lastAppliedTimeRef.current - targetTime)
+
+    const shouldSeek =
+      diffFromVideo > 0.03 && diffFromLastApplied > 0.001
+
+    if (shouldSeek) {
+      lastAppliedTimeRef.current = targetTime
+      v.currentTime = targetTime
     }
-  }, [currentFrame, fps, activeSrc])
+  }, [currentTime, currentFrame, fps, activeSrc])
+
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v || !fps) return
+
+    let callbackId = null
+    let stopped = false
+
+    const updateFrame = (now, meta) => {
+      if (stopped || !videoRef.current) return
+
+      const mediaTime = meta?.mediaTime ?? videoRef.current.currentTime
+      const frame = Math.round(mediaTime * fps)
+
+      syncFromVideoRef.current = true
+      lastAppliedTimeRef.current = mediaTime
+
+      if (previewRange && frame >= previewRange.endFrame) {
+        const endFrame = previewRange.endFrame
+        const endTime = endFrame / fps
+        setCurrentFrame(endFrame)
+        setCurrentTime(endTime)
+        setPlaying(false)
+        syncFromVideoRef.current = false
+        return
+      }
+
+      setCurrentFrame(frame)
+      setCurrentTime(mediaTime)
+      syncFromVideoRef.current = false
+
+      if (videoRef.current.requestVideoFrameCallback && !stopped) {
+        callbackId = videoRef.current.requestVideoFrameCallback(updateFrame)
+      }
+    }
+
+    if (v.requestVideoFrameCallback) {
+      callbackId = v.requestVideoFrameCallback(updateFrame)
+    }
+
+    return () => {
+      stopped = true
+      if (callbackId && v.cancelVideoFrameCallback) {
+        v.cancelVideoFrameCallback(callbackId)
+      }
+    }
+  }, [fps, previewRange, setCurrentFrame, setCurrentTime, setPlaying, activeSrc])
 
   function onTimeUpdate() {
     const v = videoRef.current
     if (!v || !fps) return
+    if (v.requestVideoFrameCallback) return
 
     const frame = Math.round(v.currentTime * fps)
 
+    syncFromVideoRef.current = true
+    lastAppliedTimeRef.current = v.currentTime
+
     if (previewRange && frame >= previewRange.endFrame) {
+      const endFrame = previewRange.endFrame
+      const endTime = endFrame / fps
+      setCurrentFrame(endFrame)
+      setCurrentTime(endTime)
       setPlaying(false)
+      syncFromVideoRef.current = false
       return
     }
 
     setCurrentFrame(frame)
+    setCurrentTime(v.currentTime)
+    syncFromVideoRef.current = false
   }
 
   useEffect(() => {
@@ -133,7 +209,7 @@ export default function VideoPanel() {
 
   return (
     <div className="relative w-full h-full bg-black flex flex-col">
-      <div className="flex-1 flex items-center justify-center bg-black min-h-0">
+      <div className="flex-1 flex items-center justify-center bg-black min-h-0 overflow-hidden">
         {!activeSrc && (
           <div className="text-zinc-400 text-sm px-4 text-center">
             沒有影片來源。請下方選擇檔案。
@@ -147,21 +223,23 @@ export default function VideoPanel() {
             className="max-h-full max-w-full"
             onTimeUpdate={onTimeUpdate}
             playsInline
+            onClick={() => setPlaying((p) => !p)}
           />
         )}
       </div>
 
       <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950">
-        <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
-          <span>選擇檔案</span>
+        <label className="inline-flex items-center">
+          <span className="px-3 py-1.5 text-sm text-white bg-zinc-700 hover:bg-zinc-600 rounded cursor-pointer">
+            選擇檔案
+          </span>
           <input
             type="file"
             accept="video/*"
             onChange={(e) => onPickLocal(safeActiveCameraId, e.target.files?.[0])}
-            className="text-sm"
+            className="hidden"
           />
         </label>
-
       </div>
     </div>
   )
