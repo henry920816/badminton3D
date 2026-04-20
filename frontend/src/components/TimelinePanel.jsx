@@ -53,10 +53,10 @@ function PlaybackUI({
   })
 
   return (
-    <div className="flex items-center gap-3 ml-6 transition-opacity duration-300 opacity-100">
+    <div className="flex items-center gap-3 ml-6 transition-opacity duration-300 opacity-100 min-w-0">
       <button
         onClick={goPrevRally}
-        className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
+        className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
         title="Previous rally"
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
@@ -66,7 +66,7 @@ function PlaybackUI({
 
       <button
         onClick={goNextRally}
-        className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
+        className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
         title="Next rally"
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
@@ -79,7 +79,7 @@ function PlaybackUI({
           setCurrentTime(Math.max(0, currentTime - stepSmall))
         }}
         {...holdEvents(-stepSmall)}
-        className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
+        className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
         title="Prev frame"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -91,7 +91,7 @@ function PlaybackUI({
         onClick={() => {
           setCurrentTime(selection.inTime || 0)
         }}
-        className="w-7 h-7 flex items-center justify-center text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
+        className="w-7 h-7 flex items-center justify-center text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
         title="Replay from start"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -102,7 +102,7 @@ function PlaybackUI({
 
       <button
         onClick={togglePlaying}
-        className="w-8 h-8 flex items-center justify-center bg-cyan-600 hover:bg-cyan-500 rounded-md text-white shadow-[0_0_10px_rgba(8,145,178,0.3)] transition-transform active:scale-95"
+        className="w-8 h-8 flex items-center justify-center bg-cyan-600 hover:bg-cyan-500 rounded-md text-white shadow-[0_0_10px_rgba(8,145,178,0.3)] transition-transform active:scale-95 shrink-0"
       >
         {playing ? (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -121,7 +121,7 @@ function PlaybackUI({
           setCurrentTime(currentTime + stepSmall)
         }}
         {...holdEvents(stepSmall)}
-        className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md"
+        className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
         title="Next frame"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -129,7 +129,7 @@ function PlaybackUI({
         </svg>
       </button>
 
-      <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden">
+      <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
         {[0.5, 1, 2].map(speed => (
           <button
             key={speed}
@@ -937,26 +937,31 @@ export default function TimelinePanel() {
   }
 
   return (
-    <div className="h-full w-full relative flex flex-col bg-[#09090b] select-none">
-      <div className="h-[42px] shrink-0 px-4 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20">
-        <div className="text-xs text-zinc-200 font-bold bg-zinc-800/80 px-2 py-1 rounded tracking-wider border border-zinc-700">
+    <div className="h-full w-full min-h-0 min-w-0 relative flex flex-col bg-[#09090b] select-none overflow-hidden">
+      <div className="h-[42px] shrink-0 px-4 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20 min-w-0 overflow-hidden">
+        <div className="text-xs text-zinc-200 font-bold bg-zinc-800/80 px-2 py-1 rounded tracking-wider border border-zinc-700 shrink-0">
           TIMELINE
         </div>
-        <div className="text-xs text-zinc-500 font-mono">
+
+        <div className="text-xs text-zinc-500 font-mono min-w-0 truncate">
           <span className="text-zinc-300">Drag empty area</span> Pan | <span className="text-zinc-300">Drag blue line</span> Scrub | <span className="text-zinc-300">Drag hit</span> Move hit | <span className="text-zinc-300">Rally buttons</span> Jump rally
         </div>
-        <PlaybackUI
-          goPrevRally={goPrevRally}
-          goNextRally={goNextRally}
-        />
+
+        <div className="min-w-0 overflow-hidden">
+          <PlaybackUI
+            goPrevRally={goPrevRally}
+            goNextRally={goNextRally}
+          />
+        </div>
+
         {(draggingHit?.currentFrame !== undefined) && (
-          <div className="ml-3 text-xs text-amber-300 font-semibold px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 rounded">
+          <div className="ml-3 text-xs text-amber-300 font-semibold px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 rounded shrink-0">
             Hit #{draggingHit.id} → Frame {draggingHit.currentFrame}
           </div>
         )}
       </div>
 
-      <div className="flex-1 relative overflow-hidden bg-[#09090b]" ref={containerRef}>
+      <div className="flex-1 min-h-0 min-w-0 relative overflow-hidden bg-[#09090b]" ref={containerRef}>
         <canvas
           ref={canvasRef}
           className="absolute inset-0 w-full h-full block"
