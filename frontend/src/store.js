@@ -1,5 +1,11 @@
 import { create } from 'zustand'
 
+function normalizeRange(start, end) {
+  const a = Math.max(0, Math.min(start, end))
+  const b = Math.max(0, Math.max(start, end))
+  return { start: a, end: b }
+}
+
 export const useAppStore = create((set, get) => ({
   matchId: 1,
   fps: 50,
@@ -7,37 +13,30 @@ export const useAppStore = create((set, get) => ({
   cameras: [],
   activeCameraId: 'cam1',
 
-  // time state (seconds + frame)
   currentTime: 0,
   currentFrame: 0,
   playing: false,
   playbackRate: 1.0,
 
-  // selection range (seconds)
   selection: { inTime: null, outTime: null },
 
-  // timeline objects
   rallies: [],
   hits: [],
   anomalies: [],
 
-  // trajectory cache
-  trajByFrame: new Map(), // frame -> {frame,t_sec,x,y,z,speed,confidence}
+  trajByFrame: new Map(),
+  loadedTrajRanges: [],
 
-  // timeline view
-  pxPerSec: 100, // zoom level
-  scrollLeft: 0, // pan offset
+  pxPerSec: 100,
+  scrollLeft: 0,
 
-  // active selection
-  activeItem: null, // {type, id}
-  
-  // trajectory point selection for repair
+  activeItem: null,
   selectedTrajFrames: [],
+  repairMode: false,
 
-  // actions
   setZoom: (px) => set({ pxPerSec: px }),
   setScrollLeft: (x) => set({ scrollLeft: x }),
-  
+
   setMatchMeta: (m) => set({
     fps: m.fps,
     durationSec: m.duration_sec,
@@ -46,15 +45,20 @@ export const useAppStore = create((set, get) => ({
   }),
 
   setCurrentTime: (t) => {
-    const fps = get().fps || 60;
-    const frame = Math.max(0, Math.round(t * fps));
-    set({ currentTime: t, currentFrame: frame });
+    const fps = get().fps || 60
+    const durationSec = get().durationSec || 0
+    const clamped = durationSec > 0 ? Math.min(Math.max(0, t), durationSec) : Math.max(0, t)
+    const frame = Math.max(0, Math.round(clamped * fps))
+    set({ currentTime: clamped, currentFrame: frame })
   },
 
   setCurrentFrame: (f) => {
-    const fps = get().fps || 60;
-    const t = f / fps;
-    set({ currentFrame: f, currentTime: t });
+    const fps = get().fps || 60
+    const durationSec = get().durationSec || 0
+    const maxFrame = durationSec > 0 ? Math.round(durationSec * fps) : Number.MAX_SAFE_INTEGER
+    const clampedFrame = Math.max(0, Math.min(f, maxFrame))
+    const t = clampedFrame / fps
+    set({ currentFrame: clampedFrame, currentTime: t })
   },
 
   setPlaying: (v) => set({ playing: v }),
@@ -62,73 +66,105 @@ export const useAppStore = create((set, get) => ({
   setPlaybackRate: (r) => set({ playbackRate: r }),
 
   setSelectionIn: () => {
-    const t = get().currentTime;
-    const sel = get().selection;
-    set({ selection: { ...sel, inTime: t }});
+    const t = get().currentTime
+    const sel = get().selection
+    set({ selection: { ...sel, inTime: t } })
   },
   setSelectionOut: () => {
-    const t = get().currentTime;
-    const sel = get().selection;
-    set({ selection: { ...sel, outTime: t }});
+    const t = get().currentTime
+    const sel = get().selection
+    set({ selection: { ...sel, outTime: t } })
   },
   setSelectionRange: (inTime, outTime) => {
-    const a = inTime, b = outTime;
-    const lo = Math.min(a, b);
-    const hi = Math.max(a, b);
-    set({ selection: { inTime: lo, outTime: hi }});
+    const lo = Math.min(inTime, outTime)
+    const hi = Math.max(inTime, outTime)
+    set({ selection: { inTime: lo, outTime: hi } })
   },
-  clearSelection: () => set({ selection: { inTime: null, outTime: null }}),
+  clearSelection: () => set({ selection: { inTime: null, outTime: null } }),
 
   setTimelineData: ({ rallies, hits, anomalies }) => set({ rallies, hits, anomalies }),
 
   updateHit: (id, updates) => set(s => ({
-    hits: s.hits.map(h => h.id === id ? { ...h, ...updates } : h)
+    hits: s.hits.map(h => h.id === id ? { ...h, ...updates } : h),
+  })),
+
+  updateAnomaly: (id, updates) => set(s => ({
+    anomalies: s.anomalies.map(a => a.id === id ? { ...a, ...updates } : a),
   })),
 
   setActiveCamera: (id) => set({ activeCameraId: id }),
+  setActiveItem: (type, id) => set({ activeItem: { type, id } }),
 
-  setActiveItem: (type, id) => set({ activeItem: { type, id }}),
+  setRepairMode: (v) => set({ repairMode: v }),
+  toggleRepairMode: () => set(s => ({ repairMode: !s.repairMode })),
 
   toggleTrajFrameSelection: (frame) => set(s => {
-    let next = [...s.selectedTrajFrames];
+    let next = [...s.selectedTrajFrames]
     if (next.includes(frame)) {
-      next = next.filter(f => f !== frame);
+      next = next.filter(f => f !== frame)
     } else {
-      next.push(frame);
-      if (next.length > 2) next.shift(); // Keep only last 2 selections
+      next.push(frame)
+      if (next.length > 2) next.shift()
     }
-    return { selectedTrajFrames: next };
+    return { selectedTrajFrames: next }
   }),
-  
+
   clearTrajSelection: () => set({ selectedTrajFrames: [] }),
 
   upsertTrajPoints: (points) => {
-    const map = new Map(get().trajByFrame);
-    for (const p of points) map.set(p.frame, p);
-    set({ trajByFrame: map });
+    const map = new Map(get().trajByFrame)
+    for (const p of points) {
+      map.set(p.frame, p)
+    }
+    set({ trajByFrame: map })
   },
 
-  // helpers
+  markTrajRangeLoaded: (start, end) => {
+    const nextRange = normalizeRange(start, end)
+    const ranges = [...get().loadedTrajRanges, nextRange].sort((a, b) => a.start - b.start)
+    const merged = []
+    for (const range of ranges) {
+      if (!merged.length) {
+        merged.push(range)
+        continue
+      }
+      const last = merged[merged.length - 1]
+      if (range.start <= last.end + 1) {
+        last.end = Math.max(last.end, range.end)
+      } else {
+        merged.push({ ...range })
+      }
+    }
+    set({ loadedTrajRanges: merged })
+  },
+
+  hasTrajRangeLoaded: (start, end) => {
+    const target = normalizeRange(start, end)
+    return get().loadedTrajRanges.some(range => target.start >= range.start && target.end <= range.end)
+  },
+
+  resetTrajCache: () => set({ trajByFrame: new Map(), loadedTrajRanges: [] }),
+
   getSelectionFrameRange: () => {
-    const { inTime, outTime } = get().selection;
-    const fps = get().fps || 60;
-    if (inTime == null || outTime == null) return null;
-    const s = Math.max(0, Math.floor(Math.min(inTime, outTime) * fps));
-    const e = Math.max(0, Math.ceil(Math.max(inTime, outTime) * fps));
-    return [s, e];
+    const { inTime, outTime } = get().selection
+    const fps = get().fps || 60
+    if (inTime == null || outTime == null) return null
+    const s = Math.max(0, Math.floor(Math.min(inTime, outTime) * fps))
+    const e = Math.max(0, Math.ceil(Math.max(inTime, outTime) * fps))
+    return [s, e]
   },
 
   getVisiblePointsFor3D: (windowSec = 3.0) => {
-    const { currentTime } = get();
-    const fps = get().fps || 60;
-    const startFrame = Math.max(0, Math.floor((currentTime - windowSec) * fps));
-    const endFrame = Math.max(0, Math.ceil((currentTime + windowSec) * fps));
-    const map = get().trajByFrame;
-    const out = [];
+    const { currentTime } = get()
+    const fps = get().fps || 60
+    const startFrame = Math.max(0, Math.floor((currentTime - windowSec) * fps))
+    const endFrame = Math.max(0, Math.ceil((currentTime + windowSec) * fps))
+    const map = get().trajByFrame
+    const out = []
     for (let f = startFrame; f <= endFrame; f++) {
-      const p = map.get(f);
-      if (p) out.push(p);
+      const p = map.get(f)
+      if (p) out.push(p)
     }
-    return out;
+    return out
   },
-}));
+}))
