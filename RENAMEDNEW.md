@@ -185,9 +185,8 @@ badminton3D-main/
 │        ├─ VideoPanel.jsx
 │        ├─ TimelinePanel.jsx
 │        └─ RightDock.jsx
-│
-└─ badminton3D-main/                 # 壓縮或整理過程中留下的重複資料夾，建議後續清理
-   └─ backend/
+└─
+   
 ```
 
 ---
