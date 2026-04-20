@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import os
 import math
-import pandas as pd
+import os
+
 import numpy as np
+import pandas as pd
 from sqlalchemy import insert
 
 from app.db import SessionLocal
-from app.models import Match, Rally, Hit, BallTraj
+from app.models import BallTraj, Hit, Match, Rally
 
-# ✅ Docker container 內 dataset 確切位置
 DATA_ROOT = "/app/app/datasets/12_24_1_new"
-
-# ✅ 這份資料是 frame-based；Match.fps 會用來在 API 回傳時計算秒
 FPS = 50.0
+NYP_FOLDER = "241224_1"
 
 
 def _safe_int(x, default=None):
@@ -31,95 +30,72 @@ def _safe_str(x, default=""):
     return str(x)
 
 
-def repair_zero_points(ball_data, mask_data):
-    """
-    方法三: 針對 (0,0,0) 的點，自動尋找前後最近的非零點進行線性內插。
-    """
-    pos = np.asarray(ball_data, dtype=np.float64).copy()[:, :3]
-    mask = np.asarray(mask_data).copy().astype(np.uint8)
-    
-    n = len(pos)
-    repaired = pos.copy()
-    repaired_mask = mask.copy()
-    
-    # 判斷是否為 (0,0,0) 或缺失值
-    # 這裡用距離小於極小值來判斷，避免浮點數誤差
-    is_zero = np.all(pos == 0, axis=1) | (np.linalg.norm(pos, axis=1) < 1e-7) | ~np.all(np.isfinite(pos), axis=1)
-    
-    valid_idx = np.where(~is_zero)[0]
-    zero_idx = np.where(is_zero)[0]
-    
-    if len(valid_idx) < 2:
-        # print(f"[{score}] 警告: 整個資料有效點不足 2 個，無法進行內插修補。")
-        return repaired, repaired_mask
-    
-    if len(zero_idx) == 0:
-        # print("[Method 3] 檢查完畢: 沒有發現均為 (0,0,0) 的點，不需要修補。")
-        return repaired, repaired_mask
-    
-    # 進行線性插值：對 XYZ 每個維度分別把 valid_idx 為底的點透過 np.interp 展開到所有的 index
-    t = np.arange(n)
-    for d in range(3):
-        repaired[:, d] = np.interp(t, valid_idx, pos[valid_idx, d])
-        
-    # 將修補過的部分 mask 設為 1
-    repaired_mask[zero_idx] = 1
-    
-    # print(f"[{score}] 成功修補了 {len(zero_idx)} 個為 (0,0,0) 或異常（NaN）的點。")
-    return repaired, repaired_mask
+def get_set_dirs(data_root: str) -> list[str]:
+    out = []
+    for name in sorted(os.listdir(data_root)):
+        set_dir = os.path.join(data_root, name)
+        if not os.path.isdir(set_dir):
+            continue
+        if "_set" not in name:
+            continue
+        if os.path.isfile(os.path.join(set_dir, "RallySeg.csv")):
+            out.append(set_dir)
+    return out
 
 
-def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame: int, set_name: str):
-    """
-    從 .npy 檔案中批量匯入 (Bulk Insert) 有效的 3D 軌跡點。
-    - 這裡假設檔案都在 DATA_ROOT/ball_new/... 與 DATA_ROOT/ball_final_mask_new/... 資料夾中
-    - 僅取出 mask == 1 的座標
-    """
-    # 根據 set_name 找出實際要裝載的 npy 資料夾 (對應到您的目錄結構 "12_24_1_setX")
-    # 注意: .ipynb 中提到的資料名稱為 "241217_1" 或 "241224_1"，您可以根據實際放 dataset 的位置做微調
-    # DATA_ROOT 為 /app/app/datasets/12_24_1_new，但軌跡可能放在 /app/app/datasets/ball_new/241224_1
-    dataset_base = os.path.dirname(DATA_ROOT)  # 等於 /app/app/datasets
-    
-    # 這裡資料夾都放在 241224_1 裡面
-    npy_folder = "241224_1"
-    
+def get_match_duration_frame(set_dirs: list[str]) -> int:
+    max_end = 0
+    for set_dir in set_dirs:
+        rally_csv = os.path.join(set_dir, "RallySeg.csv")
+        if not os.path.isfile(rally_csv):
+            continue
+        rally_df = pd.read_csv(rally_csv)
+        if "End" not in rally_df.columns or len(rally_df) == 0:
+            continue
+        cur = int(rally_df["End"].max())
+        if cur > max_end:
+            max_end = cur
+    return max_end
+
+
+def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame: int):
+    dataset_base = os.path.dirname(DATA_ROOT)
+
     file_name = f"{score}.npy"
-    ball_path = os.path.join(dataset_base, "ball_new", npy_folder, file_name)
-    mask_path = os.path.join(dataset_base, "ball_final_mask_new", npy_folder, file_name)
+    ball_path = os.path.join(dataset_base, "ball_new", NYP_FOLDER, file_name)
+    mask_path = os.path.join(dataset_base, "ball_final_mask_new", NYP_FOLDER, file_name)
+    speed_path = os.path.join(dataset_base, "ball_speed", NYP_FOLDER, file_name)
 
     if not (os.path.exists(ball_path) and os.path.exists(mask_path)):
-        # print(f"Warning: Missing trajectory or mask file for {score}")
         return
 
     try:
         ball_data = np.load(ball_path)
         mask_data = np.load(mask_path)
+        speed_data = np.load(speed_path) if os.path.exists(speed_path) else None
     except Exception as e:
         print(f"Error loading {file_name}: {e}")
         return
 
-    # 先修補軌跡中的 (0,0,0) 等異常值
-    ball_data, mask_data = repair_zero_points(ball_data, mask_data)
-
-    # 找出所有 mask_data == 1 的索引位置陣列 -> (0, 3, 4, ...)
     valid_indices = np.where(mask_data == 1)[0]
-    
     if len(valid_indices) == 0:
         return
 
     bulk_data = []
-    
-    # 依序計算每一個有效點位對應哪一個全域影格，並整理成 dict 將被 insert
     for idx_val in valid_indices:
         i = int(idx_val)
         g_frame = start_frame + i
         t_s = float(g_frame / FPS)
-        
+
         x, y, z = ball_data[i]
-        
-        # 過濾不合理的 nan 或極端值如果需要，亦可略過
         if math.isnan(x) or math.isnan(y) or math.isnan(z):
             continue
+
+        speed = None
+        if speed_data is not None and i < len(speed_data):
+            s_val = speed_data[i]
+            if not math.isnan(s_val):
+                speed = float(s_val)
 
         bulk_data.append({
             "match_id": match_id,
@@ -128,10 +104,10 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
             "x": float(x),
             "y": float(y),
             "z": float(z),
-            "confidence": 1.0
+            "speed": speed,
+            "confidence": 1.0,
         })
 
-    # 使用 SQLAlchemy 批量插入功能，可以一次幾以千計地寫入 db！大大提升效能。
     if bulk_data:
         db.execute(insert(BallTraj), bulk_data)
 
@@ -146,40 +122,34 @@ def import_set(db, match_id: int, set_dir: str, rally_index_offset: int = 0) -> 
 
     score_to_rally_id: dict[str, int] = {}
 
-    # ---- rallies ----
     for i, row in rally_df.iterrows():
         score = _safe_str(row.get("Score"), default=f"rally_{i}")
         start_f = _safe_int(row.get("Start"), 0)
         end_f = _safe_int(row.get("End"), start_f)
 
-        r = Rally(
+        rally = Rally(
             match_id=match_id,
             rally_index=rally_index_offset + i + 1,
             start_frame=start_f,
             end_frame=end_f,
             status="unchecked",
         )
-        db.add(r)
+        db.add(rally)
         db.flush()
-        score_to_rally_id[score] = r.id
-        
-        # ✅ 從這裡呼叫匯入軌跡的副程式！
-        # set_dir 最後一個部位名稱剛好對應到像 "12_24_1_set1" (os.path.basename)
-        set_name = os.path.basename(os.path.normpath(set_dir))
-        import_ball_trajectory_for_rally(db, match_id, score, start_f, set_name)
+        score_to_rally_id[score] = rally.id
 
-    # ---- hits ----
+        import_ball_trajectory_for_rally(db, match_id, score, start_f)
+
     shot_csv = os.path.join(set_dir, "shot_annotated.csv")
     if os.path.exists(shot_csv):
         shot_df = pd.read_csv(shot_csv)
-
         for _, row in shot_df.iterrows():
             rally_key = _safe_str(row.get("Rally"), "")
             rally_id = score_to_rally_id.get(rally_key)
             if rally_id is None:
                 continue
 
-            h = Hit(
+            hit = Hit(
                 match_id=match_id,
                 rally_id=rally_id,
                 ball_round=_safe_int(row.get("Ball Round"), 1),
@@ -191,7 +161,7 @@ def import_set(db, match_id: int, set_dir: str, rally_index_offset: int = 0) -> 
                 note=_safe_str(row.get("Note"), ""),
                 confidence=1.0,
             )
-            db.add(h)
+            db.add(hit)
 
     return len(rally_df)
 
@@ -199,31 +169,32 @@ def import_set(db, match_id: int, set_dir: str, rally_index_offset: int = 0) -> 
 def main():
     db = SessionLocal()
     try:
-        m = Match(
+        set_dirs = get_set_dirs(DATA_ROOT)
+        if not set_dirs:
+            raise FileNotFoundError(f"No valid set folder found under {DATA_ROOT}")
+
+        duration_frame = get_match_duration_frame(set_dirs)
+
+        match = Match(
             title="12_24_1_new",
             fps=FPS,
-            duration_frame=26296,
+            duration_frame=duration_frame,
             cameras=[],
         )
-        db.add(m)
+        db.add(match)
         db.commit()
-        db.refresh(m)
+        db.refresh(match)
 
-        off = 0
+        offset = 0
+        for set_dir in set_dirs:
+            offset += import_set(db, match.id, set_dir, rally_index_offset=offset)
+            db.commit()
 
-        set1_dir = os.path.join(DATA_ROOT, "12_24_1_set1")
-        off += import_set(db, m.id, set1_dir, rally_index_offset=off)
-        db.commit()
-
-        set2_dir = os.path.join(DATA_ROOT, "12_24_1_set2")
-        off += import_set(db, m.id, set2_dir, rally_index_offset=off)
-        db.commit()
-
-        print(f"✅ Imported match_id={m.id}, rallies_total={off}")
-
+        print(f"✅ Imported match_id={match.id}, rallies_total={offset}, duration_frame={duration_frame}")
     finally:
         db.close()
 
 
 if __name__ == "__main__":
     main()
+
