@@ -4,29 +4,29 @@
 
 :root { color-scheme: dark; }
 
-/* React Split Gutter Styles */
-.gutter {
-    background-color: #27272a; /* zinc-800 */
-    background-repeat: no-repeat;
-    background-position: 50%;
-    position: relative;
-    z-index: 50;
-    transition: background-color 0.2s ease;
+.camera-marker-button {
+  border: 1px solid rgba(14, 165, 233, 0.65);
+  background: rgba(2, 6, 23, 0.78);
+  color: #e0f2fe;
+  border-radius: 9999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  user-select: none;
 }
 
-.gutter.gutter-horizontal {
-    background-image: url('data:image/svg+xml;utf8,<svg stroke="%2352525b" fill="none" viewBox="0 0 8 24"><path d="M 3 2 L 3 22 M 5 2 L 5 22" stroke-width="1"/></svg>');
-    cursor: col-resize;
-    width: 8px;
+.camera-marker-button:hover {
+  background: rgba(12, 74, 110, 0.92);
+  border-color: rgba(56, 189, 248, 0.95);
 }
 
-.gutter.gutter-vertical {
-    background-image: url('data:image/svg+xml;utf8,<svg stroke="%2352525b" fill="none" viewBox="0 0 24 8"><path d="M 2 3 L 22 3 M 2 5 L 22 5" stroke-width="1"/></svg>');
-    cursor: row-resize;
-    height: 8px;
-}
-
-.gutter:hover, .gutter:active {
-    background-color: #0891b2; /* cyan-600 */
+.camera-marker-button.active {
+  border-color: rgba(250, 204, 21, 1);
+  background: rgba(113, 63, 18, 0.92);
+  color: #fef9c3;
 }
 
