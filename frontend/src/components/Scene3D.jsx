@@ -223,7 +223,7 @@ function CameraMarker({ cameraConfig }) {
           setActiveCameraFromScene(cameraConfig.id)
         }}
       >
-        <sphereGeometry args={[isActive ? 0.18 : 0.14, 18, 18]} />
+        <sphereGeometry args={[isActive ? 0.09 : 0.07, 12, 12]} />
         <meshStandardMaterial
           color={isActive ? '#facc15' : '#38bdf8'}
           emissive={isActive ? '#f59e0b' : '#0369a1'}
@@ -235,14 +235,14 @@ function CameraMarker({ cameraConfig }) {
         args={[
           direction,
           new THREE.Vector3(0, 0, 0),
-          0.8,
+          0.38,
           isActive ? '#facc15' : '#38bdf8',
-          0.22,
-          0.12,
+          0.11,
+          0.06,
         ]}
       />
 
-      <Html center distanceFactor={8} position={[0, 0.35, 0]}>
+      <Html center distanceFactor={12} position={[0, 0.22, 0]}>
         <button
           type="button"
           onClick={(e) => {
@@ -261,6 +261,9 @@ function CameraMarker({ cameraConfig }) {
 
 function RealCameraMarkers() {
   const cameras = useAppStore(s => s.cameras) || []
+  const playing = useAppStore(s => s.playing)
+
+  if (playing) return null
 
   return (
     <group>
