@@ -64,7 +64,6 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
     file_name = f"{score}.npy"
     ball_path = os.path.join(dataset_base, "ball_new", NYP_FOLDER, file_name)
     mask_path = os.path.join(dataset_base, "ball_final_mask_new", NYP_FOLDER, file_name)
-    speed_path = os.path.join(dataset_base, "ball_speed", NYP_FOLDER, file_name)
 
     if not (os.path.exists(ball_path) and os.path.exists(mask_path)):
         return
@@ -72,7 +71,6 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
     try:
         ball_data = np.load(ball_path)
         mask_data = np.load(mask_path)
-        speed_data = np.load(speed_path) if os.path.exists(speed_path) else None
     except Exception as e:
         print(f"Error loading {file_name}: {e}")
         return
@@ -91,12 +89,6 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
         if math.isnan(x) or math.isnan(y) or math.isnan(z):
             continue
 
-        speed = None
-        if speed_data is not None and i < len(speed_data):
-            s_val = speed_data[i]
-            if not math.isnan(s_val):
-                speed = float(s_val)
-
         bulk_data.append({
             "match_id": match_id,
             "frame": g_frame,
@@ -104,7 +96,6 @@ def import_ball_trajectory_for_rally(db, match_id: int, score: str, start_frame:
             "x": float(x),
             "y": float(y),
             "z": float(z),
-            "speed": speed,
             "confidence": 1.0,
         })
 

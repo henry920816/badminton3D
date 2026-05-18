@@ -125,18 +125,26 @@ def get_traj(match_id: int, start: int = 0, end: int = 999999999, db: Session = 
         .all()
     )
 
-    return [
-        TrajPoint(
+    results = []
+    for i, row in enumerate(rows):
+        speed = None
+        if i > 0:
+            prev = rows[i-1]
+            dt = row.t_sec - prev.t_sec
+            if dt > 0:
+                dist = ((row.x - prev.x)**2 + (row.y - prev.y)**2 + (row.z - prev.z)**2) ** 0.5
+                speed = dist / dt
+        results.append(TrajPoint(
             frame=row.frame,
             t_sec=row.t_sec,
             x=row.x,
             y=row.y,
             z=row.z,
-            speed=row.speed,
+            speed=speed,
             confidence=row.confidence,
-        )
-        for row in rows
-    ]
+        ))
+
+    return results
 
 
 @app.patch("/hits/{hit_id}")
