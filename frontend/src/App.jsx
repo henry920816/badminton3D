@@ -24,6 +24,7 @@ export default function App() {
   const currentFrame = useAppStore(s => s.currentFrame)
   const fps = useAppStore(s => s.fps)
   const durationSec = useAppStore(s => s.durationSec)
+  const activeItem = useAppStore(s => s.activeItem)
 
   const bootstrapDoneRef = useRef(false)
   const inflightRef = useRef(new Set())
@@ -35,6 +36,8 @@ export default function App() {
   const [topHeightPct, setTopHeightPct] = useState(45)
   const [leftTopWidthPct, setLeftTopWidthPct] = useState(50)
   const [rightPanelWidth, setRightPanelWidth] = useState(360)
+
+  const showRightDock = Boolean(activeItem?.type)
 
   useEffect(() => {
     bootstrapDoneRef.current = false
@@ -206,9 +209,7 @@ export default function App() {
                 <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-[1px] bg-zinc-800" />
               </div>
 
-              <div
-                className="flex-1 min-w-0 min-h-0 relative"
-              >
+              <div className="flex-1 min-w-0 min-h-0 relative">
                 <div className="absolute z-10 top-2 left-2 text-xs font-semibold px-2 py-1 rounded bg-zinc-900/70 border border-zinc-800">
                   Source Video
                 </div>
@@ -233,20 +234,24 @@ export default function App() {
           </div>
         </div>
 
-        <div
-          onMouseDown={startResizeMainAndDock}
-          className="w-[4px] shrink-0 cursor-col-resize bg-zinc-950 hover:bg-zinc-900 active:bg-zinc-800 transition-colors relative z-20"
-          title="拖拉調整 主畫面 / 右側 Panel 寬度"
-        >
-          <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-[1px] bg-zinc-800" />
-        </div>
+        {showRightDock && (
+          <>
+            <div
+              onMouseDown={startResizeMainAndDock}
+              className="w-[4px] shrink-0 cursor-col-resize bg-zinc-950 hover:bg-zinc-900 active:bg-zinc-800 transition-colors relative z-20"
+              title="拖拉調整 主畫面 / 右側 Panel 寬度"
+            >
+              <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-[1px] bg-zinc-800" />
+            </div>
 
-        <div
-          className="shrink-0 min-h-0"
-          style={{ width: rightDockPx }}
-        >
-          <RightDock />
-        </div>
+            <div
+              className="shrink-0 min-h-0"
+              style={{ width: rightDockPx }}
+            >
+              <RightDock />
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
