@@ -196,6 +196,7 @@ export const useAppStore = create((set, get) => ({
 
   pxPerSec: 100,
   scrollLeft: 0,
+  bottomView: 'timeline',
 
   activeItem: null,
   selectedTrajFrames: [],
@@ -203,6 +204,9 @@ export const useAppStore = create((set, get) => ({
 
   setZoom: (px) => set({ pxPerSec: px }),
   setScrollLeft: (x) => set({ scrollLeft: x }),
+  setBottomView: (view) => set({
+    bottomView: view === 'projection2d' ? 'projection2d' : 'timeline',
+  }),
 
   setMatchMeta: (m) => {
     const fps = m?.fps || 50

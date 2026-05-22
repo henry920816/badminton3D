@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useAppStore } from '../store.js'
 
-function PlaybackUI({
+export function PlaybackUI({
   goPrevRally,
   goNextRally,
 }) {
@@ -175,6 +175,8 @@ export default function TimelinePanel() {
   const setZoom = useAppStore(s => s.setZoom)
   const scrollLeft = useAppStore(s => s.scrollLeft) || 0
   const setScrollLeft = useAppStore(s => s.setScrollLeft)
+  const bottomView = useAppStore(s => s.bottomView)
+  const setBottomView = useAppStore(s => s.setBottomView)
 
   const selection = useAppStore(s => s.selection)
   const setSelectionIn = useAppStore(s => s.setSelectionIn)
@@ -939,8 +941,24 @@ export default function TimelinePanel() {
   return (
     <div className="h-full w-full min-h-0 min-w-0 relative flex flex-col bg-[#09090b] select-none overflow-hidden">
       <div className="h-[42px] shrink-0 px-4 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20 min-w-0 overflow-hidden">
-        <div className="text-xs text-zinc-200 font-bold bg-zinc-800/80 px-2 py-1 rounded tracking-wider border border-zinc-700 shrink-0">
-          TIMELINE
+        <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
+          {[
+            ['timeline', 'TIMELINE'],
+            ['projection2d', '2D'],
+          ].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setBottomView(id)}
+              className={`px-3 py-1 text-xs font-bold tracking-wider transition-colors ${
+                bottomView === id
+                  ? 'bg-zinc-800 text-zinc-100'
+                  : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/70'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         <div className="text-xs text-zinc-500 font-mono min-w-0 truncate">

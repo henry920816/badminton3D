@@ -5,6 +5,7 @@ import TopBar from './components/TopBar.jsx'
 import Scene3D from './components/Scene3D.jsx'
 import VideoPanel from './components/VideoPanel.jsx'
 import TimelinePanel from './components/TimelinePanel.jsx'
+import Projection2DPanel from './components/Projection2DPanel.jsx'
 import RightDock from './components/RightDock.jsx'
 
 const PRELOAD_RADIUS_FRAMES = 300
@@ -25,6 +26,7 @@ export default function App() {
   const fps = useAppStore(s => s.fps)
   const durationSec = useAppStore(s => s.durationSec)
   const activeItem = useAppStore(s => s.activeItem)
+  const bottomView = useAppStore(s => s.bottomView)
 
   const bootstrapDoneRef = useRef(false)
   const inflightRef = useRef(new Set())
@@ -229,7 +231,7 @@ export default function App() {
               className="min-h-0"
               style={{ height: `${bottomHeightPct}%` }}
             >
-              <TimelinePanel />
+              {bottomView === 'projection2d' ? <Projection2DPanel /> : <TimelinePanel />}
             </div>
           </div>
         </div>
