@@ -202,9 +202,9 @@ VITE_API_BASE=http://localhost:8000
 
 ---
 
-## 5. Camera Params：目前使用方法 A
+## 5. Camera Params
 
-目前版本使用 **方法 A：`.npy` 轉成 JSON**。
+目前版本使用 **`.npy` 轉成 JSON**。
 
 也就是：
 
