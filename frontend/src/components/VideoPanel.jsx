@@ -1,6 +1,12 @@
-import React, { useEffect, useMemo, useRef } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '../store.js'
 import { API_BASE } from '../config.js'
+import {
+  getProjectionParams,
+  hasProjectionParams,
+  project3DToImage,
+  projectTrajectoryPoints,
+} from '../utils/cameraProjection.js'
 
 function resolveVideoUrl(url) {
   if (!url) return null
@@ -13,11 +19,9 @@ function resolveVideoUrl(url) {
 function detectCameraIdFromFileName(fileName) {
   const name = String(fileName || '').toLowerCase()
 
-  // 支援：0.mp4、1.mp4 ... 9.mp4
   const simple = name.match(/^([0-9])\.mp4$/)
   if (simple) return `cam${simple[1]}`
 
-  // 額外支援：cam0.mp4、cam_0.mp4、cam-0.mp4、camera0.mp4
   const cam = name.match(/(?:cam|camera)[_-]?([0-9])\.mp4$/)
   if (cam) return `cam${cam[1]}`
 
@@ -36,8 +40,140 @@ function getGlobalFrameFromCameraTime(cameraTime, globalFps, camera) {
   return Math.max(0, Math.round(cameraTime * cameraFps - offsetFrame))
 }
 
+function getNearestTrajectoryPoint(trajByFrame, frame, radius = 3) {
+  const exact = trajByFrame.get(frame)
+  if (exact) return exact
+
+  for (let d = 1; d <= radius; d++) {
+    const before = trajByFrame.get(frame - d)
+    if (before) return before
+
+    const after = trajByFrame.get(frame + d)
+    if (after) return after
+  }
+
+  return null
+}
+
+function getTrajectoryWindow(trajByFrame, centerFrame, radius = 12) {
+  const points = []
+
+  for (let frame = centerFrame - radius; frame <= centerFrame + radius; frame++) {
+    const point = trajByFrame.get(frame)
+    if (point) points.push(point)
+  }
+
+  return points
+}
+
+function drawProjectionOverlay({
+  canvas,
+  video,
+  cameraParams,
+  trajByFrame,
+  currentFrame,
+  showProjection,
+}) {
+  if (!canvas || !video) return
+
+  const cssWidth = Math.max(1, Math.round(video.clientWidth || 0))
+  const cssHeight = Math.max(1, Math.round(video.clientHeight || 0))
+  const dpr = window.devicePixelRatio || 1
+
+  canvas.style.width = `${cssWidth}px`
+  canvas.style.height = `${cssHeight}px`
+  canvas.width = Math.max(1, Math.round(cssWidth * dpr))
+  canvas.height = Math.max(1, Math.round(cssHeight * dpr))
+
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, cssWidth, cssHeight)
+
+  if (!showProjection || !cameraParams) return
+
+  const scaleX = cssWidth / cameraParams.imageWidth
+  const scaleY = cssHeight / cameraParams.imageHeight
+
+  const toCanvasPoint = (projection) => ({
+    x: projection.u * scaleX,
+    y: projection.v * scaleY,
+  })
+
+  const windowPoints = getTrajectoryWindow(trajByFrame, currentFrame, 12)
+  const projectedTrail = projectTrajectoryPoints(windowPoints, cameraParams)
+    .filter((projection) => projection.insideImage)
+    .map((projection) => ({
+      ...projection,
+      canvasPoint: toCanvasPoint(projection),
+    }))
+
+  if (projectedTrail.length > 1) {
+    ctx.save()
+    ctx.lineWidth = 2
+    ctx.strokeStyle = 'rgba(250, 204, 21, 0.85)'
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.9)'
+    ctx.shadowBlur = 4
+    ctx.beginPath()
+
+    projectedTrail.forEach((projection, index) => {
+      const p = projection.canvasPoint
+      if (index === 0) ctx.moveTo(p.x, p.y)
+      else ctx.lineTo(p.x, p.y)
+    })
+
+    ctx.stroke()
+    ctx.restore()
+
+    ctx.save()
+    ctx.fillStyle = 'rgba(250, 204, 21, 0.75)'
+
+    for (const projection of projectedTrail) {
+      const p = projection.canvasPoint
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2)
+      ctx.fill()
+    }
+
+    ctx.restore()
+  }
+
+  const currentPoint = getNearestTrajectoryPoint(trajByFrame, currentFrame, 3)
+  const currentProjection = currentPoint
+    ? project3DToImage(currentPoint, cameraParams)
+    : null
+
+  if (!currentProjection) {
+    return
+  }
+
+  const currentCanvasPoint = toCanvasPoint(currentProjection)
+  const isInside = currentProjection.insideImage
+
+  ctx.save()
+  ctx.lineWidth = 3
+  ctx.strokeStyle = isInside ? '#facc15' : '#ef4444'
+  ctx.fillStyle = isInside ? 'rgba(250, 204, 21, 0.22)' : 'rgba(239, 68, 68, 0.22)'
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.9)'
+  ctx.shadowBlur = 6
+
+  ctx.beginPath()
+  ctx.arc(currentCanvasPoint.x, currentCanvasPoint.y, 5, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.stroke()
+
+  ctx.beginPath()
+  ctx.moveTo(currentCanvasPoint.x - 8, currentCanvasPoint.y)
+  ctx.lineTo(currentCanvasPoint.x + 8, currentCanvasPoint.y)
+  ctx.moveTo(currentCanvasPoint.x, currentCanvasPoint.y - 8)
+  ctx.lineTo(currentCanvasPoint.x, currentCanvasPoint.y + 8)
+  ctx.stroke()
+  ctx.restore()
+
+}
+
 export default function VideoPanel() {
   const videoRef = useRef(null)
+  const overlayCanvasRef = useRef(null)
   const syncFromVideoRef = useRef(false)
   const lastAppliedTimeRef = useRef(null)
   const previousLocalUrlsRef = useRef({})
@@ -51,6 +187,7 @@ export default function VideoPanel() {
   const currentFrame = useAppStore((s) => s.currentFrame)
   const setCurrentFrame = useAppStore((s) => s.setCurrentFrame)
   const setCurrentTime = useAppStore((s) => s.setCurrentTime)
+  const trajByFrame = useAppStore((s) => s.trajByFrame)
 
   const fps = useAppStore((s) => s.fps) || 50
   const playing = useAppStore((s) => s.playing)
@@ -61,6 +198,8 @@ export default function VideoPanel() {
   const localVideoSrcMap = useAppStore((s) => s.localVideoSrcMap)
   const setLocalVideoSrcMap = useAppStore((s) => s.setLocalVideoSrcMap)
 
+  const [showProjection, setShowProjection] = useState(true)
+
   const safeCameras = useMemo(() => {
     return Array.isArray(cameras) && cameras.length > 0 ? cameras : []
   }, [cameras])
@@ -68,6 +207,12 @@ export default function VideoPanel() {
   const activeCamera = useMemo(() => {
     return safeCameras.find((camera) => camera.id === activeCameraId) || safeCameras[0] || null
   }, [safeCameras, activeCameraId])
+
+  const activeCameraParams = useMemo(() => {
+    return activeCamera ? getProjectionParams(activeCamera.id) : null
+  }, [activeCamera])
+
+  const projectionAvailable = Boolean(activeCameraParams)
 
   const activeSrc = useMemo(() => {
     if (!activeCamera) return null
@@ -85,6 +230,33 @@ export default function VideoPanel() {
     }
   }, [activeCamera, activeCameraId, safeCameras, setActiveCamera])
 
+  useEffect(() => {
+    drawProjectionOverlay({
+      canvas: overlayCanvasRef.current,
+      video: videoRef.current,
+      cameraParams: activeCameraParams,
+      trajByFrame,
+      currentFrame,
+      showProjection,
+    })
+  }, [activeCameraParams, trajByFrame, currentFrame, showProjection, activeSrc])
+
+  useEffect(() => {
+    const onResize = () => {
+      drawProjectionOverlay({
+        canvas: overlayCanvasRef.current,
+        video: videoRef.current,
+        cameraParams: activeCameraParams,
+        trajByFrame,
+        currentFrame,
+        showProjection,
+      })
+    }
+
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [activeCameraParams, trajByFrame, currentFrame, showProjection])
+
   function onPickLocalFiles(files) {
     const pickedFiles = Array.from(files || [])
     if (!pickedFiles.length) return
@@ -98,10 +270,11 @@ export default function VideoPanel() {
       if (!safeCameras.some((camera) => camera.id === cameraId)) continue
 
       const nextUrl = URL.createObjectURL(file)
+
       if (oldUrls[cameraId]?.startsWith('blob:')) {
         try {
           URL.revokeObjectURL(oldUrls[cameraId])
-        } catch { }
+        } catch {}
       }
 
       nextMap[cameraId] = nextUrl
@@ -135,7 +308,7 @@ export default function VideoPanel() {
 
     if (playing && activeSrc) {
       const p = v.play()
-      if (p && typeof p.catch === 'function') p.catch(() => { })
+      if (p && typeof p.catch === 'function') p.catch(() => {})
     } else {
       v.pause()
     }
@@ -162,7 +335,7 @@ export default function VideoPanel() {
       lastAppliedTimeRef.current = targetTime
       try {
         v.currentTime = targetTime
-      } catch { }
+      } catch {}
     }
   }, [currentFrame, fps, activeCamera, activeSrc, playing])
 
@@ -263,6 +436,7 @@ export default function VideoPanel() {
       if (Object.prototype.hasOwnProperty.call(keyToCameraIndex, e.code)) {
         const cameraIndex = keyToCameraIndex[e.code]
         const camera = safeCameras.find((item) => item.index === cameraIndex || item.id === `cam${cameraIndex}`)
+
         if (camera) {
           e.preventDefault()
           switchCamera(camera.id)
@@ -280,7 +454,7 @@ export default function VideoPanel() {
         if (typeof url === 'string' && url.startsWith('blob:')) {
           try {
             URL.revokeObjectURL(url)
-          } catch { }
+          } catch {}
         }
       })
     }
@@ -293,20 +467,23 @@ export default function VideoPanel() {
           const isActive = activeCamera?.id === camera.id
           const hasVideo = Boolean(localVideoSrcMap[camera.id] || camera.video_url || camera.url)
           const isSceneTarget = sceneCameraTargetId === camera.id
+          const cameraHasProjection = hasProjectionParams(camera.id)
 
           return (
             <button
               key={camera.id}
               onClick={() => switchCamera(camera.id)}
-              className={`px-2.5 py-1 rounded text-xs border shrink-0 transition-colors ${isActive
+              className={`px-2.5 py-1 rounded text-xs border shrink-0 transition-colors ${
+                isActive
                   ? 'bg-sky-700 border-sky-500 text-white'
                   : hasVideo
                     ? 'bg-zinc-800 border-zinc-700 text-zinc-100 hover:bg-zinc-700'
                     : 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:bg-zinc-900'
-                }`}
-              title={`${camera.label} / ${camera.description || ''} / ${camera.fileName || ''}${isSceneTarget ? ' / 3D view target' : ''}`}
+              }`}
+              title={`${camera.label} / ${camera.description || ''} / ${camera.fileName || ''}${isSceneTarget ? ' / 3D view target' : ''}${cameraHasProjection ? ' / has projection params' : ''}`}
             >
               {camera.index ?? camera.id.replace('cam', '')}
+              {cameraHasProjection && <span className="ml-1 text-yellow-300">●</span>}
             </button>
           )
         })}
@@ -316,7 +493,28 @@ export default function VideoPanel() {
         <div className="absolute top-2 left-2 z-10 px-2 py-1 rounded bg-black/65 border border-white/10 text-xs text-zinc-100">
           {activeCamera?.label || 'No Camera'}
           {activeCamera?.offset_frame ? ` / offset ${activeCamera.offset_frame >= 0 ? '+' : ''}${activeCamera.offset_frame}f` : ''}
+          {projectionAvailable && showProjection ? ' / Projection ON' : ''}
         </div>
+
+        {activeSrc && (
+          <div className="absolute top-2 right-2 z-20 flex items-center gap-2">
+            <button
+              type="button"
+              disabled={!projectionAvailable}
+              onClick={() => setShowProjection((v) => !v)}
+              className={`px-2 py-1 rounded border text-xs ${
+                projectionAvailable
+                  ? showProjection
+                    ? 'bg-yellow-700/80 border-yellow-500 text-yellow-50 hover:bg-yellow-600/80'
+                    : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
+                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed'
+              }`}
+              title={projectionAvailable ? '顯示 / 隱藏 3D 球點投影' : '目前只有 Cam 3 / Cam 4 有相機參數'}
+            >
+              3D→2D
+            </button>
+          </div>
+        )}
 
         {!activeSrc && (
           <div className="text-zinc-400 text-sm px-4 text-center leading-7">
@@ -327,28 +525,55 @@ export default function VideoPanel() {
         )}
 
         {activeSrc && (
-          <video
-            ref={videoRef}
-            key={activeCamera?.id}
-            src={activeSrc}
-            className="max-h-full max-w-full"
-            onTimeUpdate={onTimeUpdate}
-            onLoadedMetadata={() => {
-              const v = videoRef.current
-              if (!v || !activeCamera) return
-              const targetTime = getCameraVideoTime(currentFrame, fps, activeCamera)
-              try {
-                v.currentTime = targetTime
-                lastAppliedTimeRef.current = targetTime
-              } catch { }
-              if (playing) {
-                const p = v.play()
-                if (p && typeof p.catch === 'function') p.catch(() => { })
-              }
-            }}
-            playsInline
-            onClick={togglePlaying}
-          />
+          <div className="relative inline-block max-h-full max-w-full">
+            <video
+              ref={videoRef}
+              key={activeCamera?.id}
+              src={activeSrc}
+              className="block max-h-full max-w-full"
+              onTimeUpdate={onTimeUpdate}
+              onLoadedMetadata={() => {
+                const v = videoRef.current
+                if (!v || !activeCamera) return
+
+                const targetTime = getCameraVideoTime(currentFrame, fps, activeCamera)
+
+                try {
+                  v.currentTime = targetTime
+                  lastAppliedTimeRef.current = targetTime
+                } catch {}
+
+                if (playing) {
+                  const p = v.play()
+                  if (p && typeof p.catch === 'function') p.catch(() => {})
+                }
+
+                window.requestAnimationFrame(() => {
+                  drawProjectionOverlay({
+                    canvas: overlayCanvasRef.current,
+                    video: videoRef.current,
+                    cameraParams: activeCameraParams,
+                    trajByFrame,
+                    currentFrame,
+                    showProjection,
+                  })
+                })
+              }}
+              playsInline
+              onClick={togglePlaying}
+            />
+
+            <canvas
+              ref={overlayCanvasRef}
+              className="absolute left-0 top-0 pointer-events-none"
+            />
+          </div>
+        )}
+
+        {activeSrc && !projectionAvailable && (
+          <div className="absolute bottom-3 right-3 z-10 px-2 py-1 rounded bg-black/65 border border-white/10 text-xs text-zinc-400">
+            此視角沒有 camera params，目前只有 Cam 3 / Cam 4 可投影
+          </div>
         )}
       </div>
 
@@ -357,6 +582,7 @@ export default function VideoPanel() {
           <span className="px-3 py-1.5 text-sm text-white bg-zinc-700 hover:bg-zinc-600 rounded cursor-pointer">
             選擇 0-9.mp4
           </span>
+
           <input
             type="file"
             accept="video/*"
@@ -365,8 +591,9 @@ export default function VideoPanel() {
             className="hidden"
           />
         </label>
+
         <div className="text-xs text-zinc-500 truncate">
-          檔名請用 0.mp4、1.mp4、2.mp4 ... 9.mp4；鍵盤 0~9 可快速切換視角。
+          檔名請用 0.mp4、1.mp4、2.mp4 ... 9.mp4；鍵盤 0~9 可快速切換視角；Cam 3 / Cam 4 支援 3D→2D 投影。
         </div>
       </div>
     </div>
