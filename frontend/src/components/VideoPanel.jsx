@@ -150,23 +150,14 @@ function drawProjectionOverlay({
   const isInside = currentProjection.insideImage
 
   ctx.save()
-  ctx.lineWidth = 3
-  ctx.strokeStyle = isInside ? '#facc15' : '#ef4444'
-  ctx.fillStyle = isInside ? 'rgba(250, 204, 21, 0.22)' : 'rgba(239, 68, 68, 0.22)'
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.9)'
-  ctx.shadowBlur = 6
+  ctx.fillStyle = '#ef4444'
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.85)'
+  ctx.shadowBlur = 4
 
   ctx.beginPath()
-  ctx.arc(currentCanvasPoint.x, currentCanvasPoint.y, 5, 0, Math.PI * 2)
+  ctx.arc(currentCanvasPoint.x, currentCanvasPoint.y, 4, 0, Math.PI * 2)
   ctx.fill()
-  ctx.stroke()
 
-  ctx.beginPath()
-  ctx.moveTo(currentCanvasPoint.x - 8, currentCanvasPoint.y)
-  ctx.lineTo(currentCanvasPoint.x + 8, currentCanvasPoint.y)
-  ctx.moveTo(currentCanvasPoint.x, currentCanvasPoint.y - 8)
-  ctx.lineTo(currentCanvasPoint.x, currentCanvasPoint.y + 8)
-  ctx.stroke()
   ctx.restore()
 
 }
@@ -483,7 +474,6 @@ export default function VideoPanel() {
               title={`${camera.label} / ${camera.description || ''} / ${camera.fileName || ''}${isSceneTarget ? ' / 3D view target' : ''}${cameraHasProjection ? ' / has projection params' : ''}`}
             >
               {camera.index ?? camera.id.replace('cam', '')}
-              {cameraHasProjection && <span className="ml-1 text-yellow-300">●</span>}
             </button>
           )
         })}
