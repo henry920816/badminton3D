@@ -35,7 +35,7 @@ export default function App() {
   const centerWrapRef = useRef(null)
   const topAreaRef = useRef(null)
 
-  const [topHeightPct, setTopHeightPct] = useState(45)
+  const [topHeightPct, setTopHeightPct] = useState(58)
   const [leftTopWidthPct, setLeftTopWidthPct] = useState(50)
   const [rightPanelWidth, setRightPanelWidth] = useState(360)
 
@@ -105,7 +105,7 @@ export default function App() {
     const onMove = (ev) => {
       const y = ev.clientY - rect.top
       const pct = (y / rect.height) * 100
-      setTopHeightPct(clamp(pct, 20, 80))
+      setTopHeightPct(clamp(pct, 42, 72))
     }
 
     const onUp = () => {
