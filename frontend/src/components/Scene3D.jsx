@@ -320,20 +320,31 @@ function SceneCameraController() {
   return null
 }
 
-function CursorZoomControls() {
+function CursorZoomControls({
+  minDistance = 1.8,
+  maxDistance = 45,
+  zoomSpeed = 0.14,
+  targetFollow = 0.35,
+}) {
   const { camera, gl, controls } = useThree()
+
   const raycasterRef = useRef(new THREE.Raycaster())
   const mouseRef = useRef(new THREE.Vector2())
   const groundPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0))
+  const hitPointRef = useRef(new THREE.Vector3())
+  const directionRef = useRef(new THREE.Vector3())
+  const nextCameraPositionRef = useRef(new THREE.Vector3())
 
   useEffect(() => {
     const dom = gl.domElement
+    if (!dom) return
 
     const handleWheel = (e) => {
       e.preventDefault()
       e.stopPropagation()
 
       const rect = dom.getBoundingClientRect()
+      if (!rect.width || !rect.height) return
 
       mouseRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
       mouseRef.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
@@ -341,46 +352,50 @@ function CursorZoomControls() {
       const raycaster = raycasterRef.current
       raycaster.setFromCamera(mouseRef.current, camera)
 
-      const hitPoint = new THREE.Vector3()
-      const hasHit = raycaster.ray.intersectPlane(groundPlaneRef.current, hitPoint)
+      const hitPoint = hitPointRef.current
+      const hasGroundHit = raycaster.ray.intersectPlane(groundPlaneRef.current, hitPoint)
 
       const zoomCenter =
-        hasHit && Number.isFinite(hitPoint.x) && Number.isFinite(hitPoint.y) && Number.isFinite(hitPoint.z)
+        hasGroundHit &&
+        Number.isFinite(hitPoint.x) &&
+        Number.isFinite(hitPoint.y) &&
+        Number.isFinite(hitPoint.z)
           ? hitPoint
-          : controls?.target?.clone?.() || new THREE.Vector3(0, 0, 0)
+          : controls?.target || new THREE.Vector3(0, 0, 0)
 
-      const currentTarget = controls?.target?.clone?.() || new THREE.Vector3(0, 0, 0)
-
+      const currentDistance = camera.position.distanceTo(zoomCenter)
       const zoomIn = e.deltaY < 0
-      const zoomFactor = zoomIn ? 0.16 : -0.16
+      const nextDistance = THREE.MathUtils.clamp(
+        currentDistance * (zoomIn ? 1 - zoomSpeed : 1 + zoomSpeed),
+        minDistance,
+        maxDistance
+      )
 
-      const nextCameraPosition = camera.position.clone().lerp(zoomCenter, zoomFactor)
-      const nextTarget = currentTarget.clone().lerp(zoomCenter, zoomFactor)
+      directionRef.current
+        .copy(camera.position)
+        .sub(zoomCenter)
+        .normalize()
 
-      const distance = nextCameraPosition.distanceTo(nextTarget)
-      const minDistance = 1.6
-      const maxDistance = 42
+      nextCameraPositionRef.current
+        .copy(zoomCenter)
+        .add(directionRef.current.multiplyScalar(nextDistance))
 
-      if (distance < minDistance || distance > maxDistance) return
-
-      camera.position.copy(nextCameraPosition)
+      camera.position.copy(nextCameraPositionRef.current)
 
       if (controls?.target) {
-        controls.target.copy(nextTarget)
+        controls.target.lerp(zoomCenter, zoomIn ? targetFollow : targetFollow * 0.5)
         controls.update()
       } else {
-        camera.lookAt(nextTarget)
+        camera.lookAt(zoomCenter)
       }
     }
 
-    dom.addEventListener('wheel', handleWheel, {
-      passive: false,
-    })
+    dom.addEventListener('wheel', handleWheel, { passive: false })
 
     return () => {
       dom.removeEventListener('wheel', handleWheel)
     }
-  }, [camera, gl, controls])
+  }, [camera, gl, controls, minDistance, maxDistance, zoomSpeed, targetFollow])
 
   return null
 }
@@ -484,7 +499,7 @@ export default function Scene3D() {
         {activeCamera?.description && (
           <span className="text-zinc-400 ml-2">{activeCamera.description}</span>
         )}
-        <span className="text-zinc-500 ml-2">點球場上的 📷 可切換右側影片</span>
+        <span className="text-zinc-500 ml-2">滾輪依滑鼠位置縮放｜右鍵平移｜點 📷 切換影片</span>
       </div>
 
       <div className="absolute top-2 right-2 z-20">
@@ -535,6 +550,7 @@ export default function Scene3D() {
       <Canvas camera={{ position: [8, 5, 8], fov: 55 }}>
         <ambientLight intensity={0.5} />
         <directionalLight position={[10, 20, 10]} intensity={1.5} castShadow />
+
         <CourtRef />
         <RealCameraMarkers />
         <AnimatedTrajectory points={points} />
@@ -544,6 +560,15 @@ export default function Scene3D() {
           makeDefault
           target={[0, 0, 0]}
           enableZoom={false}
+          enablePan
+          enableRotate
+          enableDamping
+          dampingFactor={0.08}
+          mouseButtons={{
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.PAN,
+            RIGHT: THREE.MOUSE.PAN,
+          }}
         />
 
         <CursorZoomControls />
