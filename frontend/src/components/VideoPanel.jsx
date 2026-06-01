@@ -66,37 +66,72 @@ function getTrajectoryWindow(trajByFrame, centerFrame, radius = 12) {
   return points
 }
 
+function getObjectContainRect(container, video) {
+  const boxWidth = Math.max(1, Math.round(container?.clientWidth || video?.clientWidth || 0))
+  const boxHeight = Math.max(1, Math.round(container?.clientHeight || video?.clientHeight || 0))
+
+  const videoWidth = video?.videoWidth || 1280
+  const videoHeight = video?.videoHeight || 800
+
+  const boxRatio = boxWidth / boxHeight
+  const videoRatio = videoWidth / videoHeight
+
+  let width = boxWidth
+  let height = boxHeight
+  let x = 0
+  let y = 0
+
+  if (boxRatio > videoRatio) {
+    height = boxHeight
+    width = height * videoRatio
+    x = (boxWidth - width) / 2
+  } else {
+    width = boxWidth
+    height = width / videoRatio
+    y = (boxHeight - height) / 2
+  }
+
+  return {
+    boxWidth,
+    boxHeight,
+    x,
+    y,
+    width,
+    height,
+  }
+}
+
 function drawProjectionOverlay({
   canvas,
+  container,
   video,
   cameraParams,
   trajByFrame,
   currentFrame,
   showProjection,
 }) {
-  if (!canvas || !video) return
+  if (!canvas || !container || !video) return
 
-  const cssWidth = Math.max(1, Math.round(video.clientWidth || 0))
-  const cssHeight = Math.max(1, Math.round(video.clientHeight || 0))
+  const rect = getObjectContainRect(container, video)
   const dpr = window.devicePixelRatio || 1
 
-  canvas.style.width = `${cssWidth}px`
-  canvas.style.height = `${cssHeight}px`
-  canvas.width = Math.max(1, Math.round(cssWidth * dpr))
-  canvas.height = Math.max(1, Math.round(cssHeight * dpr))
+  canvas.style.width = `${rect.boxWidth}px`
+  canvas.style.height = `${rect.boxHeight}px`
+  canvas.width = Math.max(1, Math.round(rect.boxWidth * dpr))
+  canvas.height = Math.max(1, Math.round(rect.boxHeight * dpr))
 
   const ctx = canvas.getContext('2d')
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, cssWidth, cssHeight)
+  ctx.clearRect(0, 0, rect.boxWidth, rect.boxHeight)
 
   if (!showProjection || !cameraParams) return
 
-  const scaleX = cssWidth / cameraParams.imageWidth
-  const scaleY = cssHeight / cameraParams.imageHeight
+  const scaleX = rect.width / cameraParams.imageWidth
+  const scaleY = rect.height / cameraParams.imageHeight
 
   const toCanvasPoint = (projection) => ({
-    x: projection.u * scaleX,
-    y: projection.v * scaleY,
+    x: rect.x + projection.u * scaleX,
+    y: rect.y + projection.v * scaleY,
   })
 
   const windowPoints = getTrajectoryWindow(trajByFrame, currentFrame, 12)
@@ -142,12 +177,9 @@ function drawProjectionOverlay({
     ? project3DToImage(currentPoint, cameraParams)
     : null
 
-  if (!currentProjection) {
-    return
-  }
+  if (!currentProjection) return
 
   const currentCanvasPoint = toCanvasPoint(currentProjection)
-  const isInside = currentProjection.insideImage
 
   ctx.save()
   ctx.fillStyle = '#ef4444'
@@ -159,10 +191,10 @@ function drawProjectionOverlay({
   ctx.fill()
 
   ctx.restore()
-
 }
 
 export default function VideoPanel() {
+  const videoWrapRef = useRef(null)
   const videoRef = useRef(null)
   const overlayCanvasRef = useRef(null)
   const syncFromVideoRef = useRef(false)
@@ -210,43 +242,55 @@ export default function VideoPanel() {
     return localVideoSrcMap[activeCamera.id] || resolveVideoUrl(activeCamera.video_url || activeCamera.url)
   }, [activeCamera, localVideoSrcMap])
 
-  useEffect(() => {
-    if (!activeCamera && safeCameras[0]) {
-      setActiveCamera(safeCameras[0].id)
-      return
-    }
-
-    if (activeCameraId && safeCameras.length > 0 && !safeCameras.some((camera) => camera.id === activeCameraId)) {
-      setActiveCamera(safeCameras[0].id)
-    }
-  }, [activeCamera, activeCameraId, safeCameras, setActiveCamera])
-
-  useEffect(() => {
+  const redrawOverlay = () => {
     drawProjectionOverlay({
       canvas: overlayCanvasRef.current,
+      container: videoWrapRef.current,
       video: videoRef.current,
       cameraParams: activeCameraParams,
       trajByFrame,
       currentFrame,
       showProjection,
     })
+  }
+
+  useEffect(() => {
+    if (!activeCamera && safeCameras[0]) {
+      setActiveCamera(safeCameras[0].id)
+      return
+    }
+
+    if (
+      activeCameraId &&
+      safeCameras.length > 0 &&
+      !safeCameras.some((camera) => camera.id === activeCameraId)
+    ) {
+      setActiveCamera(safeCameras[0].id)
+    }
+  }, [activeCamera, activeCameraId, safeCameras, setActiveCamera])
+
+  useEffect(() => {
+    redrawOverlay()
   }, [activeCameraParams, trajByFrame, currentFrame, showProjection, activeSrc])
 
   useEffect(() => {
-    const onResize = () => {
-      drawProjectionOverlay({
-        canvas: overlayCanvasRef.current,
-        video: videoRef.current,
-        cameraParams: activeCameraParams,
-        trajByFrame,
-        currentFrame,
-        showProjection,
-      })
-    }
-
+    const onResize = () => redrawOverlay()
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [activeCameraParams, trajByFrame, currentFrame, showProjection])
+
+  useEffect(() => {
+    const target = videoWrapRef.current
+    if (!target) return
+
+    const observer = new ResizeObserver(() => {
+      redrawOverlay()
+    })
+
+    observer.observe(target)
+
+    return () => observer.disconnect()
+  }, [activeSrc, activeCameraParams, trajByFrame, currentFrame, showProjection])
 
   function onPickLocalFiles(files) {
     const pickedFiles = Array.from(files || [])
@@ -324,6 +368,7 @@ export default function VideoPanel() {
 
     if (shouldSeek) {
       lastAppliedTimeRef.current = targetTime
+
       try {
         v.currentTime = targetTime
       } catch {}
@@ -370,6 +415,7 @@ export default function VideoPanel() {
 
     return () => {
       stopped = true
+
       if (callbackId && v.cancelVideoFrameCallback) {
         v.cancelVideoFrameCallback(callbackId)
       }
@@ -453,30 +499,47 @@ export default function VideoPanel() {
 
   return (
     <div className="relative w-full h-full bg-black flex flex-col">
-      <div className="px-3 py-2 pl-28 border-b border-zinc-800 bg-zinc-950 flex items-center gap-2 overflow-x-auto">
-        {safeCameras.map((camera) => {
-          const isActive = activeCamera?.id === camera.id
-          const hasVideo = Boolean(localVideoSrcMap[camera.id] || camera.video_url || camera.url)
-          const isSceneTarget = sceneCameraTargetId === camera.id
-          const cameraHasProjection = hasProjectionParams(camera.id)
+      <div className="px-3 py-2 pl-28 border-b border-zinc-800 bg-zinc-950 flex items-center justify-between gap-3 overflow-hidden">
+        <div className="flex items-center gap-2 min-w-0 overflow-x-auto">
 
-          return (
-            <button
-              key={camera.id}
-              onClick={() => switchCamera(camera.id)}
-              className={`px-2.5 py-1 rounded text-xs border shrink-0 transition-colors ${
-                isActive
-                  ? 'bg-sky-700 border-sky-500 text-white'
-                  : hasVideo
-                    ? 'bg-zinc-800 border-zinc-700 text-zinc-100 hover:bg-zinc-700'
-                    : 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:bg-zinc-900'
-              }`}
-              title={`${camera.label} / ${camera.description || ''} / ${camera.fileName || ''}${isSceneTarget ? ' / 3D view target' : ''}${cameraHasProjection ? ' / has projection params' : ''}`}
-            >
-              {camera.index ?? camera.id.replace('cam', '')}
-            </button>
-          )
-        })}
+          {safeCameras.map((camera) => {
+            const isActive = activeCamera?.id === camera.id
+            const hasVideo = Boolean(localVideoSrcMap[camera.id] || camera.video_url || camera.url)
+            const isSceneTarget = sceneCameraTargetId === camera.id
+            const cameraHasProjection = hasProjectionParams(camera.id)
+
+            return (
+              <button
+                key={camera.id}
+                onClick={() => switchCamera(camera.id)}
+                className={`px-2.5 py-1 rounded text-xs border shrink-0 transition-colors ${
+                  isActive
+                    ? 'bg-sky-700 border-sky-500 text-white'
+                    : hasVideo
+                      ? 'bg-zinc-800 border-zinc-700 text-zinc-100 hover:bg-zinc-700'
+                      : 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:bg-zinc-900'
+                }`}
+                title={`${camera.label} / ${camera.description || ''} / ${camera.fileName || ''}${isSceneTarget ? ' / 3D view target' : ''}${cameraHasProjection ? ' / has projection params' : ''}`}
+              >
+                {camera.index ?? camera.id.replace('cam', '')}
+              </button>
+            )
+          })}
+        </div>
+
+        <label className="inline-flex items-center shrink-0">
+          <span className="px-3 py-1 text-xs text-white bg-zinc-700 hover:bg-zinc-600 rounded cursor-pointer">
+            選擇 0-9.mp4
+          </span>
+
+          <input
+            type="file"
+            accept="video/*"
+            multiple
+            onChange={(e) => onPickLocalFiles(e.target.files)}
+            className="hidden"
+          />
+        </label>
       </div>
 
       <div className="flex-1 flex items-center justify-center bg-black min-h-0 overflow-hidden relative">
@@ -499,7 +562,7 @@ export default function VideoPanel() {
                     : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
                   : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed'
               }`}
-              title={projectionAvailable ? '顯示 / 隱藏 3D 球點投影' : '目前只有 Cam 3 / Cam 4 有相機參數'}
+              title={projectionAvailable ? '顯示 / 隱藏 3D 球點投影' : '此視角沒有 camera params'}
             >
               3D→2D
             </button>
@@ -510,17 +573,20 @@ export default function VideoPanel() {
           <div className="text-zinc-400 text-sm px-4 text-center leading-7">
             目前沒有載入 {activeCamera?.label || 'camera'} 的影片。
             <br />
-            請下方一次選擇 <span className="text-zinc-100">0.mp4 ~ 9.mp4</span>。
+            請上方選擇 <span className="text-zinc-100">0.mp4 ~ 9.mp4</span>。
           </div>
         )}
 
         {activeSrc && (
-          <div className="relative inline-block max-h-full max-w-full">
+          <div
+            ref={videoWrapRef}
+            className="relative w-full h-full flex items-center justify-center overflow-hidden"
+          >
             <video
               ref={videoRef}
               key={activeCamera?.id}
               src={activeSrc}
-              className="block max-h-full max-w-full"
+              className="block w-full h-full object-contain"
               onTimeUpdate={onTimeUpdate}
               onLoadedMetadata={() => {
                 const v = videoRef.current
@@ -538,16 +604,7 @@ export default function VideoPanel() {
                   if (p && typeof p.catch === 'function') p.catch(() => {})
                 }
 
-                window.requestAnimationFrame(() => {
-                  drawProjectionOverlay({
-                    canvas: overlayCanvasRef.current,
-                    video: videoRef.current,
-                    cameraParams: activeCameraParams,
-                    trajByFrame,
-                    currentFrame,
-                    showProjection,
-                  })
-                })
+                window.requestAnimationFrame(redrawOverlay)
               }}
               playsInline
               onClick={togglePlaying}
@@ -555,36 +612,16 @@ export default function VideoPanel() {
 
             <canvas
               ref={overlayCanvasRef}
-              className="absolute left-0 top-0 pointer-events-none"
+              className="absolute inset-0 pointer-events-none"
             />
           </div>
         )}
 
         {activeSrc && !projectionAvailable && (
           <div className="absolute bottom-3 right-3 z-10 px-2 py-1 rounded bg-black/65 border border-white/10 text-xs text-zinc-400">
-            此視角沒有 camera params，目前只有 Cam 3 / Cam 4 可投影
+            此視角沒有 camera params，無法投影
           </div>
         )}
-      </div>
-
-      <div className="px-3 py-2 border-t border-zinc-800 bg-zinc-950 flex items-center gap-3">
-        <label className="inline-flex items-center shrink-0">
-          <span className="px-3 py-1.5 text-sm text-white bg-zinc-700 hover:bg-zinc-600 rounded cursor-pointer">
-            選擇 0-9.mp4
-          </span>
-
-          <input
-            type="file"
-            accept="video/*"
-            multiple
-            onChange={(e) => onPickLocalFiles(e.target.files)}
-            className="hidden"
-          />
-        </label>
-
-        <div className="text-xs text-zinc-500 truncate">
-          檔名請用 0.mp4、1.mp4、2.mp4 ... 9.mp4；鍵盤 0~9 可快速切換視角；Cam 3 / Cam 4 支援 3D→2D 投影。
-        </div>
       </div>
     </div>
   )
