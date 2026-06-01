@@ -25,6 +25,7 @@ export function PlaybackUI({
       clearTimeout(holdTimerRef.current)
       holdTimerRef.current = null
     }
+
     if (holdIntervalRef.current) {
       clearInterval(holdIntervalRef.current)
       holdIntervalRef.current = null
@@ -33,6 +34,7 @@ export function PlaybackUI({
 
   const startHold = (delta) => {
     stopHold()
+
     holdTimerRef.current = setTimeout(() => {
       holdIntervalRef.current = setInterval(() => {
         const now = useAppStore.getState().currentTime
@@ -53,7 +55,7 @@ export function PlaybackUI({
   })
 
   return (
-    <div className="flex items-center gap-3 ml-6 transition-opacity duration-300 opacity-100 min-w-0">
+    <div className="flex items-center justify-center gap-2 transition-opacity duration-300 opacity-100 min-w-0">
       <button
         onClick={goPrevRally}
         className="w-8 h-8 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
@@ -103,6 +105,7 @@ export function PlaybackUI({
       <button
         onClick={togglePlaying}
         className="w-8 h-8 flex items-center justify-center bg-cyan-600 hover:bg-cyan-500 rounded-md text-white shadow-[0_0_10px_rgba(8,145,178,0.3)] transition-transform active:scale-95 shrink-0"
+        title="Play / Pause"
       >
         {playing ? (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -195,13 +198,13 @@ export default function TimelinePanel() {
   const PLAYHEAD_GRAB_PX = 10
 
   const TRACKS = [
-    { id: 'rally', label: 'Rally', height: 30, bg: '#18181b' },
-    { id: 'speed_hit', label: 'SPEED / HIT', height: 120, bg: '#09090b', valueFn: p => p.speed, color: '#fcd34d', fill: 'rgba(252,211,77,0.1)' },
-    { id: 'pos_x', label: 'X (t)', height: 75, bg: '#18181b', valueFn: p => p.x, color: '#38bdf8' },
-    { id: 'pos_y', label: 'Y (t)', height: 75, bg: '#09090b', valueFn: p => p.y, color: '#fb923c' },
-    { id: 'pos_z', label: 'Z (t)', height: 75, bg: '#18181b', valueFn: p => p.z, color: '#34d399' },
+    { id: 'rally', label: 'Rally', height: 30, bg: '#09090b' },
+    { id: 'pos_x', label: 'X (t)', height: 85, bg: '#18181b', valueFn: p => p.x, color: '#38bdf8' },
+    { id: 'pos_y', label: 'Y (t)', height: 85, bg: '#09090b', valueFn: p => p.y, color: '#fb923c' },
+    { id: 'pos_z', label: 'Z (t)', height: 85, bg: '#18181b', valueFn: p => p.z, color: '#34d399' },
     { id: 'anomaly', label: 'Anomaly', height: 40, bg: '#09090b' },
   ]
+
   const TOTAL_TRACKS_HEIGHT = TRACKS.reduce((s, t) => s + t.height, 0)
 
   const maxScrollLeft = Math.max(
@@ -224,6 +227,7 @@ export default function TimelinePanel() {
   const ensureTimeVisible = (timeSec) => {
     const usableWidth = getUsableWidth()
     if (usableWidth <= 0) return
+
     const targetScroll = clampScroll(timeSec * pxPerSec - usableWidth / 2)
     if (Math.abs(targetScroll - scrollLeft) > 0.5) {
       setScrollLeft(targetScroll)
@@ -259,6 +263,7 @@ export default function TimelinePanel() {
 
     const curFrame = Math.round(currentTime * fps)
     let targetIdx = -1
+
     for (let i = sorted.length - 1; i >= 0; i--) {
       if (sorted[i].start_frame < curFrame) {
         targetIdx = i
@@ -291,10 +296,12 @@ export default function TimelinePanel() {
 
   useEffect(() => {
     if (!containerRef.current) return
+
     const observer = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect
       setDimensions({ width, height })
     })
+
     observer.observe(containerRef.current)
     return () => observer.disconnect()
   }, [])
@@ -304,8 +311,10 @@ export default function TimelinePanel() {
 
   useEffect(() => {
     if (dimensions.width === 0 || isSyncingFromScrollRef.current || isPanning) return
+
     const targetScroll = clampScroll(currentTime * pxPerSec - getUsableWidth() / 2)
     if (Math.abs(targetScroll - scrollLeft) <= 0.5) return
+
     isProgrammaticScrollRef.current = true
     setScrollLeft(targetScroll)
   }, [currentTime, pxPerSec, dimensions.width, scrollLeft, isPanning])
@@ -318,6 +327,7 @@ export default function TimelinePanel() {
   }, [scrollLeft])
 
   const fetchLockRef = useRef(false)
+
   useEffect(() => {
     if (dimensions.width === 0) return
 
@@ -327,12 +337,14 @@ export default function TimelinePanel() {
     const eF = Math.ceil(endSec * fps) + 30
 
     let missing = 0
+
     for (let f = sF; f <= eF; f++) {
       if (!trajMap.has(f)) missing++
     }
 
     if (missing > 20 && !fetchLockRef.current) {
       fetchLockRef.current = true
+
       api.getTraj(matchId, Math.max(0, sF), eF)
         .then(pts => {
           if (pts && pts.length > 0) upsertTrajPoints(pts)
@@ -352,6 +364,7 @@ export default function TimelinePanel() {
 
       if (e.key === 'i' || e.key === 'I') setSelectionIn()
       if (e.key === 'o' || e.key === 'O') setSelectionOut()
+
       if (e.key === 'Escape') {
         clearSelection()
         setActiveItem(null, null)
@@ -359,15 +372,20 @@ export default function TimelinePanel() {
 
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         const isRight = e.key === 'ArrowRight'
+
         if (activeItem?.type === 'rally') {
           e.preventDefault()
+
           const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
           const idx = sorted.findIndex(r => r.id === activeItem.id)
+
           if (idx !== -1) {
             const nextIdx = idx + (isRight ? 1 : -1)
+
             if (nextIdx >= 0 && nextIdx < sorted.length) {
               const r = sorted[nextIdx]
               const s = r.start_frame / fps
+
               setSelectionRange(s, r.end_frame / fps)
               setCurrentTime(s)
               setActiveItem('rally', r.id)
@@ -376,15 +394,18 @@ export default function TimelinePanel() {
           }
         } else if (activeItem?.type === 'hit') {
           e.preventDefault()
+
           const hit = hits.find(h => h.id === activeItem.id)
           if (hit) {
             const frame = hit.new_hit_frame ?? hit.hit_frame
             const newFrame = frame + (isRight ? 1 : -1)
+
             updateHit(hit.id, { new_hit_frame: newFrame })
             setCurrentTime(newFrame / fps)
           }
         } else {
           e.preventDefault()
+
           const step = 1 / fps
           setCurrentTime(Math.max(0, currentTime + (isRight ? step : -step)))
         }
@@ -393,7 +414,20 @@ export default function TimelinePanel() {
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeItem, rallies, hits, currentTime, fps, clearSelection, setActiveItem, setSelectionIn, setSelectionOut, setSelectionRange, updateHit, setCurrentTime])
+  }, [
+    activeItem,
+    rallies,
+    hits,
+    currentTime,
+    fps,
+    clearSelection,
+    setActiveItem,
+    setSelectionIn,
+    setSelectionOut,
+    setSelectionRange,
+    updateHit,
+    setCurrentTime,
+  ])
 
   useEffect(() => {
     if (!isScrubbing && !draggingHit && !isPanning && playing) {
@@ -407,8 +441,10 @@ export default function TimelinePanel() {
 
     const ctx = canvas.getContext('2d')
     const scale = window.devicePixelRatio || 1
+
     canvas.width = dimensions.width * scale
     canvas.height = Math.max(dimensions.height, TOTAL_TRACKS_HEIGHT + RULER_HEIGHT) * scale
+
     ctx.scale(scale, scale)
 
     const w = dimensions.width
@@ -426,24 +462,30 @@ export default function TimelinePanel() {
 
     const pts = []
     const step = Math.max(1, Math.floor((eF - sF) / 1000))
+
     for (let f = sF; f <= eF; f += step) {
       const p = trajMap.get(f)
       if (p) pts.push(p)
     }
 
     ctx.save()
+
     let currentY = RULER_HEIGHT
+
     for (const track of TRACKS) {
       ctx.fillStyle = track.bg
       ctx.fillRect(0, currentY, w, track.height)
+
       ctx.strokeStyle = '#27272a'
       ctx.lineWidth = 1
       ctx.beginPath()
       ctx.moveTo(0, currentY + track.height)
       ctx.lineTo(w, currentY + track.height)
       ctx.stroke()
+
       currentY += track.height
     }
+
     ctx.restore()
 
     ctx.save()
@@ -461,6 +503,7 @@ export default function TimelinePanel() {
         for (const r of rallies) {
           const sx = timeToX(r.start_frame / fps)
           const ex = timeToX(r.end_frame / fps)
+
           if (ex < TRACK_LABELS_WIDTH || sx > w) continue
 
           let color = 'rgba(63,63,70,0.5)'
@@ -481,8 +524,10 @@ export default function TimelinePanel() {
           ctx.font = '10px sans-serif'
           ctx.textAlign = 'center'
           ctx.textBaseline = 'middle'
+
           const text = `R${r.rally_index}`
           const m = ctx.measureText(text)
+
           if (m.width < rectW - 4) {
             ctx.fillText(text, sx + rectW / 2, barY + barH / 2)
           }
@@ -529,7 +574,14 @@ export default function TimelinePanel() {
 
             if (!first && (pts[i].frame - pts[i - 1].frame > step * 2 + 10)) {
               ctx.stroke()
-              if (pxs.length > 0) segments.push({ pxs: [...pxs], pys: [...pys] })
+
+              if (pxs.length > 0) {
+                segments.push({
+                  pxs: [...pxs],
+                  pys: [...pys],
+                })
+              }
+
               pxs.length = 0
               pys.length = 0
               first = true
@@ -538,27 +590,38 @@ export default function TimelinePanel() {
 
             const px = timeToX(pts[i].frame / fps)
             const py = trackTop + track.height - ((val - drawMin) / (drawMax - drawMin)) * track.height
+
             if (first) {
               ctx.moveTo(px, py)
               first = false
             } else {
               ctx.lineTo(px, py)
             }
+
             pxs.push(px)
             pys.push(py)
           }
+
           ctx.stroke()
 
-          if (pxs.length > 0) segments.push({ pxs: [...pxs], pys: [...pys] })
+          if (pxs.length > 0) {
+            segments.push({
+              pxs: [...pxs],
+              pys: [...pys],
+            })
+          }
 
           if (track.fill) {
             for (const seg of segments) {
               if (seg.pxs.length < 2) continue
+
               ctx.beginPath()
               ctx.moveTo(seg.pxs[0], seg.pys[0])
+
               for (let i = 1; i < seg.pxs.length; i++) {
                 ctx.lineTo(seg.pxs[i], seg.pys[i])
               }
+
               ctx.lineTo(seg.pxs[seg.pxs.length - 1], trackBot)
               ctx.lineTo(seg.pxs[0], trackBot)
               ctx.closePath()
@@ -566,6 +629,7 @@ export default function TimelinePanel() {
               const grad = ctx.createLinearGradient(0, trackTop, 0, trackBot)
               grad.addColorStop(0, track.fill)
               grad.addColorStop(1, 'rgba(0,0,0,0)')
+
               ctx.fillStyle = grad
               ctx.fill()
             }
@@ -573,49 +637,11 @@ export default function TimelinePanel() {
         }
       }
 
-      if (track.id === 'speed_hit') {
-        for (const h of hits) {
-          const isDraggingThis = draggingHit?.id === h.id
-          const frame = isDraggingThis && draggingHit.currentFrame !== undefined
-            ? draggingHit.currentFrame
-            : (h.new_hit_frame ?? h.hit_frame)
-
-          const t = frame / fps
-          const hx = timeToX(t)
-          if (hx < TRACK_LABELS_WIDTH || hx > w) continue
-
-          const conf = h.confidence ?? 1
-          const isLow = conf < 0.5
-          const isHovered = hoveredHit === h.id || isDraggingThis
-
-          ctx.fillStyle = isHovered ? '#22d3ee' : isLow ? '#f43f5e' : '#d4d4d8'
-          ctx.fillRect(hx - 1, trackTop, 2, track.height)
-
-          ctx.fillStyle = isHovered ? '#083344' : 'rgba(39,39,42,0.9)'
-          ctx.strokeStyle = isLow ? '#f43f5e' : isHovered ? '#22d3ee' : '#52525b'
-          ctx.lineWidth = 1
-
-          const text = h.shot_type || 'Hit'
-          ctx.font = '10px sans-serif'
-          const tw = ctx.measureText(text).width
-          const bw = Math.max(40, tw + 8)
-
-          ctx.beginPath()
-          ctx.roundRect(hx - bw / 2, trackTop + 4, bw, 24, 4)
-          ctx.fill()
-          ctx.stroke()
-
-          ctx.fillStyle = isLow ? '#fda4af' : isHovered ? '#67e8f9' : '#d4d4d8'
-          ctx.textAlign = 'center'
-          ctx.textBaseline = 'top'
-          ctx.fillText(text, hx, trackTop + 8)
-        }
-      }
-
       if (track.id === 'anomaly') {
         for (const a of anomalies) {
           const sx = timeToX(a.start_frame / fps)
           const ex = timeToX(a.end_frame / fps)
+
           if (ex < TRACK_LABELS_WIDTH || sx > w) continue
 
           const sev = a.severity ?? 3
@@ -637,6 +663,7 @@ export default function TimelinePanel() {
       const e = Math.max(selection.inTime, selection.outTime)
       const sx = Math.max(TRACK_LABELS_WIDTH, timeToX(s))
       const ex = Math.min(w, timeToX(e))
+
       if (sx < w && ex > TRACK_LABELS_WIDTH) {
         ctx.fillStyle = 'rgba(167, 139, 250, 0.15)'
         ctx.fillRect(sx, RULER_HEIGHT, ex - sx, TOTAL_TRACKS_HEIGHT)
@@ -644,17 +671,89 @@ export default function TimelinePanel() {
         ctx.strokeStyle = 'rgba(167, 139, 250, 0.8)'
         ctx.lineWidth = 1
         ctx.setLineDash([4, 4])
+
         ctx.beginPath()
         ctx.moveTo(sx, RULER_HEIGHT)
         ctx.lineTo(sx, h)
         ctx.moveTo(ex, RULER_HEIGHT)
         ctx.lineTo(ex, h)
         ctx.stroke()
+
         ctx.setLineDash([])
       }
     }
 
+    for (const hItem of hits) {
+      const isDraggingThis = draggingHit?.id === hItem.id
+      const frame = isDraggingThis && draggingHit.currentFrame !== undefined
+        ? draggingHit.currentFrame
+        : (hItem.new_hit_frame ?? hItem.hit_frame)
+
+      const hx = timeToX(frame / fps)
+
+      if (hx < TRACK_LABELS_WIDTH || hx > w) continue
+
+      const conf = hItem.confidence ?? 1
+      const isLow = conf < 0.5
+      const isHovered = hoveredHit === hItem.id || isDraggingThis
+
+      ctx.save()
+
+      ctx.strokeStyle = isHovered
+        ? '#22d3ee'
+        : isLow
+          ? '#f43f5e'
+          : 'rgba(244, 244, 245, 0.65)'
+      ctx.lineWidth = isHovered ? 2 : 1
+      ctx.setLineDash(isHovered ? [] : [4, 4])
+
+      ctx.beginPath()
+      ctx.moveTo(hx, RULER_HEIGHT)
+      ctx.lineTo(hx, RULER_HEIGHT + TOTAL_TRACKS_HEIGHT)
+      ctx.stroke()
+
+      ctx.setLineDash([])
+
+      const label = hItem.shot_type || 'Hit'
+      ctx.font = '10px sans-serif'
+      const textWidth = ctx.measureText(label).width
+      const boxWidth = Math.max(42, textWidth + 10)
+      const boxHeight = 22
+      const boxX = Math.max(
+        TRACK_LABELS_WIDTH + 2,
+        Math.min(w - boxWidth - 2, hx - boxWidth / 2)
+      )
+      const boxY = RULER_HEIGHT + 6
+
+      ctx.fillStyle = isHovered
+        ? '#083344'
+        : 'rgba(39,39,42,0.9)'
+      ctx.strokeStyle = isLow
+        ? '#f43f5e'
+        : isHovered
+          ? '#22d3ee'
+          : '#52525b'
+      ctx.lineWidth = 1
+
+      ctx.beginPath()
+      ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 4)
+      ctx.fill()
+      ctx.stroke()
+
+      ctx.fillStyle = isLow
+        ? '#fda4af'
+        : isHovered
+          ? '#67e8f9'
+          : '#d4d4d8'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(label, boxX + boxWidth / 2, boxY + boxHeight / 2)
+
+      ctx.restore()
+    }
+
     const cx = getFixedPlayheadX()
+
     if (cx >= TRACK_LABELS_WIDTH && cx <= w) {
       ctx.strokeStyle = '#38bdf8'
       ctx.lineWidth = 1.5
@@ -678,6 +777,7 @@ export default function TimelinePanel() {
 
     ctx.fillStyle = 'rgba(9, 9, 11, 0.9)'
     ctx.fillRect(TRACK_LABELS_WIDTH, 0, w - TRACK_LABELS_WIDTH, RULER_HEIGHT)
+
     ctx.strokeStyle = '#27272a'
     ctx.lineWidth = 1
     ctx.beginPath()
@@ -691,14 +791,18 @@ export default function TimelinePanel() {
     ctx.textBaseline = 'bottom'
 
     let tickSpacingSec = 1
+
     if (pxPerSec < 20) tickSpacingSec = 10
     else if (pxPerSec < 50) tickSpacingSec = 5
     else if (pxPerSec > 200) tickSpacingSec = 0.5
 
     const firstTick = Math.floor(sSec / tickSpacingSec) * tickSpacingSec
+
     for (let t = firstTick; t <= eSec; t += tickSpacingSec) {
       if (t < 0) continue
+
       const tx = timeToX(t)
+
       if (tx < TRACK_LABELS_WIDTH) continue
 
       ctx.beginPath()
@@ -709,7 +813,9 @@ export default function TimelinePanel() {
       const m = Math.floor(t / 60)
       const s = Math.floor(t % 60)
       const ms = Math.round((t % 1) * 10)
+
       let text = m > 0 ? `${m}:${s.toString().padStart(2, '0')}` : `${s}s`
+
       if (tickSpacingSec < 1 && ms > 0) text += `.${ms}`
 
       ctx.fillText(text, tx, RULER_HEIGHT - 8)
@@ -717,6 +823,7 @@ export default function TimelinePanel() {
 
     ctx.fillStyle = '#09090b'
     ctx.fillRect(0, 0, TRACK_LABELS_WIDTH, h)
+
     ctx.strokeStyle = '#27272a'
     ctx.beginPath()
     ctx.moveTo(TRACK_LABELS_WIDTH, 0)
@@ -729,15 +836,31 @@ export default function TimelinePanel() {
     ctx.font = '10px sans-serif'
 
     currentY = RULER_HEIGHT
+
     for (const track of TRACKS) {
       ctx.fillText(track.label, 12, currentY + track.height / 2)
+
       ctx.beginPath()
       ctx.moveTo(0, currentY + track.height)
       ctx.lineTo(TRACK_LABELS_WIDTH, currentY + track.height)
       ctx.stroke()
+
       currentY += track.height
     }
-  }, [dimensions, scrollLeft, pxPerSec, trajMap, rallies, hits, anomalies, currentTime, hoveredHit, draggingHit, fps, selection])
+  }, [
+    dimensions,
+    scrollLeft,
+    pxPerSec,
+    trajMap,
+    rallies,
+    hits,
+    anomalies,
+    currentTime,
+    hoveredHit,
+    draggingHit,
+    fps,
+    selection,
+  ])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -757,6 +880,7 @@ export default function TimelinePanel() {
         newPx = Math.max(5, Math.min(newPx, 1000))
 
         const newScroll = targetTime * newPx - (mouseX - TRACK_LABELS_WIDTH)
+
         setZoom(newPx)
         setScrollAndCenterTime(newScroll)
       } else {
@@ -776,14 +900,16 @@ export default function TimelinePanel() {
     let bestHit = null
     let minDist = Infinity
 
-    for (const h of hits) {
-      const ht = (h.new_hit_frame ?? h.hit_frame) / fps
+    for (const hItem of hits) {
+      const ht = (hItem.new_hit_frame ?? hItem.hit_frame) / fps
       const dist = Math.abs(ht - t)
+
       if (dist < clickZoneSec && dist < minDist) {
         minDist = dist
-        bestHit = h
+        bestHit = hItem
       }
     }
+
     return bestHit
   }
 
@@ -807,26 +933,33 @@ export default function TimelinePanel() {
     }
 
     let currentYOffset = RULER_HEIGHT
+
     for (const track of TRACKS) {
       if (y >= currentYOffset && y <= currentYOffset + track.height) {
-        if (track.id === 'speed_hit') {
+        if (track.id !== 'rally') {
           const hit = getHitAtX(x)
+
           if (hit) {
             setDraggingHit({
               id: hit.id,
               startX: x,
-              frameOffset: hit.new_hit_frame ?? hit.hit_frame
+              frameOffset: hit.new_hit_frame ?? hit.hit_frame,
             })
+
             setActiveItem('hit', hit.id)
 
             const frame = hit.new_hit_frame ?? hit.hit_frame
             setCurrentTime(frame / fps)
+
             return
           }
-        } else if (track.id === 'rally') {
+        }
+
+        if (track.id === 'rally') {
           for (const r of rallies) {
             const startSec = r.start_frame / fps
             const endSec = r.end_frame / fps
+
             if (t >= startSec && t <= endSec) {
               setSelectionRange(startSec, endSec)
               setCurrentTime(startSec)
@@ -836,9 +969,28 @@ export default function TimelinePanel() {
             }
           }
         }
+
         break
       }
+
       currentYOffset += track.height
+    }
+
+    const hit = getHitAtX(x)
+
+    if (hit && y >= RULER_HEIGHT && y <= RULER_HEIGHT + TOTAL_TRACKS_HEIGHT) {
+      setDraggingHit({
+        id: hit.id,
+        startX: x,
+        frameOffset: hit.new_hit_frame ?? hit.hit_frame,
+      })
+
+      setActiveItem('hit', hit.id)
+
+      const frame = hit.new_hit_frame ?? hit.hit_frame
+      setCurrentTime(frame / fps)
+
+      return
     }
 
     clearSelection()
@@ -847,7 +999,7 @@ export default function TimelinePanel() {
     setIsPanning({
       pointerId: e.pointerId,
       startX: x,
-      startScroll: scrollLeft
+      startScroll: scrollLeft,
     })
   }
 
@@ -858,7 +1010,9 @@ export default function TimelinePanel() {
 
     if (isScrubbing) {
       const t = getTimeFromCanvasX(x)
+
       setCurrentTime(t)
+
       if (canvas) canvas.style.cursor = 'ew-resize'
       return
     }
@@ -869,8 +1023,13 @@ export default function TimelinePanel() {
       const newFrame = Math.max(0, Math.round(draggingHit.frameOffset + dxSec * fps))
       const t = newFrame / fps
 
-      setDraggingHit(prev => ({ ...prev, currentFrame: newFrame }))
+      setDraggingHit(prev => ({
+        ...prev,
+        currentFrame: newFrame,
+      }))
+
       setCurrentTime(t)
+
       if (canvas) canvas.style.cursor = 'ew-resize'
       return
     }
@@ -880,6 +1039,7 @@ export default function TimelinePanel() {
       const targetScroll = isPanning.startScroll - dx
 
       if (rafPanRef.current) cancelAnimationFrame(rafPanRef.current)
+
       rafPanRef.current = requestAnimationFrame(() => {
         setScrollAndCenterTime(targetScroll)
       })
@@ -894,13 +1054,16 @@ export default function TimelinePanel() {
       return
     }
 
-    if (x > TRACK_LABELS_WIDTH && y > RULER_HEIGHT && y < RULER_HEIGHT + 30 + 120) {
+    if (x > TRACK_LABELS_WIDTH && y > RULER_HEIGHT && y < RULER_HEIGHT + TOTAL_TRACKS_HEIGHT) {
       const hit = getHitAtX(x)
+
       if (hit && hoveredHit !== hit.id) {
         setHoveredHit(hit.id)
+
         if (canvas) canvas.style.cursor = 'ew-resize'
       } else if (!hit && hoveredHit) {
         setHoveredHit(null)
+
         if (canvas) canvas.style.cursor = 'grab'
       } else if (!hit && canvas) {
         canvas.style.cursor = 'grab'
@@ -913,6 +1076,7 @@ export default function TimelinePanel() {
 
   const handlePointerUp = (e) => {
     e.target.releasePointerCapture(e.pointerId)
+
     setIsScrubbing(false)
     setIsPanning(null)
 
@@ -929,54 +1093,74 @@ export default function TimelinePanel() {
 
       if (newFrame !== undefined) {
         updateHit(hitId, { new_hit_frame: newFrame })
+
         api.patchHit(hitId, { new_hit_frame: newFrame }).catch(err => {
           console.error(err)
           alert('Hit 更新失敗: ' + err)
         })
       }
+
       setDraggingHit(null)
     }
   }
 
   return (
     <div className="h-full w-full min-h-0 min-w-0 relative flex flex-col bg-[#09090b] select-none overflow-hidden">
-      <div className="h-[42px] shrink-0 px-4 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20 min-w-0 overflow-hidden">
-        <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
-          {[
-            ['timeline', 'TIMELINE'],
-            ['projection2d', '2D'],
-          ].map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setBottomView(id)}
-              className={`px-3 py-1 text-xs font-bold tracking-wider transition-colors ${
-                bottomView === id
-                  ? 'bg-zinc-800 text-zinc-100'
-                  : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/70'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+      <div className="h-[42px] shrink-0 px-3 grid grid-cols-[auto_1fr_auto] items-center border-b border-zinc-800 bg-zinc-950 shadow-sm z-20 min-w-0 overflow-hidden">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
+            {[
+              ['timeline', 'TIMELINE'],
+              ['projection2d', '2D'],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setBottomView(id)}
+                className={`px-3 py-1 text-xs font-bold tracking-wider transition-colors ${
+                  bottomView === id
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/70'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {(draggingHit?.currentFrame !== undefined) && (
+            <div className="hidden md:block text-xs text-amber-300 font-semibold px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 rounded shrink-0">
+              Hit #{draggingHit.id} → Frame {draggingHit.currentFrame}
+            </div>
+          )}
         </div>
 
-        <div className="text-xs text-zinc-500 font-mono min-w-0 truncate">
-          <span className="text-zinc-300">Drag empty area</span> Pan | <span className="text-zinc-300">Drag blue line</span> Scrub | <span className="text-zinc-300">Drag hit</span> Move hit | <span className="text-zinc-300">Rally buttons</span> Jump rally
-        </div>
-
-        <div className="min-w-0 overflow-hidden">
+        <div className="flex justify-center min-w-0 overflow-hidden">
           <PlaybackUI
             goPrevRally={goPrevRally}
             goNextRally={goNextRally}
           />
         </div>
 
-        {(draggingHit?.currentFrame !== undefined) && (
-          <div className="ml-3 text-xs text-amber-300 font-semibold px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 rounded shrink-0">
-            Hit #{draggingHit.id} → Frame {draggingHit.currentFrame}
-          </div>
-        )}
+        <div className="flex items-center justify-end gap-2 min-w-0">
+          <button
+            type="button"
+            className="px-2 py-1 text-xs rounded border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0"
+            title={
+              '操作說明\n' +
+              '拖曳空白區域：平移 Timeline\n' +
+              '拖曳藍色播放線：Scrub\n' +
+              '拖曳 Hit 線：移動 Hit frame\n' +
+              'Rally 按鈕：切換上一個 / 下一個 Rally\n' +
+              'Space：播放 / 暫停\n' +
+              '← / →：單幀移動\n' +
+              'I / O：設定 In / Out\n' +
+              'Esc：取消選取'
+            }
+          >
+            快捷鍵
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 min-w-0 relative overflow-hidden bg-[#09090b]" ref={containerRef}>
@@ -1000,19 +1184,28 @@ export default function TimelinePanel() {
         className="h-[14px] w-full shrink-0 overflow-x-scroll overflow-y-hidden bg-zinc-950 border-t border-zinc-800"
         onScroll={(e) => {
           const nextScroll = clampScroll(e.target.scrollLeft)
+
           if (isProgrammaticScrollRef.current) {
             isProgrammaticScrollRef.current = false
             return
           }
+
           isSyncingFromScrollRef.current = true
+
           setScrollLeft(nextScroll)
           setCurrentTime(getCenterTimeFromScroll(nextScroll))
+
           requestAnimationFrame(() => {
             isSyncingFromScrollRef.current = false
           })
         }}
       >
-        <div style={{ width: `${(durationSec * pxPerSec) + TRACK_LABELS_WIDTH}px`, height: '1px' }} />
+        <div
+          style={{
+            width: `${(durationSec * pxPerSec) + TRACK_LABELS_WIDTH}px`,
+            height: '1px',
+          }}
+        />
       </div>
     </div>
   )
