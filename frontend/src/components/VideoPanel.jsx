@@ -58,7 +58,7 @@ function getNearestTrajectoryPoint(trajByFrame, frame, radius = 3) {
 function getTrajectoryWindow(trajByFrame, centerFrame, radius = 12) {
   const points = []
 
-  for (let frame = centerFrame - radius; frame <= centerFrame + radius; frame++) {
+  for (let frame = centerFrame - radius; frame <= centerFrame; frame++) {
     const point = trajByFrame.get(frame)
     if (point) points.push(point)
   }
