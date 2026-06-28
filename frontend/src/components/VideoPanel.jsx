@@ -216,6 +216,7 @@ export default function VideoPanel() {
   const playing = useAppStore((s) => s.playing)
   const setPlaying = useAppStore((s) => s.setPlaying)
   const togglePlaying = useAppStore((s) => s.togglePlaying)
+  const playbackRate = useAppStore((s) => s.playbackRate)
   const previewRange = useAppStore((s) => s.previewRange)
 
   const localVideoSrcMap = useAppStore((s) => s.localVideoSrcMap)
@@ -341,13 +342,16 @@ export default function VideoPanel() {
     const v = videoRef.current
     if (!v) return
 
+    v.playbackRate = playbackRate || 1
+    v.defaultPlaybackRate = playbackRate || 1
+
     if (playing && activeSrc) {
       const p = v.play()
       if (p && typeof p.catch === 'function') p.catch(() => {})
     } else {
       v.pause()
     }
-  }, [playing, activeSrc])
+  }, [playing, activeSrc, playbackRate])
 
   useEffect(() => {
     const v = videoRef.current
@@ -591,6 +595,9 @@ export default function VideoPanel() {
               onLoadedMetadata={() => {
                 const v = videoRef.current
                 if (!v || !activeCamera) return
+
+                v.playbackRate = playbackRate || 1
+                v.defaultPlaybackRate = playbackRate || 1
 
                 const targetTime = getCameraVideoTime(currentFrame, fps, activeCamera)
 
