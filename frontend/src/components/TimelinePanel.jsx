@@ -870,19 +870,20 @@ export default function TimelinePanel() {
       e.preventDefault()
 
       if (e.shiftKey) {
-        const mouseX = e.offsetX
-        if (mouseX < TRACK_LABELS_WIDTH) return
+        const usableWidth = getUsableWidth()
+        if (usableWidth <= 0) return
 
         const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1
-        const targetTime = (mouseX - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec
-
         let newPx = pxPerSec * zoomFactor
-        newPx = Math.max(5, Math.min(newPx, 1000))
+        newPx = Math.max(5, Math.min(newPx, 1000)) 
 
-        const newScroll = targetTime * newPx - (mouseX - TRACK_LABELS_WIDTH)
+        const newScroll = currentTime * newPx - usableWidth / 2
 
         setZoom(newPx)
-        setScrollAndCenterTime(newScroll)
+        
+        const clamped = Math.max(0, Math.min(newScroll, Math.max(0, durationSec * newPx - usableWidth)))
+        setScrollLeft(clamped)
+        
       } else {
         const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
         setScrollAndCenterTime(scrollLeft + delta)
