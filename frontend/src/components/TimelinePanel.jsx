@@ -133,12 +133,12 @@ export function PlaybackUI({
       </button>
 
       <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
-        {[0.5, 1, 2].map(speed => (
+        {[0.125, 0.25, 0.5, 1, 2].map(speed => (
           <button
             key={speed}
             onClick={() => setPlaybackRate(speed)}
             className={`px-2 py-1 text-[10px] font-bold transition-colors ${
-              playbackRate === speed
+              Number(playbackRate) === speed
                 ? 'bg-cyan-600 text-white'
                 : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
             }`}
@@ -163,6 +163,7 @@ export default function TimelinePanel() {
   const currentTime = useAppStore(s => s.currentTime)
   const setCurrentTime = useAppStore(s => s.setCurrentTime)
   const playing = useAppStore(s => s.playing)
+  const setPlaying = useAppStore(s => s.setPlaying)
 
   const rallies = useAppStore(s => s.rallies) || []
   const hits = useAppStore(s => s.hits) || []
@@ -217,6 +218,10 @@ export default function TimelinePanel() {
   const getFixedPlayheadX = () => TRACK_LABELS_WIDTH + getUsableWidth() / 2
   const getTimeFromCanvasX = (x) => Math.max(0, (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec)
   const getCenterTimeFromScroll = (nextScroll) => Math.max(0, (nextScroll + getUsableWidth() / 2) / pxPerSec)
+
+  const pauseForTimelineDrag = () => {
+    setPlaying(false)
+  }
 
   const setScrollAndCenterTime = (nextScroll) => {
     const clamped = clampScroll(nextScroll)
@@ -868,22 +873,22 @@ export default function TimelinePanel() {
 
     const handleWheel = (e) => {
       e.preventDefault()
+      pauseForTimelineDrag()
 
       if (e.shiftKey) {
-        const usableWidth = getUsableWidth()
-        if (usableWidth <= 0) return
+        const mouseX = e.offsetX
+        if (mouseX < TRACK_LABELS_WIDTH) return
 
         const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1
-        let newPx = pxPerSec * zoomFactor
-        newPx = Math.max(5, Math.min(newPx, 1000)) 
+        const targetTime = (mouseX - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec
 
-        const newScroll = currentTime * newPx - usableWidth / 2
+        let newPx = pxPerSec * zoomFactor
+        newPx = Math.max(5, Math.min(newPx, 1000))
+
+        const newScroll = targetTime * newPx - (mouseX - TRACK_LABELS_WIDTH)
 
         setZoom(newPx)
-        
-        const clamped = Math.max(0, Math.min(newScroll, Math.max(0, durationSec * newPx - usableWidth)))
-        setScrollLeft(clamped)
-        
+        setScrollAndCenterTime(newScroll)
       } else {
         const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
         setScrollAndCenterTime(scrollLeft + delta)
@@ -892,7 +897,7 @@ export default function TimelinePanel() {
 
     canvas.addEventListener('wheel', handleWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', handleWheel)
-  }, [scrollLeft, pxPerSec, setZoom])
+  }, [scrollLeft, pxPerSec, setZoom, setPlaying])
 
   const getHitAtX = (x) => {
     const t = getTimeFromCanvasX(x)
@@ -924,6 +929,8 @@ export default function TimelinePanel() {
     const y = e.nativeEvent.offsetY
 
     if (x < TRACK_LABELS_WIDTH) return
+
+    pauseForTimelineDrag()
 
     const t = getTimeFromCanvasX(x)
 
@@ -1010,6 +1017,8 @@ export default function TimelinePanel() {
     const canvas = canvasRef.current
 
     if (isScrubbing) {
+      pauseForTimelineDrag()
+
       const t = getTimeFromCanvasX(x)
 
       setCurrentTime(t)
@@ -1019,6 +1028,8 @@ export default function TimelinePanel() {
     }
 
     if (draggingHit) {
+      pauseForTimelineDrag()
+
       const dx = x - draggingHit.startX
       const dxSec = dx / pxPerSec
       const newFrame = Math.max(0, Math.round(draggingHit.frameOffset + dxSec * fps))
@@ -1036,6 +1047,8 @@ export default function TimelinePanel() {
     }
 
     if (isPanning) {
+      pauseForTimelineDrag()
+
       const dx = x - isPanning.startX
       const targetScroll = isPanning.startScroll - dx
 
@@ -1190,6 +1203,8 @@ export default function TimelinePanel() {
             isProgrammaticScrollRef.current = false
             return
           }
+
+          pauseForTimelineDrag()
 
           isSyncingFromScrollRef.current = true
 
