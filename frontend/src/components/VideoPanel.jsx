@@ -5,7 +5,6 @@ import {
   getProjectionParams,
   hasProjectionParams,
   project3DToImage,
-  projectTrajectoryPoints,
 } from '../utils/cameraProjection.js'
 
 function resolveVideoUrl(url) {
@@ -53,17 +52,6 @@ function getNearestTrajectoryPoint(trajByFrame, frame, radius = 3) {
   }
 
   return null
-}
-
-function getTrajectoryWindow(trajByFrame, centerFrame, radius = 12) {
-  const points = []
-
-  for (let frame = centerFrame - radius; frame <= centerFrame; frame++) {
-    const point = trajByFrame.get(frame)
-    if (point) points.push(point)
-  }
-
-  return points
 }
 
 function getObjectContainRect(container, video) {
@@ -134,45 +122,8 @@ function drawProjectionOverlay({
     y: rect.y + projection.v * scaleY,
   })
 
-  const windowPoints = getTrajectoryWindow(trajByFrame, currentFrame, 12)
-  const projectedTrail = projectTrajectoryPoints(windowPoints, cameraParams)
-    .filter((projection) => projection.insideImage)
-    .map((projection) => ({
-      ...projection,
-      canvasPoint: toCanvasPoint(projection),
-    }))
-
-  if (projectedTrail.length > 1) {
-    ctx.save()
-    ctx.lineWidth = 2
-    ctx.strokeStyle = 'rgba(250, 204, 21, 0.85)'
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.9)'
-    ctx.shadowBlur = 4
-    ctx.beginPath()
-
-    projectedTrail.forEach((projection, index) => {
-      const p = projection.canvasPoint
-      if (index === 0) ctx.moveTo(p.x, p.y)
-      else ctx.lineTo(p.x, p.y)
-    })
-
-    ctx.stroke()
-    ctx.restore()
-
-    ctx.save()
-    ctx.fillStyle = 'rgba(250, 204, 21, 0.75)'
-
-    for (const projection of projectedTrail) {
-      const p = projection.canvasPoint
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2)
-      ctx.fill()
-    }
-
-    ctx.restore()
-  }
-
   const currentPoint = getNearestTrajectoryPoint(trajByFrame, currentFrame, 3)
+
   const currentProjection = currentPoint
     ? project3DToImage(currentPoint, cameraParams)
     : null
@@ -200,6 +151,8 @@ export default function VideoPanel() {
   const syncFromVideoRef = useRef(false)
   const lastAppliedTimeRef = useRef(null)
   const previousLocalUrlsRef = useRef({})
+  const lastVideoDrivenFrameRef = useRef(null)
+  const lastManualSeekFrameRef = useRef(null)
 
   const cameras = useAppStore((s) => s.cameras)
   const activeCameraId = useAppStore((s) => s.activeCameraId)
@@ -216,13 +169,17 @@ export default function VideoPanel() {
   const playing = useAppStore((s) => s.playing)
   const setPlaying = useAppStore((s) => s.setPlaying)
   const togglePlaying = useAppStore((s) => s.togglePlaying)
-  const playbackRate = useAppStore((s) => s.playbackRate)
+  const playbackRate = useAppStore((s) => s.playbackRate) || 1
   const previewRange = useAppStore((s) => s.previewRange)
 
   const localVideoSrcMap = useAppStore((s) => s.localVideoSrcMap)
   const setLocalVideoSrcMap = useAppStore((s) => s.setLocalVideoSrcMap)
 
   const [showProjection, setShowProjection] = useState(true)
+
+  const safePlaybackRate = Number.isFinite(Number(playbackRate)) && Number(playbackRate) > 0
+    ? Number(playbackRate)
+    : 1
 
   const safeCameras = useMemo(() => {
     return Array.isArray(cameras) && cameras.length > 0 ? cameras : []
@@ -277,6 +234,7 @@ export default function VideoPanel() {
   useEffect(() => {
     const onResize = () => redrawOverlay()
     window.addEventListener('resize', onResize)
+
     return () => window.removeEventListener('resize', onResize)
   }, [activeCameraParams, trajByFrame, currentFrame, showProjection])
 
@@ -302,6 +260,7 @@ export default function VideoPanel() {
 
     for (const file of pickedFiles) {
       const cameraId = detectCameraIdFromFileName(file.name)
+
       if (!cameraId) continue
       if (!safeCameras.some((camera) => camera.id === cameraId)) continue
 
@@ -336,25 +295,41 @@ export default function VideoPanel() {
     setActiveCamera(cameraId)
     setSceneCameraTarget(cameraId)
     lastAppliedTimeRef.current = null
+    lastVideoDrivenFrameRef.current = null
+    lastManualSeekFrameRef.current = null
   }
 
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
 
-    v.playbackRate = playbackRate || 1
-    v.defaultPlaybackRate = playbackRate || 1
-
-    if (playing && activeSrc) {
-      const p = v.play()
-      if (p && typeof p.catch === 'function') p.catch(() => {})
-    } else {
-      v.pause()
-    }
-  }, [playing, activeSrc, playbackRate])
+    try {
+      v.playbackRate = safePlaybackRate
+    } catch {}
+  }, [safePlaybackRate, activeSrc, activeCameraId])
 
   useEffect(() => {
     const v = videoRef.current
+    if (!v) return
+
+    try {
+      v.playbackRate = safePlaybackRate
+    } catch {}
+
+    if (playing && activeSrc) {
+      const p = v.play()
+
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {})
+      }
+    } else {
+      v.pause()
+    }
+  }, [playing, activeSrc, safePlaybackRate])
+
+  useEffect(() => {
+    const v = videoRef.current
+
     if (!v || !activeCamera || !fps) return
     if (syncFromVideoRef.current) return
 
@@ -362,22 +337,44 @@ export default function VideoPanel() {
     if (!Number.isFinite(targetTime)) return
 
     const diffFromVideo = Math.abs(v.currentTime - targetTime)
-    const diffFromLastApplied =
-      lastAppliedTimeRef.current == null
-        ? Infinity
-        : Math.abs(lastAppliedTimeRef.current - targetTime)
 
-    const seekThreshold = playing ? 0.12 : 0.015
-    const shouldSeek = diffFromVideo > seekThreshold && diffFromLastApplied > 0.001
+    const lastVideoDrivenFrame = lastVideoDrivenFrameRef.current
+    const diffFromVideoDrivenFrame = lastVideoDrivenFrame == null
+      ? Infinity
+      : Math.abs(currentFrame - lastVideoDrivenFrame)
 
-    if (shouldSeek) {
+    /*
+      關鍵邏輯：
+
+      播放中，如果 currentFrame 只是影片自己播放產生的，
+      就不要反過來 seek video，避免卡頓。
+
+      但如果 currentFrame 和影片自己產生的 frame 差很多，
+      代表你正在拖 timeline 或點擊跳轉，
+      這時候就要立刻 seek，影片才會同步。
+    */
+    const videoDrivenTolerance = Math.max(2, Math.round(fps * 0.08))
+    const isNormalVideoPlaybackUpdate = playing && diffFromVideoDrivenFrame <= videoDrivenTolerance
+
+    if (isNormalVideoPlaybackUpdate) return
+
+    const seekThreshold = playing ? 0.025 : 0.015
+
+    if (diffFromVideo > seekThreshold) {
       lastAppliedTimeRef.current = targetTime
+      lastManualSeekFrameRef.current = currentFrame
 
       try {
         v.currentTime = targetTime
       } catch {}
     }
-  }, [currentFrame, fps, activeCamera, activeSrc, playing])
+  }, [
+    currentFrame,
+    fps,
+    activeCamera,
+    activeSrc,
+    playing,
+  ])
 
   useEffect(() => {
     const v = videoRef.current
@@ -392,20 +389,25 @@ export default function VideoPanel() {
       const mediaTime = meta?.mediaTime ?? videoRef.current.currentTime
       const frame = getGlobalFrameFromCameraTime(mediaTime, fps, activeCamera)
 
+      lastVideoDrivenFrameRef.current = frame
       syncFromVideoRef.current = true
       lastAppliedTimeRef.current = mediaTime
 
       if (previewRange && frame >= previewRange.endFrame) {
         const endFrame = previewRange.endFrame
+
+        lastVideoDrivenFrameRef.current = endFrame
         setCurrentFrame(endFrame)
         setCurrentTime(endFrame / fps)
         setPlaying(false)
+
         syncFromVideoRef.current = false
         return
       }
 
       setCurrentFrame(frame)
       setCurrentTime(frame / fps)
+
       syncFromVideoRef.current = false
 
       if (videoRef.current.requestVideoFrameCallback && !stopped) {
@@ -424,35 +426,50 @@ export default function VideoPanel() {
         v.cancelVideoFrameCallback(callbackId)
       }
     }
-  }, [fps, activeCamera, previewRange, setCurrentFrame, setCurrentTime, setPlaying, activeSrc])
+  }, [
+    fps,
+    activeCamera,
+    previewRange,
+    setCurrentFrame,
+    setCurrentTime,
+    setPlaying,
+    activeSrc,
+  ])
 
   function onTimeUpdate() {
     const v = videoRef.current
+
     if (!v || !activeCamera || !fps) return
     if (v.requestVideoFrameCallback) return
 
     const frame = getGlobalFrameFromCameraTime(v.currentTime, fps, activeCamera)
 
+    lastVideoDrivenFrameRef.current = frame
     syncFromVideoRef.current = true
     lastAppliedTimeRef.current = v.currentTime
 
     if (previewRange && frame >= previewRange.endFrame) {
       const endFrame = previewRange.endFrame
+
+      lastVideoDrivenFrameRef.current = endFrame
       setCurrentFrame(endFrame)
       setCurrentTime(endFrame / fps)
       setPlaying(false)
+
       syncFromVideoRef.current = false
       return
     }
 
     setCurrentFrame(frame)
     setCurrentTime(frame / fps)
+
     syncFromVideoRef.current = false
   }
 
   useEffect(() => {
     function onKey(e) {
       const tag = e.target?.tagName?.toLowerCase()
+
       if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return
 
       if (e.code === 'Space') {
@@ -476,7 +493,11 @@ export default function VideoPanel() {
 
       if (Object.prototype.hasOwnProperty.call(keyToCameraIndex, e.code)) {
         const cameraIndex = keyToCameraIndex[e.code]
-        const camera = safeCameras.find((item) => item.index === cameraIndex || item.id === `cam${cameraIndex}`)
+
+        const camera = safeCameras.find((item) => (
+          item.index === cameraIndex ||
+          item.id === `cam${cameraIndex}`
+        ))
 
         if (camera) {
           e.preventDefault()
@@ -486,6 +507,7 @@ export default function VideoPanel() {
     }
 
     window.addEventListener('keydown', onKey)
+
     return () => window.removeEventListener('keydown', onKey)
   }, [togglePlaying, safeCameras])
 
@@ -505,7 +527,6 @@ export default function VideoPanel() {
     <div className="relative w-full h-full bg-black flex flex-col">
       <div className="px-3 py-2 pl-28 border-b border-zinc-800 bg-zinc-950 flex items-center justify-between gap-3 overflow-hidden">
         <div className="flex items-center gap-2 min-w-0 overflow-x-auto">
-
           {safeCameras.map((camera) => {
             const isActive = activeCamera?.id === camera.id
             const hasVideo = Boolean(localVideoSrcMap[camera.id] || camera.video_url || camera.url)
@@ -550,7 +571,7 @@ export default function VideoPanel() {
         <div className="absolute top-2 left-2 z-10 px-2 py-1 rounded bg-black/65 border border-white/10 text-xs text-zinc-100">
           {activeCamera?.label || 'No Camera'}
           {activeCamera?.offset_frame ? ` / offset ${activeCamera.offset_frame >= 0 ? '+' : ''}${activeCamera.offset_frame}f` : ''}
-          {projectionAvailable && showProjection ? ' / Projection ON' : ''}
+          {projectionAvailable && showProjection ? ` / Projection ON / ${safePlaybackRate}x` : ` / ${safePlaybackRate}x`}
         </div>
 
         {activeSrc && (
@@ -596,8 +617,9 @@ export default function VideoPanel() {
                 const v = videoRef.current
                 if (!v || !activeCamera) return
 
-                v.playbackRate = playbackRate || 1
-                v.defaultPlaybackRate = playbackRate || 1
+                try {
+                  v.playbackRate = safePlaybackRate
+                } catch {}
 
                 const targetTime = getCameraVideoTime(currentFrame, fps, activeCamera)
 
@@ -608,11 +630,15 @@ export default function VideoPanel() {
 
                 if (playing) {
                   const p = v.play()
-                  if (p && typeof p.catch === 'function') p.catch(() => {})
+
+                  if (p && typeof p.catch === 'function') {
+                    p.catch(() => {})
+                  }
                 }
 
                 window.requestAnimationFrame(redrawOverlay)
               }}
+              preload="auto"
               playsInline
               onClick={togglePlaying}
             />
