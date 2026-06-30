@@ -1,576 +1,136 @@
 # Badminton 3D Debugger MVP
 
-> 羽球 3D 軌跡校正與複盤工具  
-> 專案說明、執行方式、檔案功能、資料流程與使用指南
+羽球多視角影片、3D 球軌跡、2D 投影、擊球標註、異常檢查與軌跡修復用的研究型除錯工具。
+
+這個專案目前主要目標是把原本分散在 CSV、npy、影片、3D 軌跡、Hit 標註、Anomaly 檢查、Camera Projection 之間的工作，集中到同一個可操作介面。
 
 ---
 
-## 1. 專案簡介
+## 1. 目前版本功能總覽
 
-**Badminton 3D Debugger MVP** 是一個用來檢查、視覺化、校正羽球 3D 軌跡資料的研究型工具。  
-它的核心目的不是做最終產品，而是把原本分散在資料、時間軸、影片、標註、軌跡修復之間的工作，集中到同一個可操作的介面中，讓使用者可以更快地：
+目前版本包含以下功能：
 
-- 檢視整場比賽的 rally 分段
-- 確認每一拍擊球時間點是否正確
-- 檢查球的 3D 軌跡是否合理
-- 標記與處理 anomaly（異常區段）
-- 匯出修正後的標註結果
-
-這份專案目前的定位比較接近：
-
-- **資料校正工具**
-- **模型輸出除錯介面**
-- **研究與實驗用 MVP**
-
-
----
-
-## 2. 專案核心功能
-
-### 2.1 3D 球軌跡視覺化
-
-前端使用 **React + Three.js + react-three-fiber** 呈現羽球軌跡與球場場景，包含：
-
-- 3D 球場平面
-- 球網參考物件
-- 目前球位置高亮
-- 過去軌跡 / 當前軌跡顯示
-- 修復模式下的軌跡點選取
-
-這一塊主要用途是幫使用者快速判斷：
-
-- 軌跡是否跳點
-- 高度變化是否合理
-- 某一段 interpolation 是否異常
-- 某一拍前後的球路是否符合比賽邏輯
-
-### 2.2 Timeline 編輯介面
-
-Timeline 是這個專案最重要的操作區，整合了：
-
-- **Rally track**：顯示來回球區段
-- **Hit track**：顯示每次擊球時間點
-- **X / Y / Z(t)**：顯示位置隨時間的變化
-- **Speed track**：顯示球速變化
-- **Anomaly track**：顯示可疑區間
-
-可以做到：
-
-- 拖曳 hit 位置
-- 播放 / 暫停 / 單幀前進後退
-- zoom timeline
-- 左右平移 timeline
-- 選取時間區段
-- 快速跳至 rally
-- 快速檢查特定 frame
-
-### 2.3 Hit 標註修正
-
-在 Inspector 中可以對單一擊球紀錄進行修正，包括：
-
-- `new_hit_frame`
-- `shot_type`
-- `hand`
-- `note`
-
-這讓使用者可以把模型預測到的擊球點，人工修正成更準確的版本。
-
-### 2.4 Anomaly 管理
-
-系統支援 anomaly 資料顯示與狀態更新。  
-目前可以透過 Inspector 對 anomaly 進行處理，例如：
-
-- `fixed`
-- `false_positive`
-- `needs_rebuild`
-
-### 2.5 軌跡修復
-
-系統提供一個簡單但實用的軌跡修復功能：
-
-- 在 3D 視圖中進入 repair mode
-- 選取兩個軌跡端點
-- 呼叫 backend 的 repair API
-- 對中間點做 **cubic Hermite spline interpolation**
-
-這個功能適合處理：
-
-- 軌跡局部漂移
-- 缺失點中間補形
-- 明顯不合理的短區段軌跡
-
-### 2.6 CSV 匯出
-
-前端可以直接呼叫 backend 的 export API，把目前 hits 資料匯出成 CSV，方便回寫到標註流程或後續分析工具。
+- 3D 羽球場與 3D 球軌跡顯示
+- 目前 frame 的球點高亮
+- 10 視角影片切換，支援 `0.mp4` ~ `9.mp4`
+- 可一次選取多支本機影片，系統會依檔名自動對應 Cam 0 ~ Cam 9
+- 影片、3D、Timeline、2D 投影視圖共用同一個 `currentFrame`
+- 播放速度支援 `0.125x / 0.25x / 0.5x / 1x / 2x`
+- Timeline 拖曳、點擊、平移時會強制暫停，避免影片不同步
+- Timeline 固定 playhead，底下時間軸內容滾動
+- Rally / Hit / Anomaly / X / Y / Z / Speed 軌道顯示
+- Hit 可拖曳修正 frame，放開後自動 PATCH 回 backend
+- 右側 Inspector 編輯 Hit 與 Anomaly
+- 2D 平面投影輔助視圖：Top / Side / Front
+- 影片上的 3D→2D 投影紅點 overlay
+- Camera 參數由 `.npy` 轉成 `frontend/src/assets/camera_params.json`
+- 3D 場景中的相機 marker 位置由 extrinsic 自動推算
+- Repair mode：選取兩個 3D 軌跡點後，用 cubic Hermite spline 修復中間軌跡
+- CSV 匯出目前 Hit 標註資料
 
 ---
 
-## 3. 技術架構概覽
+## 2. 技術架構
 
-### 前端
+### Frontend
 
 - React
 - Vite
 - Zustand
 - Tailwind CSS
 - Three.js
-- @react-three/fiber
-- @react-three/drei
+- `@react-three/fiber`
+- `@react-three/drei`
+- Canvas 2D overlay
 
-### 後端
+### Backend
 
 - FastAPI
 - SQLAlchemy
-- Pydantic
 - PostgreSQL
-- pandas / numpy
+- Pydantic
+- NumPy
+- pandas
 
-### 執行方式
+### Camera / Projection
 
-- Docker Compose 啟動 PostgreSQL 與 FastAPI backend
-- 前端以 Vite dev server 獨立啟動
+- 原始相機參數放在 `cameras/`
+- 使用 `scripts/convert_camera_params.py` 將 `.npy` 轉成 JSON
+- 前端使用 `frontend/src/assets/camera_params.json`
+- `cameraProjection.js` 負責 3D 座標投影到影片畫面
+- `cameraScenePose.js` 負責把 extrinsic 反推成 3D 場景中的相機位置與朝向
 
 ---
 
-## 4. 專案目錄結構
-
-以下是目前專案中最重要的結構。為了可讀性，這裡只保留真正有開發意義的部分。
+## 3. 專案結構
 
 ```text
 badminton3D-main/
-├─ docker-compose.yml
 ├─ README.md
-├─ gemini-chat-20260119-114439.md
+├─ docker-compose.yml
 ├─ package.json
 ├─ package-lock.json
-├─ node_modules/                     # 根目錄 node_modules，建議不要納入版本控制
+├─ read_camera.py
+│
+├─ cameras/
+│  ├─ Cam_0_intrinsic.npy
+│  ├─ Cam_0_extrinsic.npy
+│  ├─ ...
+│  ├─ Cam_9_intrinsic.npy
+│  └─ Cam_9_extrinsic.npy
+│
+├─ scripts/
+│  └─ convert_camera_params.py
 │
 ├─ backend/
 │  ├─ Dockerfile
 │  ├─ requirements.txt
 │  ├─ .env.example
-│  ├─ app/
-│  │  ├─ __init__.py
-│  │  ├─ db.py
-│  │  ├─ models.py
-│  │  ├─ schemas.py
-│  │  ├─ main.py
-│  │  ├─ seed.py
-│  │  ├─ reset_db.py
-│  │  ├─ import_12_24_1_new.py
-│  │  ├─ read_balldata.ipynb
-│  │  └─ datasets/
-│  │     └─ 12_24_1_new/
-│  │
-│  └─ datasets/
+│  └─ app/
+│     ├─ __init__.py
+│     ├─ db.py
+│     ├─ main.py
+│     ├─ models.py
+│     ├─ schemas.py
+│     ├─ seed.py
+│     ├─ reset_db.py
+│     ├─ import_12_24_1_new.py
+│     ├─ read_balldata.ipynb
+│     └─ datasets/
+│        └─ 12_24_1_new/
 │
-├─ frontend/
-│  ├─ index.html
-│  ├─ package.json
-│  ├─ package-lock.json
-│  ├─ vite.config.js
-│  ├─ postcss.config.cjs
-│  ├─ tailwind.config.cjs
-│  ├─ node_modules/                  # 前端 node_modules，建議不要納入版本控制
-│  └─ src/
-│     ├─ main.jsx
-│     ├─ App.jsx
-│     ├─ api.js
-│     ├─ config.js
-│     ├─ store.js
-│     ├─ styles.css
-│     └─ components/
-│        ├─ TopBar.jsx
-│        ├─ Scene3D.jsx
-│        ├─ VideoPanel.jsx
-│        ├─ TimelinePanel.jsx
-│        └─ RightDock.jsx
-└─
-   
+└─ frontend/
+   ├─ index.html
+   ├─ package.json
+   ├─ vite.config.js
+   ├─ tailwind.config.cjs
+   ├─ postcss.config.cjs
+   └─ src/
+      ├─ main.jsx
+      ├─ App.jsx
+      ├─ api.js
+      ├─ config.js
+      ├─ store.js
+      ├─ styles.css
+      ├─ assets/
+      │  └─ camera_params.json
+      ├─ utils/
+      │  ├─ cameraProjection.js
+      │  └─ cameraScenePose.js
+      └─ components/
+         ├─ TopBar.jsx
+         ├─ Scene3D.jsx
+         ├─ VideoPanel.jsx
+         ├─ TimelinePanel.jsx
+         ├─ Projection2DPanel.jsx
+         └─ RightDock.jsx
 ```
 
 ---
 
-## 5. 每個主要檔案在做什麼
+## 4. 快速啟動
 
-下面是這份專案最重要的檔案導覽。
-
----
-
-### 5.1 根目錄
-
-#### `docker-compose.yml`
-負責啟動整個後端環境，主要包含：
-
-- `db`：PostgreSQL 16
-- `backend`：FastAPI service
-
-目前 compose 會把：
-
-- backend/app 掛載進 container
-- port `8000` 對外開放
-- DB port `5432` 對外開放
-
-這是整個開發與測試流程的入口。
-
-#### `README.md`
-目前專案原本附帶的說明文件。  
-有基本介紹，但內容與實際實作之間有一些落差，因此這份 `RENAMED.md` 可以視為更完整、較新的專案說明版本。
-
-#### `package.json`（根目錄）
-這份根目錄 package 設定目前只有 `jsdom`，不屬於前端主程式運作核心。  
-實際前端執行主要還是看 `frontend/package.json`。
-
-#### `gemini-chat-20260119-114439.md`
-額外的紀錄型檔案，不屬於實際系統運作核心。
-
----
-
-### 5.2 Backend
-
-#### `backend/Dockerfile`
-定義 backend container 的建置方式。  
-通常會：
-
-- 使用 Python 基底映像
-- 安裝 requirements
-- 啟動 FastAPI / uvicorn
-
-#### `backend/requirements.txt`
-後端 Python 相依套件列表，主要包含：
-
-- fastapi
-- uvicorn
-- SQLAlchemy
-- psycopg2-binary
-- pydantic
-- pandas
-- numpy
-
-#### `backend/app/db.py`
-資料庫連線設定。
-
-功能：
-- 讀取 `DATABASE_URL`
-- 建立 SQLAlchemy `engine`
-- 建立 `SessionLocal`
-- 提供 `get_db()` 給 FastAPI route 使用
-
-這個檔案是 backend 連接 PostgreSQL 的基礎。
-
-#### `backend/app/models.py`
-SQLAlchemy ORM model 定義。
-
-包含資料表：
-- `Match`
-- `Rally`
-- `Hit`
-- `BallTraj`
-- `Anomaly`
-
-也定義了重要索引，例如：
-- `idx_ball_match_frame`
-
-這些 model 對應到整個系統的資料骨架。
-
-#### `backend/app/schemas.py`
-Pydantic schema 定義，用來規範 API 的輸入與輸出。
-
-例如：
-- `MatchOut`
-- `TimelineOut`
-- `TrajPoint`
-- `HitPatch`
-- `AnomalyPatch`
-- `TrajRepairPayload`
-
-它的作用是把 ORM 與 API contract 分開，讓前後端溝通更穩定。
-
-#### `backend/app/main.py`
-FastAPI 主程式，也是後端 API 核心。
-
-目前主要提供：
-
-- `GET /health`
-- `GET /matches/{match_id}`
-- `GET /matches/{match_id}/timeline`
-- `GET /matches/{match_id}/traj`
-- `PATCH /hits/{hit_id}`
-- `PATCH /anomalies/{anomaly_id}`
-- `PATCH /matches/{match_id}/traj/repair`
-- `GET /export/csv`
-
-這個檔案負責：
-
-- 建表初始化
-- CORS
-- 查詢 match / timeline / trajectory
-- hit patch
-- anomaly patch
-- trajectory repair
-- CSV 匯出
-
-#### `backend/app/seed.py`
-用來建立 demo data 的種子資料腳本。  
-如果設定 `SEED_DEMO=1`，系統啟動時會自動寫入示範資料。
-
-它適合在沒有正式資料集時，先確認前後端功能有沒有通。
-
-#### `backend/app/import_12_24_1_new.py`
-真實資料集匯入腳本，是這個專案很重要的一支程式。
-
-主要做的事：
-
-1. 建立 `Match`
-2. 讀取各 set 的 `RallySeg.csv`
-3. 建立 `Rally`
-4. 讀取 `shot_annotated.csv`
-5. 建立 `Hit`
-6. 從 `.npy` 與 mask 檔讀入有效球軌跡
-7. 批量寫入 `BallTraj`
-
-這支腳本會把原始資料整理成系統可用的 DB 內容。
-
-#### `backend/app/reset_db.py`
-用來清空 / 重建資料庫結構的輔助腳本。  
-適合在資料匯入流程改動後重新初始化環境。
-
-#### `backend/app/read_balldata.ipynb`
-Notebook 類型的實驗 / 檢查工具。  
-用途通常是：
-
-- 檢視原始軌跡
-- 測試資料讀取
-- 驗證 npy / mask / speed 資料內容
-
-#### `backend/app/datasets/12_24_1_new/`
-資料集所在位置。  
-目前匯入腳本是針對這份資料做設計的。
-
----
-
-### 5.3 Frontend
-
-#### `frontend/src/main.jsx`
-React 入口點。  
-負責把整個 App 掛載到頁面。
-
-#### `frontend/src/App.jsx`
-前端總容器與畫面佈局主檔案。
-
-主要負責：
-
-- 載入 match metadata
-- 載入 timeline data
-- 載入 trajectory
-- 排版組合：TopBar / 3D / Video / Timeline / Inspector
-- 管理主畫面各區塊大小與分割
-
-如果想調整主畫面 layout，通常會先從這裡下手。
-
-#### `frontend/src/api.js`
-前端呼叫 backend API 的封裝。
-
-目前整理了：
-- `getMatch`
-- `getTimeline`
-- `getTraj`
-- `repairTraj`
-- `patchHit`
-- `patchAnomaly`
-
-這可以避免每個元件自己散落寫 `fetch`。
-
-#### `frontend/src/config.js`
-前端 API base URL 設定。  
-預設走：
-
-- `VITE_API_BASE`
-- 若未設定則 fallback 到 `http://localhost:8000`
-
-#### `frontend/src/store.js`
-Zustand 全域狀態管理核心。
-
-這個檔案是整個前端互動的中樞，包含：
-
-- 當前時間 / frame
-- 播放狀態
-- selection range
-- rallies / hits / anomalies
-- trajectory cache
-- zoom / scroll
-- active item
-- trajectory selection（修復模式）
-
-如果沒有這個 store，3D、timeline、影片、inspector 之間就很難同步。
-
-#### `frontend/src/styles.css`
-前端的全域樣式設定。
-
-#### `frontend/src/components/TopBar.jsx`
-上方資訊列。
-
-主要顯示：
-- match id
-- current time
-- current frame
-- fps
-- selection 範圍
-- 匯出 CSV 按鈕
-
-#### `frontend/src/components/Scene3D.jsx`
-3D 視圖主元件。
-
-功能包含：
-- 畫球場
-- 顯示球軌跡
-- 顯示當前球位置
-- repair mode 點選軌跡點
-- 呼叫 trajectory repair API
-
-這是整個專案中最直觀的視覺區塊之一。
-
-#### `frontend/src/components/VideoPanel.jsx`
-影片區塊。
-
-功能包含：
-- 選擇本機影片檔案
-- 與 store 的 `currentTime / currentFrame` 同步
-- 播放 / 暫停同步
-- requestVideoFrameCallback 同步 frame
-
-這讓影片可以和 3D 與 timeline 一起對齊。
-
-#### `frontend/src/components/TimelinePanel.jsx`
-時間軸主編輯區。
-
-這個檔案目前是前端中最複雜的一塊，負責：
-
-- timeline 畫布繪製
-- rally / hit / anomaly 軌顯示
-- speed 與 xyz 曲線
-- playhead
-- zoom / scroll
-- scrubbing
-- dragging hit
-- keyboard 操作
-- selection range
-- 跳轉 rally
-
-簡單說，這是整個工具的主要操作台。
-
-#### `frontend/src/components/RightDock.jsx`
-右側 Inspector。
-
-功能包含：
-- 顯示選中的 hit 或 anomaly
-- 修改 hit 欄位
-- 修改 anomaly 狀態
-- 將修改寫回 backend
-
-它是時間軸編輯後的詳細欄位操作區。
-
----
-
-## 6. 資料模型說明
-
-### `Match`
-代表一場比賽。
-
-重要欄位：
-- `title`
-- `fps`
-- `duration_frame`
-- `cameras`
-
-### `Rally`
-代表一次來回球區段。
-
-重要欄位：
-- `rally_index`
-- `start_frame`
-- `end_frame`
-- `status`
-
-### `Hit`
-代表一拍擊球事件。
-
-重要欄位：
-- `ball_round`
-- `player`
-- `hit_frame`
-- `new_hit_frame`
-- `shot_type`
-- `hand`
-- `note`
-- `confidence`
-
-### `BallTraj`
-代表球在某一 frame 的 3D 軌跡點。
-
-重要欄位：
-- `frame`
-- `t_sec`
-- `x`
-- `y`
-- `z`
-- `speed`
-- `confidence`
-
-### `Anomaly`
-代表軌跡異常區段。
-
-重要欄位：
-- `start_frame`
-- `end_frame`
-- `kind`
-- `severity`
-- `status`
-- `comment`
-
----
-
-## 7. 系統資料流
-
-這份專案的資料流可以簡化成下面這條路徑：
-
-```text
-原始資料集
-  └─ RallySeg.csv / shot_annotated.csv / npy / mask / speed
-      ↓
-import_12_24_1_new.py
-      ↓
-PostgreSQL
-      ↓
-FastAPI API
-      ↓
-frontend/api.js
-      ↓
-Zustand store
-      ↓
-Scene3D / TimelinePanel / VideoPanel / RightDock
-```
-
-也就是說：
-
-1. 原始標註與軌跡資料先匯入 DB
-2. 後端提供統一 API
-3. 前端用 store 作為同步中心
-4. 各畫面元件共同讀取同一份狀態
-
-這個設計的優點是：
-
-- 3D / timeline / inspector 之間可以同步
-- 某一個元件更新後，其他元件可以立即反映
-- 資料來源比較一致
-
----
-
-## 8. 如何執行這份專案
-
-下面提供一個最實際、最穩的啟動流程。
-
-### 步驟 1：啟動 backend 與資料庫
+### 4.1 啟動 backend 與 PostgreSQL
 
 在專案根目錄執行：
 
@@ -578,45 +138,66 @@ Scene3D / TimelinePanel / VideoPanel / RightDock
 docker compose up --build
 ```
 
-成功後：
+啟動成功後：
 
-- PostgreSQL 會跑在 `localhost:5432`
-- FastAPI backend 會跑在 `localhost:8000`
+```text
+Backend:    http://localhost:8000
+PostgreSQL: localhost:5432
+```
 
-可先測試：
+測試 backend：
 
-```bash
+```text
 http://localhost:8000/health
 ```
 
-看到 `{"ok": true}` 代表 backend 正常。
+正常會看到：
+
+```json
+{"ok": true}
+```
 
 ---
 
-### 步驟 2：匯入資料集
+### 4.2 匯入資料集(之後會做個介面方便更換dataset)
 
-如果是第一次執行，或 DB 目前沒有正式資料，請執行：
+第一次啟動或資料庫是空的時候，執行：
 
 ```bash
 docker compose exec backend python -m app.import_12_24_1_new
 ```
 
-這一步會把：
+匯入腳本會建立：
 
-- rally segmentation
-- hit annotation
-- trajectory points
+- `Match`
+- `Rally`
+- `Hit`
+- `BallTraj`
 
-匯入資料庫。
+目前匯入腳本主要讀取：
 
-> 注意：目前這支匯入腳本主要匯入 `Match / Rally / Hit / BallTraj`。  
-> 如果你預期 anomaly 也要從資料集自動建立，則需要額外擴充匯入流程。
+```text
+backend/app/datasets/12_24_1_new/
+backend/app/datasets/ball_new/
+backend/app/datasets/ball_final_mask_new/
+```
+
+其中 `import_12_24_1_new.py` 內目前設定：
+
+```python
+DATA_ROOT = "/app/app/datasets/12_24_1_new"
+FPS = 50.0
+NYP_FOLDER = "241224_1"
+```
+
+如果要換資料集，資料夾結構需要和目前腳本預期的格式一致，或修改這支 importer。
+
 
 ---
 
-### 步驟 3：啟動前端
+### 4.3 啟動 frontend
 
-進入前端資料夾：
+在另一個 terminal 執行：
 
 ```bash
 cd frontend
@@ -626,153 +207,699 @@ npm run dev
 
 預設網址：
 
-```bash
+```text
 http://localhost:5173
 ```
 
-如果 backend 不在預設位置，可以設定：
+如果前端連不到 backend，可以設定：
 
 ```bash
 VITE_API_BASE=http://localhost:8000
 ```
 
----
+或建立 frontend `.env`：
 
-### 步驟 4：操作流程建議
-
-進入頁面後，建議使用順序如下：
-
-1. 先確認 3D 視圖與 timeline 有資料
-2. 若有影片，先在 VideoPanel 選擇本機影片
-3. 在 timeline 找到特定 rally / hit
-4. 調整 hit frame
-5. 如需補軌跡，進入 repair mode 處理
-6. 在 Inspector 補 shot type / hand / note
-7. 最後匯出 CSV
+```env
+VITE_API_BASE=http://localhost:8000
+```
 
 ---
 
-## 9. 常用指令
+## 5. 重要注意：matchId
 
-### 啟動系統
+目前前端預設 match id 寫在：
 
-```bash
-docker compose up --build
+```text
+frontend/src/store.js
 ```
 
-### 後端 shell
+目前預設值是：
 
-```bash
-docker compose exec backend bash
+```js
+matchId: 2
 ```
 
-### 匯入資料
+如果你匯入資料後 backend 顯示的 `match_id` 不是 `2`，前端會抓不到資料。這時有兩種做法：
 
-```bash
-docker compose exec backend python -m app.import_12_24_1_new
+1. 把 `frontend/src/store.js` 的 `matchId` 改成實際匯入得到的 id
+2. 重新整理資料庫與匯入流程，讓目標資料對應到目前前端使用的 id
+
+---
+
+## 6. Camera Params 使用方式
+
+目前專案使用 **方法 A：`.npy` 轉 JSON**。
+
+流程如下：
+
+```text
+cameras/*.npy
+    ↓
+scripts/convert_camera_params.py
+    ↓
+frontend/src/assets/camera_params.json
+    ↓
+frontend/src/utils/cameraProjection.js
+frontend/src/utils/cameraScenePose.js
 ```
 
-### 重設資料庫（若有提供 reset 腳本）
+### 6.1 轉換 camera params
+
+在專案根目錄執行：
+
+```bash
+python scripts/convert_camera_params.py \
+  --input cameras \
+  --output frontend/src/assets/camera_params.json \
+  --width 1920 \
+  --height 1200
+```
+
+目前 intrinsic 的 `cx=960, cy=600` 對應的是 `1920 x 1200` 校正座標系，所以轉換時建議使用：
+
+```text
+width  = 1920
+height = 1200
+```
+
+即使實際影片顯示時被縮成其他尺寸，前端 overlay 會依照影片顯示區域自動 scale：
+
+```js
+scaleX = videoDisplayWidth / cameraParams.imageWidth
+scaleY = videoDisplayHeight / cameraParams.imageHeight
+```
+
+---
+
+## 7. 前端功能說明
+
+### 7.1 `App.jsx`
+
+前端主要 layout 與初始資料載入檔案。
+
+負責：
+
+- 載入 match metadata
+- 載入 timeline data
+- 載入 trajectory data
+- 建立 3D / Video / Timeline / 2D / Inspector 的主畫面
+- 控制上方區域、底部區域、右側面板寬度
+- 預載目前 frame 附近的 trajectory cache
+
+---
+
+### 7.2 `store.js`
+
+Zustand 全域狀態管理中心。
+
+主要狀態：
+
+- `matchId`
+- `fps`
+- `durationSec`
+- `currentTime`
+- `currentFrame`
+- `playing`
+- `playbackRate`
+- `selection`
+- `rallies`
+- `hits`
+- `anomalies`
+- `trajByFrame`
+- `loadedTrajRanges`
+- `activeCameraId`
+- `sceneCameraTargetId`
+- `localVideoSrcMap`
+- `bottomView`
+- `activeItem`
+- `repairMode`
+- `selectedTrajFrames`
+
+3D、影片、Timeline、2D 投影、右側 Inspector 都靠這個 store 同步。
+
+---
+
+### 7.3 `VideoPanel.jsx`
+
+影片顯示與同步核心。
+
+支援：
+
+- 選擇 `0.mp4` ~ `9.mp4`
+- 檔名自動對應 Cam 0 ~ Cam 9
+- 點擊影片播放 / 暫停
+- 鍵盤 `0` ~ `9` 快速切換相機
+- 播放速度同步到 HTML video
+- 使用 `requestVideoFrameCallback` 讓影片播放時更新全域 frame
+- Timeline 手動跳轉時，影片立即 seek 到對應 frame
+- 3D→2D 投影紅點 overlay
+
+目前 overlay 只畫 **目前 frame 附近的球點紅點**，不畫未來軌跡，避免畫面太亂。
+
+---
+
+### 7.4 `TimelinePanel.jsx`
+
+主要時間軸操作區。
+
+包含軌道：
+
+- Rally
+- Hit
+- Anomaly
+- X(t)
+- Y(t)
+- Z(t)
+- Speed
+
+支援操作：
+
+- 播放 / 暫停
+- 上一個 rally / 下一個 rally
+- 上一幀 / 下一幀
+- 長按上一幀 / 下一幀按鈕連續移動
+- 速度切換：`0.125x / 0.25x / 0.5x / 1x / 2x`
+- 滾輪 zoom
+- 拖曳平移 timeline
+- 點擊 rally 選取區段
+- 拖曳 hit 修正 frame
+- 拖曳 playhead 跳 frame
+- 底部水平 scrollbar
+- `I` 設定 selection in
+- `O` 設定 selection out
+- `Esc` 清除 selection / active item
+- 左右方向鍵單幀移動，或在選中 rally / hit 時切換與微調
+
+Timeline 的設計重點是：
+
+- playhead 固定在畫面中央
+- 拖 timeline 時改變底下 scroll
+- 使用者拖曳或點擊 timeline 時會先暫停播放
+- 避免播放中 seek 來回觸發造成影片卡頓
+
+---
+
+### 7.5 `Scene3D.jsx`
+
+3D 視覺化主元件。
+
+功能：
+
+- 畫羽球場與球網
+- 顯示目前 trajectory
+- 顯示目前 frame 的球點
+- 顯示相機 marker
+- 點選相機 marker 切換影片視角
+- 播放時可隱藏相機 marker，降低遮擋
+- Repair mode 選取兩個軌跡端點
+- 呼叫 backend 修復軌跡
+
+3D 軌跡座標轉換使用：
+
+```js
+new THREE.Vector3(p.x, -p.y, -p.z)
+```
+
+這個轉換也和 `cameraScenePose.js` 裡的 `rawToScene()` 對齊。
+
+---
+
+### 7.6 `Projection2DPanel.jsx`
+
+2D 平面輔助檢查視圖。
+
+目前提供三個視角：
+
+- Top：俯視平面
+- Side：側面高度變化
+- Front：正面高度變化
+
+顯示內容：
+
+- 目前 rally 或 selection 範圍內的軌跡
+- 目前 frame 附近的點
+- hit 位置
+- anomaly 區段
+- 最近約 `0.8` 秒的尾段軌跡強調顯示
+
+用途：
+
+- 3D 看不清楚時，改用 2D 平面檢查偏移
+- 看球路是否突然跳點
+- 看高度曲線是否不合理
+- 對照 hit / anomaly 是否落在合理位置
+
+---
+
+### 7.7 `RightDock.jsx`
+
+右側編輯面板。
+
+選中 Hit 時可編輯：
+
+- `New Hit Frame`
+- 球種
+- 手法
+- 備註
+
+球種選項包含：
+
+```text
+切球、勾球、平球、防守回抽、防守回挑、放小球、長球、後場抽平球、挑球、推球、殺球、過度切球、撲球、擋小球、點扣、發長球、發短球
+```
+
+手法選項包含：
+
+```text
+正拍、反拍
+```
+
+選中 Anomaly 時可更新狀態：
+
+- `fixed`
+- `false_positive`
+- `needs_rebuild`
+
+---
+
+## 8. Backend API
+
+### `GET /health`
+
+檢查 backend 是否正常。
+
+---
+
+### `GET /matches/{match_id}`
+
+取得 match metadata。
+
+回傳內容包含：
+
+- `id`
+- `title`
+- `fps`
+- `duration_frame`
+- `duration_sec`
+- `cameras`
+
+---
+
+### `GET /matches/{match_id}/timeline`
+
+取得 Timeline 需要的資料。
+
+包含：
+
+- rallies
+- hits
+- anomalies
+
+---
+
+### `GET /matches/{match_id}/traj?start={start}&end={end}`
+
+取得指定 frame 範圍內的球軌跡。
+
+每一點包含：
+
+- `frame`
+- `t_sec`
+- `x`
+- `y`
+- `z`
+- `speed`
+- `confidence`
+
+---
+
+### `PATCH /hits/{hit_id}`
+
+更新 Hit。
+
+可更新欄位：
+
+```json
+{
+  "new_hit_frame": 1234,
+  "shot_type": "殺球",
+  "hand": "正拍",
+  "note": "人工修正"
+}
+```
+
+---
+
+### `PATCH /anomalies/{anomaly_id}`
+
+更新 Anomaly。
+
+可更新欄位：
+
+```json
+{
+  "status": "fixed",
+  "comment": "已確認",
+  "severity": 3,
+  "kind": "jump"
+}
+```
+
+---
+
+### `PATCH /matches/{match_id}/traj/repair`
+
+修復一段 trajectory。
+
+request body：
+
+```json
+{
+  "start_frame": 100,
+  "end_frame": 130
+}
+```
+
+backend 會使用 cubic Hermite spline interpolation 修復中間點。
+
+注意：不建議讓修復區段跨過擊球瞬間，因為擊球前後速度與方向本來就會突變。
+
+---
+
+### `GET /export/csv?match_id={match_id}`
+
+匯出目前 Hit 標註資料。
+
+輸出檔名格式：
+
+```text
+shot_annotated_match_{match_id}.csv
+```
+
+---
+
+## 9. 資料庫模型
+
+### `Match`
+
+代表一場比賽。
+
+重要欄位：
+
+- `title`
+- `fps`
+- `duration_frame`
+- `cameras`
+
+---
+
+### `Rally`
+
+代表一段來回球。
+
+重要欄位：
+
+- `match_id`
+- `rally_index`
+- `start_frame`
+- `end_frame`
+- `status`
+
+---
+
+### `Hit`
+
+代表一次擊球。
+
+重要欄位：
+
+- `match_id`
+- `rally_id`
+- `ball_round`
+- `player`
+- `hit_frame`
+- `new_hit_frame`
+- `shot_type`
+- `hand`
+- `note`
+- `confidence`
+
+---
+
+### `BallTraj`
+
+代表某一 frame 的球座標。
+
+重要欄位：
+
+- `match_id`
+- `frame`
+- `t_sec`
+- `x`
+- `y`
+- `z`
+- `speed`
+- `confidence`
+
+並有索引：
+
+```python
+Index("idx_ball_match_frame", BallTraj.match_id, BallTraj.frame)
+```
+
+---
+
+### `Anomaly`
+
+代表可疑軌跡區段。
+
+重要欄位：
+
+- `match_id`
+- `start_frame`
+- `end_frame`
+- `kind`
+- `severity`
+- `status`
+- `comment`
+
+---
+
+## 10. 資料匯入流程
+
+目前正式資料匯入是由：
+
+```text
+backend/app/import_12_24_1_new.py
+```
+
+負責。
+
+主要流程：
+
+1. 掃描 `DATA_ROOT` 下含有 `_set` 且包含 `RallySeg.csv` 的資料夾
+2. 讀取每個 set 的 `RallySeg.csv`
+3. 建立 `Rally`
+4. 依照 `Score` 找到對應 `.npy` 軌跡檔
+5. 讀取 `ball_new`
+6. 讀取 `ball_final_mask_new`
+7. 如果有 `ball_speed`，一起讀取速度
+8. 將有效 mask 的球點寫入 `BallTraj`
+9. 讀取 `shot_annotated.csv`
+10. 建立 `Hit`
+11. 建立完整 `Match`
+
+---
+
+## 11. 重設資料庫
+
+如果資料匯入錯誤或想重新開始，可以執行：
 
 ```bash
 docker compose exec backend python -m app.reset_db
 ```
 
-### 啟動前端
+這會刪掉目前資料庫內所有 table 並重新建立。
 
-```bash
-cd frontend
-npm install
-npm run dev
+注意：這會清空資料庫，不會只刪某一場 match。
+
+---
+
+## 12. 影片使用方式
+
+1. 啟動 backend
+2. 匯入資料
+3. 啟動 frontend
+4. 打開 `http://localhost:5173`
+5. 在影片區上方點選「選擇 0-9.mp4」
+6. 一次選取 `0.mp4` ~ `9.mp4`
+7. 系統會依檔名自動對應相機
+8. 使用上方 Cam 按鈕或鍵盤 `0` ~ `9` 切換視角
+
+檔名必須包含對應數字，例如：
+
+```text
+0.mp4
+1.mp4
+2.mp4
+...
+9.mp4
+```
+
+目前影片是用瀏覽器本機 `blob:` URL 播放，沒有上傳到 backend。
+
+---
+
+## 13. 操作快捷鍵
+
+### 全域 / Timeline
+
+```text
+Space              播放 / 暫停
+ArrowLeft          上一幀，或微調選中的 hit
+ArrowRight         下一幀，或微調選中的 hit
+I                  設定 selection in
+O                  設定 selection out
+Esc                清除 selection / 取消選取
+0 ~ 9              切換影片相機
+```
+
+### 按鈕操作
+
+```text
+Prev rally         跳到上一個 rally
+Next rally         跳到下一個 rally
+Prev frame         上一幀
+Next frame         下一幀
+0.125x             八分之一速播放
+0.25x              四分之一速播放
+0.5x               半速播放
+1x                 正常速度
+2x                 兩倍速
 ```
 
 ---
 
-## 10. 目前前端可操作功能總覽
+## 14. 軌跡修復建議
 
-### Timeline
+Repair mode 適合處理短區段、局部錯誤的軌跡。
 
-- 播放 / 暫停
-- 單幀前後移動
-- 拖曳空白區平移
-- 拖曳藍線 scrub
-- 拖曳 hit 位置
-- 設定選取區間
-- 跳轉前後 rally
-- timeline 縮放
+建議使用情況：
 
-### 3D
+- 單段小範圍漂移
+- 中間缺點但前後端點可信
+- 只有一小段跳點
 
-- 顯示軌跡
-- 顯示球位置
-- 開啟 repair mode
-- 點兩個端點做軌跡修復
+不建議使用情況：
 
-### Inspector
+- 修復區間跨過擊球 frame
+- 前後端點本身也不可信
+- 整段 rally 都偏掉
+- 2D 投影與影片明顯對不上
 
-- 檢視 hit 詳細資訊
-- 更新 shot type / hand / note / new frame
-- 更新 anomaly 狀態
+遇到不適合修復的情況，建議標記 anomaly 為：
 
-### Video
-
-- 載入本機影片
-- 與時間同步
-- 與播放狀態同步
+```text
+needs_rebuild
+```
 
 ---
 
-## 11. 目前 API 一覽
+## 15. 目前限制與注意事項
 
-### `GET /health`
-檢查 backend 是否正常。
+- 前端 `matchId` 目前是寫死在 `frontend/src/store.js`
+- 影片選取只是在瀏覽器本機載入，沒有上傳到 backend
+- 目前資料集匯入是透過 Python script，不是前端選擇資料夾後自動匯入
+- Camera projection 準確度依賴 `.npy` intrinsic / extrinsic 與座標系是否一致
+- `camera_params.json` 需要由目前最新 `.npy` 重新轉換，否則前端仍會用舊參數
+- `reset_db.py` 會清空所有 table，使用前要確認是否要保留資料
+- `node_modules/` 不應該作為專案核心檔案提交
+- 如果 Docker 第一次啟動時 backend 連不上 DB，通常等 PostgreSQL ready 後重啟 backend 即可
 
-### `GET /matches/{match_id}`
-取得比賽基本資料。
 
-### `GET /matches/{match_id}/timeline`
-取得 rally / hit / anomaly 資料。
+## 16. 常見問題
 
-### `GET /matches/{match_id}/traj?start=...&end=...`
-取得某段 frame 區間內的球軌跡。
+### Q1：前端顯示 Backend 連不上？
 
-### `PATCH /hits/{hit_id}`
-更新單一 hit。
+先確認 backend 是否有啟動：
 
-### `PATCH /anomalies/{anomaly_id}`
-更新單一 anomaly。
+```text
+http://localhost:8000/health
+```
 
-### `PATCH /matches/{match_id}/traj/repair`
-修復某段 trajectory。
+如果沒有回應，重新執行：
 
-### `GET /export/csv?match_id=...`
-匯出 hits CSV。
-
----
-
-## 12. 建議閱讀順序
-
-如果是第一次接手這份專案，建議依照下面順序讀：
-
-### 後端
-1. `backend/app/models.py`
-2. `backend/app/schemas.py`
-3. `backend/app/main.py`
-4. `backend/app/import_12_24_1_new.py`
-5. `backend/app/db.py`
-
-### 前端
-1. `frontend/src/store.js`
-2. `frontend/src/App.jsx`
-3. `frontend/src/api.js`
-4. `frontend/src/components/TimelinePanel.jsx`
-5. `frontend/src/components/Scene3D.jsx`
-6. `frontend/src/components/RightDock.jsx`
-7. `frontend/src/components/VideoPanel.jsx`
-
-這樣最容易先理解整個系統的資料流，再進入互動細節。
+```bash
+docker compose up --build
+```
 
 ---
 
+### Q2：Backend 正常，但前端沒有資料？
 
+檢查三件事：
 
+1. 是否已匯入資料
+2. 匯入後的 `match_id` 是多少
+3. `frontend/src/store.js` 的 `matchId` 是否和資料庫一致
+
+---
+
+### Q3：影片有載入，但和 Timeline 不同步？
+
+檢查：
+
+1. 影片 fps 是否和 match fps 一致，目前預設 `50 fps`
+2. 檔名是否正確對應 `0.mp4` ~ `9.mp4`
+3. `camera.offset_frame` 是否需要補償
+4. 是否在播放中手動拖 timeline；目前拖曳會強制暫停以避免不同步
+
+---
+
+### Q4：3D→2D 紅點偏移？
+
+可能原因：
+
+1. intrinsic / extrinsic 和影片不是同一套
+2. `camera_params.json` 不是由最新 `.npy` 轉出
+3. 影片解析度與校正解析度不同，但 scale 設定不一致
+4. 3D 軌跡座標系與 camera world 座標系不一致
+5. 球場中心或座標軸方向假設不同
+
+優先檢查：
+
+```bash
+python read_camera.py
+python scripts/convert_camera_params.py --input cameras --output frontend/src/assets/camera_params.json --width 1920 --height 1200
+```
+
+---
+
+### Q5：Repair mode 修復後還是不合理？
+
+Repair 只適合前後端點可信的小範圍補點。若擊球瞬間附近整段都不可信，應標記為 `needs_rebuild`，不要硬用 interpolation 補成假軌跡。
+
+---
+
+## 18. 開發檢查清單
+
+修改程式後建議檢查：
+
+```bash
+# backend health
+curl http://localhost:8000/health
+
+# frontend build
+cd frontend
+npm run build
+```
+
+如果 `npm run build` 失敗，先檢查 `node_modules` 權限或重新安裝：
+
+```bash
+rm -rf node_modules package-lock.json
+npm install
+npm run build
+```
+
+---
