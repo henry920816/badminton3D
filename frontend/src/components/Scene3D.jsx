@@ -2,7 +2,45 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
+import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { useAppStore } from '../store.js'
+import { loadSmplForwardModel } from '../utils/smplForwardAssets.js'
+
+const SHUTTLECOCK_OBJ_URL = '/models/shuttlecock/shuttlecock.obj'
+const SHUTTLECOCK_MODEL_SCALE = 0.016
+const SHUTTLECOCK_HEAD_AXIS = new THREE.Vector3(0, 1, 0)
+let shuttlecockObjectPromise = null
+
+async function loadShuttlecockObject() {
+  if (!shuttlecockObjectPromise) {
+    shuttlecockObjectPromise = (async () => {
+      const materials = await new MTLLoader()
+        .setPath('/models/shuttlecock/')
+        .loadAsync('shuttlecock.mtl')
+      materials.preload()
+
+      const object = await new OBJLoader()
+        .setMaterials(materials)
+        .loadAsync(SHUTTLECOCK_OBJ_URL)
+
+      const box = new THREE.Box3().setFromObject(object)
+      const center = box.getCenter(new THREE.Vector3())
+      object.traverse((child) => {
+        if (!child.isMesh) return
+        child.castShadow = true
+        child.receiveShadow = true
+        child.geometry = child.geometry.clone()
+        child.geometry.translate(-center.x, -center.y, -center.z)
+        child.geometry.rotateX(Math.PI / 2)
+        child.geometry.scale(SHUTTLECOCK_MODEL_SCALE, SHUTTLECOCK_MODEL_SCALE, SHUTTLECOCK_MODEL_SCALE)
+        child.geometry.computeVertexNormals()
+      })
+      return object
+    })()
+  }
+  return shuttlecockObjectPromise
+}
 
 function AnimatedTrajectory({ points }) {
   const currentTime = useAppStore(s => s.currentTime)
@@ -10,13 +48,29 @@ function AnimatedTrajectory({ points }) {
   const selectedTrajFrames = useAppStore(s => s.selectedTrajFrames) || []
   const toggleTrajFrameSelection = useAppStore(s => s.toggleTrajFrameSelection)
   const repairMode = useAppStore(s => s.repairMode)
+  const [shuttlecockObject, setShuttlecockObject] = useState(null)
 
-  const { pathVectors, trailVectors, ballPos } = useMemo(() => {
-    if (!points || points.length < 2) return { pathVectors: [], trailVectors: [], ballPos: null }
+  useEffect(() => {
+    let cancelled = false
+    loadShuttlecockObject()
+      .then((object) => {
+        if (!cancelled) setShuttlecockObject(object.clone(true))
+      })
+      .catch((err) => {
+        console.warn('Shuttlecock OBJ unavailable:', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const { pathVectors, trailVectors, ballPos, ballQuat } = useMemo(() => {
+    if (!points || points.length < 2) return { pathVectors: [], trailVectors: [], ballPos: null, ballQuat: null }
 
     const pathVectors = []
     const trailVectors = []
     let ballPos = null
+    let ballDir = null
 
     const trailSec = 0.8
     const toThree = (p) => new THREE.Vector3(p.x, -p.y, -p.z)
@@ -45,9 +99,15 @@ function AnimatedTrajectory({ points }) {
         const v1 = toThree(p1)
         const v2 = toThree(p2)
         ballPos = v1.clone().lerp(v2, t)
+        ballDir = v2.clone().sub(v1)
       }
     } else if (pLen > 0 && exactFrame < points[0].frame) {
       ballPos = toThree(points[0])
+      ballDir = toThree(points[1]).sub(toThree(points[0]))
+    }
+
+    if (idx === pLen - 1 && pLen > 1) {
+      ballDir = toThree(points[pLen - 1]).sub(toThree(points[pLen - 2]))
     }
 
     for (let i = 0; i < pLen; i++) {
@@ -59,7 +119,14 @@ function AnimatedTrajectory({ points }) {
 
     if (ballPos) trailVectors.push(ballPos)
 
-    return { pathVectors, trailVectors, ballPos }
+    const ballQuat = ballDir && ballDir.lengthSq() > 1e-8
+      ? new THREE.Quaternion().setFromUnitVectors(
+        SHUTTLECOCK_HEAD_AXIS,
+        ballDir.normalize()
+      )
+      : null
+
+    return { pathVectors, trailVectors, ballPos, ballQuat }
   }, [points, currentTime, fps])
 
   if (pathVectors.length < 2) return null
@@ -69,15 +136,24 @@ function AnimatedTrajectory({ points }) {
       <Line points={pathVectors} lineWidth={1.5} color="#6b7280" opacity={0.3} transparent />
 
       {trailVectors.length > 1 && (
-        <Line points={trailVectors} lineWidth={3.5} color="#fcd34d" />
+        <Line points={trailVectors} lineWidth={2} color="#fcd34d" />
       )}
 
       {ballPos && (
-        <mesh position={[ballPos.x, ballPos.y, ballPos.z]}>
-          <sphereGeometry args={[0.08, 16, 16]} />
-          <meshStandardMaterial color="#ffffff" emissive="#fbbf24" emissiveIntensity={1.2} />
+        <group
+          position={[ballPos.x, ballPos.y, ballPos.z]}
+          quaternion={ballQuat || undefined}
+        >
+          {shuttlecockObject ? (
+            <primitive object={shuttlecockObject} />
+          ) : (
+            <mesh>
+              <sphereGeometry args={[0.08, 16, 16]} />
+              <meshStandardMaterial color="#ffffff" emissive="#fbbf24" emissiveIntensity={1.2} />
+            </mesh>
+          )}
           <pointLight distance={3} intensity={3} color="#fcd34d" />
-        </mesh>
+        </group>
       )}
 
       {repairMode && points.map(p => {
@@ -132,6 +208,313 @@ function PlaybackController() {
   return null
 }
 
+function getLocalPoseFrame(playerReplay, frame) {
+  if (!playerReplay?.frames?.length) return null
+  const localFrame = frame - (playerReplay.start_frame || 0)
+  let best = playerReplay.frames[0]
+  for (const item of playerReplay.frames) {
+    if ((item.local_frame ?? 0) <= localFrame) best = item
+    else break
+  }
+  return best
+}
+
+function sourceToThreePositions(source) {
+  const out = new Float32Array(source.length)
+  for (let i = 0; i < source.length; i += 3) {
+    out[i] = source[i]
+    out[i + 1] = -source[i + 1]
+    out[i + 2] = -source[i + 2]
+  }
+  return out
+}
+
+const SMPL_NORMAL_RECOMPUTE_INTERVAL = 4
+const SMPL_MAX_UPDATE_FPS = 30
+const SMPL_MIN_UPDATE_INTERVAL_SEC = 1 / SMPL_MAX_UPDATE_FPS
+const SMPL_IMMEDIATE_FRAME_JUMP = 3
+const RACKET_OBJ_URL = '/models/racket/racket.obj'
+const RACKET_SCALE = 1
+const RACKET_PIVOT = new THREE.Vector3(0, 0, 0)
+const RACKET_OFFSET = new THREE.Vector3(0, 0, 0)
+let racketObjectPromise = null
+
+function applyGeometryPositions(geometry, positions, recomputeNormals = false) {
+  if (!geometry || !positions) return
+  const attribute = geometry.getAttribute('position')
+  if (!attribute || attribute.array.length !== positions.length) return
+  attribute.array.set(positions)
+  attribute.needsUpdate = true
+  if (recomputeNormals) geometry.computeVertexNormals()
+}
+
+function releaseWorkerPositions(worker, positions) {
+  if (!worker || !positions?.buffer || positions.buffer.byteLength === 0) return
+  worker.postMessage({
+    type: 'release',
+    buffer: positions.buffer,
+  }, [positions.buffer])
+}
+
+function prepareRacketObject(source) {
+  const object = source.clone(true)
+  object.traverse((child) => {
+    if (!child.isMesh) return
+    child.castShadow = true
+    child.receiveShadow = true
+    child.geometry = child.geometry.clone()
+    child.geometry.translate(-RACKET_PIVOT.x, -RACKET_PIVOT.y, -RACKET_PIVOT.z)
+    child.geometry.scale(RACKET_SCALE, RACKET_SCALE, RACKET_SCALE)
+    child.geometry.translate(RACKET_OFFSET.x, RACKET_OFFSET.y, RACKET_OFFSET.z)
+    child.material = new THREE.MeshStandardMaterial({
+      color: '#111827',
+      roughness: 0.42,
+      metalness: 0,
+      side: THREE.DoubleSide,
+    })
+  })
+  return object
+}
+
+function loadRacketObject() {
+  if (!racketObjectPromise) {
+    racketObjectPromise = new OBJLoader().loadAsync(RACKET_OBJ_URL).then((object) => {
+      object.traverse((child) => {
+        if (child.isMesh) child.geometry.computeVertexNormals()
+      })
+      return object
+    })
+  }
+  return racketObjectPromise
+}
+
+function SmplForwardAvatar({ playerReplay }) {
+  const currentFrame = useAppStore(s => s.currentFrame)
+  const geometryRef = useRef(null)
+  const racketRef = useRef(null)
+  const workerRef = useRef(null)
+  const requestIdRef = useRef(0)
+  const lastSentFrameRef = useRef(null)
+  const lastAppliedFrameRef = useRef(null)
+  const lastNormalFrameRef = useRef(null)
+  const lastDispatchTimeRef = useRef(-Infinity)
+  const [model, setModel] = useState(null)
+  const [racketObject, setRacketObject] = useState(null)
+  const [ready, setReady] = useState(false)
+  const [hasAppliedFrame, setHasAppliedFrame] = useState(false)
+  const [failed, setFailed] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    setModel(null)
+    setReady(false)
+    setHasAppliedFrame(false)
+    setFailed('')
+    lastSentFrameRef.current = null
+    lastAppliedFrameRef.current = null
+    lastNormalFrameRef.current = null
+    lastDispatchTimeRef.current = -Infinity
+
+    ;(async () => {
+      try {
+        const loaded = await loadSmplForwardModel(playerReplay?.smpl_forward_model)
+        if (!cancelled) setModel(loaded)
+      } catch (err) {
+        console.warn('SMPL forward assets unavailable:', err)
+        if (!cancelled) setFailed(String(err))
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [playerReplay?.smpl_forward_model])
+
+  useEffect(() => {
+    lastSentFrameRef.current = null
+    lastAppliedFrameRef.current = null
+    lastNormalFrameRef.current = null
+    lastDispatchTimeRef.current = -Infinity
+    requestIdRef.current += 1
+    setHasAppliedFrame(false)
+    if (racketRef.current) racketRef.current.visible = false
+  }, [playerReplay?.start_frame, playerReplay?.frame_count])
+
+  useEffect(() => {
+    let cancelled = false
+    setRacketObject(null)
+
+    loadRacketObject()
+      .then((object) => {
+        if (!cancelled) setRacketObject(prepareRacketObject(object))
+      })
+      .catch((err) => {
+        console.warn('Racket OBJ unavailable:', err)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const geometry = useMemo(() => {
+    if (!model?.shared?.arrays?.v_template?.length) return null
+    const geom = new THREE.BufferGeometry()
+    geom.setIndex(new THREE.BufferAttribute(model.shared.arrays.faces, 1))
+    geom.setAttribute(
+      'position',
+      new THREE.BufferAttribute(sourceToThreePositions(model.shared.arrays.v_template), 3)
+    )
+    geom.computeVertexNormals()
+    return geom
+  }, [model])
+
+  useEffect(() => {
+    geometryRef.current = geometry
+  }, [geometry])
+
+  useEffect(() => {
+    if (!model || !geometry) return undefined
+
+    const worker = new Worker(new URL('../workers/smplForwardWorker.js', import.meta.url), {
+      type: 'module',
+    })
+    workerRef.current = worker
+    setReady(false)
+
+    worker.onmessage = (event) => {
+      const message = event.data
+      if (message.type === 'ready') {
+        setReady(true)
+        return
+      }
+      if (message.type !== 'frame') return
+
+      if (message.requestId === requestIdRef.current) {
+        const shouldRecomputeNormals =
+          lastNormalFrameRef.current == null ||
+          Math.abs(message.frame - lastNormalFrameRef.current) >= SMPL_NORMAL_RECOMPUTE_INTERVAL
+
+        applyGeometryPositions(geometryRef.current, message.positions, shouldRecomputeNormals)
+        lastAppliedFrameRef.current = message.frame
+        setHasAppliedFrame(true)
+        if (shouldRecomputeNormals) lastNormalFrameRef.current = message.frame
+
+        if (racketRef.current && Array.isArray(message.racketMatrix)) {
+          racketRef.current.visible = true
+          racketRef.current.matrix.fromArray(message.racketMatrix).transpose()
+          racketRef.current.matrixWorldNeedsUpdate = true
+        }
+      }
+      releaseWorkerPositions(workerRef.current, message.positions)
+    }
+
+    worker.onerror = (err) => {
+      console.warn('SMPL forward worker failed:', err)
+      setFailed(String(err.message || err))
+    }
+
+    worker.postMessage({
+      type: 'init',
+      vertexCount: model.shared.meta.vertexCount,
+      jointCount: model.shared.meta.jointCount,
+      shapeCount: model.shared.meta.shapeCount || 10,
+      beta: playerReplay.beta || new Array(10).fill(0),
+      shared: {
+        parents: model.shared.arrays.parents,
+        v_template: model.shared.arrays.v_template,
+        shapedirs: model.shared.arrays.shapedirs,
+        J_regressor: model.shared.arrays.J_regressor,
+        lbs_weights: model.shared.arrays.lbs_weights,
+        posedirs: model.shared.arrays.posedirs,
+      },
+      player: {},
+    })
+
+    return () => {
+      worker.terminate()
+      workerRef.current = null
+      setReady(false)
+    }
+  }, [model, geometry, playerReplay.beta])
+
+  useFrame((state) => {
+    if (!ready || !workerRef.current || !geometryRef.current) return
+    const poseFrame = getLocalPoseFrame(playerReplay, currentFrame)
+    if (!poseFrame) return
+    if (lastAppliedFrameRef.current === poseFrame.frame) return
+
+    if (lastSentFrameRef.current === poseFrame.frame) return
+    const now = state.clock.elapsedTime
+    const lastSentFrame = lastSentFrameRef.current
+    const isLargeFrameJump =
+      lastSentFrame == null ||
+      Math.abs(poseFrame.frame - lastSentFrame) >= SMPL_IMMEDIATE_FRAME_JUMP
+
+    if (
+      !isLargeFrameJump &&
+      now - lastDispatchTimeRef.current < SMPL_MIN_UPDATE_INTERVAL_SEC
+    ) {
+      return
+    }
+
+    lastSentFrameRef.current = poseFrame.frame
+    lastDispatchTimeRef.current = now
+    const requestId = requestIdRef.current + 1
+    requestIdRef.current = requestId
+
+    workerRef.current.postMessage({
+      type: 'frame',
+      requestId,
+      frame: poseFrame.frame,
+      global_orient: poseFrame.global_orient,
+      body_pose: poseFrame.body_pose,
+      trans: poseFrame.trans,
+      racket_pose: poseFrame.racket_pose,
+      racket_transform: poseFrame.racket_transform,
+      racket_frame_offset: poseFrame.racket_frame_offset,
+    })
+  })
+
+  if (failed || !geometry) return null
+
+  return (
+    <group>
+      <mesh geometry={geometry} frustumCulled={false} castShadow receiveShadow visible={hasAppliedFrame}>
+        <meshStandardMaterial
+          color={playerReplay.player_index === 0 ? '#9fb7d9' : '#d6b69c'}
+          roughness={0.66}
+          metalness={0.0}
+        />
+      </mesh>
+      {racketObject && (
+        <primitive
+          ref={racketRef}
+          object={racketObject}
+          matrixAutoUpdate={false}
+          visible={false}
+        />
+      )}
+    </group>
+  )
+}
+
+function SmplReplayLayer({ replayData }) {
+  const showSmplReplay = useAppStore(s => s.showSmplReplay)
+  if (!showSmplReplay || !replayData?.players?.length) return null
+
+  return (
+    <group>
+      {replayData.players.map(playerReplay => (
+        <SmplForwardAvatar
+          key={`${replayData.rally_id ?? replayData.score ?? replayData.start_frame}-${playerReplay.id}`}
+          playerReplay={playerReplay}
+        />
+      ))}
+    </group>
+  )
+}
+
 function CourtRef() {
   const courtWidth = 6.1
   const courtLength = 13.4
@@ -139,7 +522,7 @@ function CourtRef() {
 
   return (
     <group>
-      <mesh position={[0, -0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[0, -0.5, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[courtWidth, courtLength]} />
         <meshStandardMaterial color="#166534" />
       </mesh>
@@ -151,47 +534,47 @@ function CourtRef() {
         <lineBasicMaterial color="white" linewidth={2} />
       </lineSegments>
 
-      <mesh position={[0, 0.01, 1.98]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[0, -0.49, 1.98]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[courtWidth, 0.04]} />
         <meshBasicMaterial color="white" />
       </mesh>
 
-      <mesh position={[0, 0.01, -1.98]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[0, -0.49, -1.98]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[courtWidth, 0.04]} />
         <meshBasicMaterial color="white" />
       </mesh>
 
-      <mesh position={[0, 0.01, courtLength / 2 - 0.76]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[0, -0.49, courtLength / 2 - 0.76]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[courtWidth, 0.04]} />
         <meshBasicMaterial color="white" />
       </mesh>
 
-      <mesh position={[0, 0.01, -(courtLength / 2 - 0.76)]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[0, -0.49, -(courtLength / 2 - 0.76)]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[courtWidth, 0.04]} />
         <meshBasicMaterial color="white" />
       </mesh>
 
-      <mesh position={[courtWidth / 2 - 0.46, 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[courtWidth / 2 - 0.46, -0.49, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[0.04, courtLength]} />
         <meshBasicMaterial color="white" />
       </mesh>
 
-      <mesh position={[-(courtWidth / 2 - 0.46), 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[-(courtWidth / 2 - 0.46), -0.49, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[0.04, courtLength]} />
         <meshBasicMaterial color="white" />
       </mesh>
 
-      <mesh position={[0, netHeight / 2, 0]}>
+      <mesh position={[0, netHeight / 2 - 0.48, 0]}>
         <boxGeometry args={[courtWidth + 0.5, netHeight, 0.02]} />
         <meshStandardMaterial color="#cbd5e1" opacity={0.6} transparent />
       </mesh>
 
-      <mesh position={[courtWidth / 2 + 0.25, netHeight / 2, 0]}>
+      <mesh position={[courtWidth / 2 + 0.25, netHeight / 2 -0.49, 0]}>
         <cylinderGeometry args={[0.05, 0.05, netHeight]} />
         <meshStandardMaterial color="#e5e7eb" />
       </mesh>
 
-      <mesh position={[-(courtWidth / 2 + 0.25), netHeight / 2, 0]}>
+      <mesh position={[-(courtWidth / 2 + 0.25), netHeight / 2 - 0.49, 0]}>
         <cylinderGeometry args={[0.05, 0.05, netHeight]} />
         <meshStandardMaterial color="#e5e7eb" />
       </mesh>
@@ -407,6 +790,7 @@ export default function Scene3D() {
   const rallies = useAppStore(s => s.rallies) || []
   const currentTime = useAppStore(s => s.currentTime)
   const matchId = useAppStore(s => s.matchId)
+  const currentFrame = useAppStore(s => s.currentFrame)
   const selectedTrajFrames = useAppStore(s => s.selectedTrajFrames)
   const clearTrajSelection = useAppStore(s => s.clearTrajSelection)
   const repairMode = useAppStore(s => s.repairMode)
@@ -414,9 +798,76 @@ export default function Scene3D() {
   const upsertTrajPoints = useAppStore(s => s.upsertTrajPoints)
   const activeCameraId = useAppStore(s => s.activeCameraId)
   const cameras = useAppStore(s => s.cameras) || []
+  const replaySegments = useAppStore(s => s.replaySegments) || []
+  const activeReplaySegmentId = useAppStore(s => s.activeReplaySegmentId)
+  const setActiveReplaySegment = useAppStore(s => s.setActiveReplaySegment)
+  const showSmplReplay = useAppStore(s => s.showSmplReplay)
+  const toggleSmplReplay = useAppStore(s => s.toggleSmplReplay)
+  const smplReplayBySegmentId = useAppStore(s => s.smplReplayBySegmentId)
+  const setSmplReplayData = useAppStore(s => s.setSmplReplayData)
   const [repairing, setRepairing] = useState(false)
+  const [smplReplayStatus, setSmplReplayStatus] = useState('idle')
 
   const activeCamera = cameras.find(camera => camera.id === activeCameraId)
+  const activeReplayIndex = replaySegments.findIndex(item => item.id === activeReplaySegmentId)
+  const activeReplaySegment = activeReplayIndex >= 0 ? replaySegments[activeReplayIndex] : null
+  const replayData = activeReplaySegmentId ? smplReplayBySegmentId.get(activeReplaySegmentId) : null
+
+  const goToReplaySegment = (index) => {
+    if (!replaySegments.length) return
+    const clamped = Math.max(0, Math.min(replaySegments.length - 1, index))
+    setActiveReplaySegment(replaySegments[clamped].id)
+  }
+
+  useEffect(() => {
+    if (!replaySegments.length) return
+    if (
+      activeReplaySegment &&
+      currentFrame >= activeReplaySegment.start_frame &&
+      currentFrame <= activeReplaySegment.end_frame
+    ) {
+      return
+    }
+
+    const sortedSegments = [...replaySegments].sort((a, b) => a.start_frame - b.start_frame)
+    const segment = sortedSegments.find(item => currentFrame <= item.end_frame)
+    if (segment && segment.id !== activeReplaySegmentId) {
+      setActiveReplaySegment(segment.id)
+    }
+  }, [currentFrame, replaySegments, activeReplaySegment, activeReplaySegmentId, setActiveReplaySegment])
+
+  useEffect(() => {
+    if (!activeReplaySegment || smplReplayBySegmentId.has(activeReplaySegment.id)) return
+
+    let cancelled = false
+    setSmplReplayStatus('loading')
+
+    ;(async () => {
+      try {
+        const { api } = await import('../api.js')
+        const data = await api.getSmplReplay(
+          matchId,
+          activeReplaySegment.start_frame,
+          activeReplaySegment.end_frame
+        )
+        if (cancelled) return
+        setSmplReplayData(activeReplaySegment.id, data)
+        setSmplReplayStatus(data?.players?.length ? 'ready' : 'empty')
+      } catch (err) {
+        if (cancelled) return
+        console.warn('SMPL replay unavailable:', err)
+        setSmplReplayData(activeReplaySegment.id, {
+          players: [],
+          error: String(err),
+        })
+        setSmplReplayStatus('error')
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeReplaySegment, matchId, smplReplayBySegmentId, setSmplReplayData])
 
   const handleRepair = async () => {
     if (selectedTrajFrames.length !== 2) return
@@ -496,26 +947,41 @@ export default function Scene3D() {
     <div className="w-full h-full relative bg-zinc-950 overflow-hidden">
       <div className="absolute top-2 left-2 z-20 bg-zinc-900/80 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-200 shadow backdrop-blur-md">
         3D Camera：<span className="text-yellow-300 font-semibold">{activeCamera?.label || activeCameraId}</span>
-        {activeCamera?.description && (
-          <span className="text-zinc-400 ml-2">{activeCamera.description}</span>
-        )}
+        
         <span className="text-zinc-500 ml-2">滾輪依滑鼠位置縮放｜右鍵平移｜點 📷 切換影片</span>
       </div>
 
       <div className="absolute top-2 right-2 z-20">
-        <button
-          onClick={() => {
-            if (repairMode) clearTrajSelection()
-            setRepairMode(!repairMode)
-          }}
-          className={`px-3 py-1 rounded border text-xs font-semibold shadow ${
-            repairMode
-              ? 'bg-sky-800 border-sky-700 text-sky-100'
-              : 'bg-zinc-900/80 border-zinc-800 text-zinc-200'
-          }`}
-        >
-          {repairMode ? 'Repair mode on' : 'Repair mode off'}
-        </button>
+        <div className="flex items-center gap-2">
+          {activeReplaySegment && (
+            <div className="flex items-center bg-zinc-900/80 border border-zinc-800 rounded shadow backdrop-blur-md overflow-hidden text-xs">
+              <button
+                type="button"
+                onClick={toggleSmplReplay}
+                className={`px-3 py-1.5 font-semibold border-x border-zinc-800 ${
+                  showSmplReplay ? 'text-emerald-200 bg-emerald-900/40' : 'text-zinc-300'
+                }`}
+                title="Show / hide SMPL forward mesh"
+              >
+                SMPL {showSmplReplay ? 'on' : 'off'} · {smplReplayStatus}
+              </button>
+            </div>
+          )}
+
+          <button
+            onClick={() => {
+              if (repairMode) clearTrajSelection()
+              setRepairMode(!repairMode)
+            }}
+            className={`px-3 py-1 rounded border text-xs font-semibold shadow ${
+              repairMode
+                ? 'bg-sky-800 border-sky-700 text-sky-100'
+                : 'bg-zinc-900/80 border-zinc-800 text-zinc-200'
+            }`}
+          >
+            {repairMode ? 'Repair mode on' : 'Repair mode off'}
+          </button>
+        </div>
       </div>
 
       {repairMode && selectedTrajFrames.length > 0 && (
@@ -553,6 +1019,7 @@ export default function Scene3D() {
 
         <CourtRef />
         <RealCameraMarkers />
+        <SmplReplayLayer replayData={replayData} />
         <AnimatedTrajectory points={points} />
         <PlaybackController />
 
