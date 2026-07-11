@@ -20,6 +20,7 @@ export const api = {
   getMatch: (id) => jget(`/matches/${id}`),
   getTimeline: (id) => jget(`/matches/${id}/timeline`),
   getTraj: (id, startFrame, endFrame) => jget(`/matches/${id}/traj?start=${startFrame}&end=${endFrame}`),
+  getSmplReplay: (id, startFrame, endFrame) => jget(`/matches/${id}/smpl-replay?start=${startFrame}&end=${endFrame}`),
   repairTraj: (id, payload) => jpatch(`/matches/${id}/traj/repair`, payload),
   patchHit: (hitId, payload) => jpatch(`/hits/${hitId}`, payload),
   patchAnomaly: (anomalyId, payload) => jpatch(`/anomalies/${anomalyId}`, payload),
