@@ -18,6 +18,7 @@ export default function App() {
   const matchId = useAppStore(s => s.matchId)
   const setMatchMeta = useAppStore(s => s.setMatchMeta)
   const setTimelineData = useAppStore(s => s.setTimelineData)
+  const setReplaySegments = useAppStore(s => s.setReplaySegments)
   const upsertTrajPoints = useAppStore(s => s.upsertTrajPoints)
   const markTrajRangeLoaded = useAppStore(s => s.markTrajRangeLoaded)
   const hasTrajRangeLoaded = useAppStore(s => s.hasTrajRangeLoaded)
@@ -52,6 +53,19 @@ export default function App() {
 
       const timeline = await api.getTimeline(matchId)
       setTimelineData(timeline)
+      setReplaySegments((timeline.rallies || []).map((rally) => ({
+        id: `rally-${rally.id}`,
+        rally_id: rally.id,
+        rally_index: rally.rally_index,
+        start_frame: rally.start_frame,
+        end_frame: rally.end_frame,
+        score: rally.score,
+        up_court: rally.up_court,
+        down_court: rally.down_court,
+        players: rally.players || [],
+        fps: match.fps,
+        duration_sec: (rally.end_frame - rally.start_frame + 1) / (match.fps || 50),
+      })))
 
       const preloadStart = 0
       const preloadEnd = match.duration_frame
@@ -65,7 +79,7 @@ export default function App() {
       console.error(err)
       alert('Backend 連不上或資料載入失敗。請先啟動 docker-compose。\n' + String(err))
     })
-  }, [matchId, resetTrajCache, setMatchMeta, setTimelineData, upsertTrajPoints, markTrajRangeLoaded])
+  }, [matchId, resetTrajCache, setMatchMeta, setTimelineData, setReplaySegments, upsertTrajPoints, markTrajRangeLoaded])
 
   useEffect(() => {
     if (!bootstrapDoneRef.current) return

@@ -61,6 +61,11 @@ export const useAppStore = create((set, get) => ({
   hits: [],
   anomalies: [],
 
+  replaySegments: [],
+  activeReplaySegmentId: null,
+  smplReplayBySegmentId: new Map(),
+  showSmplReplay: true,
+
   trajByFrame: new Map(),
   loadedTrajRanges: [],
 
@@ -173,6 +178,49 @@ export const useAppStore = create((set, get) => ({
     rallies: rallies || [],
     hits: hits || [],
     anomalies: anomalies || [],
+  }),
+
+  setReplaySegments: (segments) => set((s) => {
+    const next = segments || []
+    const activeStillExists = next.some(segment => segment.id === s.activeReplaySegmentId)
+
+    return {
+      replaySegments: next,
+      activeReplaySegmentId: activeStillExists
+        ? s.activeReplaySegmentId
+        : next[0]?.id ?? null,
+      smplReplayBySegmentId: new Map(),
+    }
+  }),
+
+  setActiveReplaySegment: (id) => set((s) => ({
+    activeReplaySegmentId: s.replaySegments.some(segment => segment.id === id)
+      ? id
+      : s.activeReplaySegmentId,
+  })),
+
+  setActiveReplaySegmentByRallyId: (rallyId) => set((s) => {
+    const segment = s.replaySegments.find(item => item.rally_id === rallyId)
+    if (!segment) return {}
+
+    return {
+      activeReplaySegmentId: segment.id,
+      showSmplReplay: true,
+    }
+  }),
+
+  setShowSmplReplay: (value) => set({
+    showSmplReplay: Boolean(value),
+  }),
+
+  toggleSmplReplay: () => set((s) => ({
+    showSmplReplay: !s.showSmplReplay,
+  })),
+
+  setSmplReplayData: (segmentId, data) => set((s) => {
+    const map = new Map(s.smplReplayBySegmentId)
+    map.set(segmentId, data)
+    return { smplReplayBySegmentId: map }
   }),
 
   updateHit: (id, updates) => set((s) => ({
