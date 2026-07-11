@@ -81,7 +81,6 @@ export function buildDefaultCamerasFromCameraParams() {
       index,
       label: `Cam ${index}`,
       fileName: `${index}.mp4`,
-      description: params ? `校正參數位置 Cam ${index}` : `未載入校正參數 Cam ${index}`,
       video_url: null,
       fps: 50,
       offset_frame: 0,
