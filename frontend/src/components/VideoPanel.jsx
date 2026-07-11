@@ -383,8 +383,19 @@ export default function VideoPanel() {
     let callbackId = null
     let stopped = false
 
+    const scheduleNextFrameCallback = () => {
+      if (videoRef.current?.requestVideoFrameCallback && !stopped) {
+        callbackId = videoRef.current.requestVideoFrameCallback(updateFrame)
+      }
+    }
+
     const updateFrame = (now, meta) => {
       if (stopped || !videoRef.current) return
+
+      if (!playing) {
+        scheduleNextFrameCallback()
+        return
+      }
 
       const mediaTime = meta?.mediaTime ?? videoRef.current.currentTime
       const frame = getGlobalFrameFromCameraTime(mediaTime, fps, activeCamera)
@@ -410,9 +421,7 @@ export default function VideoPanel() {
 
       syncFromVideoRef.current = false
 
-      if (videoRef.current.requestVideoFrameCallback && !stopped) {
-        callbackId = videoRef.current.requestVideoFrameCallback(updateFrame)
-      }
+      scheduleNextFrameCallback()
     }
 
     if (v.requestVideoFrameCallback) {
@@ -434,6 +443,7 @@ export default function VideoPanel() {
     setCurrentTime,
     setPlaying,
     activeSrc,
+    playing,
   ])
 
   function onTimeUpdate() {
@@ -441,6 +451,7 @@ export default function VideoPanel() {
 
     if (!v || !activeCamera || !fps) return
     if (v.requestVideoFrameCallback) return
+    if (!playing) return
 
     const frame = getGlobalFrameFromCameraTime(v.currentTime, fps, activeCamera)
 
