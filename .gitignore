@@ -35,3 +35,6 @@ dataset/
 *.tar
 *.zst
 *.pkl
+
+# test files
+tests
