@@ -12,6 +12,8 @@
 
 - 3D 羽球場與 3D 球軌跡顯示
 - 目前 frame 的球點高亮
+- SMPL 人體 replay：每個 rally 可顯示兩位球員的 3D 人體動畫
+- 球拍 replay：每 frame 顯示球拍模型，並跟隨球員手部 transform
 - 10 視角影片切換，支援 `0.mp4` ~ `9.mp4`
 - 可一次選取多支本機影片，系統會依檔名自動對應 Cam 0 ~ Cam 9
 - 影片、3D、Timeline、2D 投影視圖共用同一個 `currentFrame`
@@ -27,6 +29,7 @@
 - 3D 場景中的相機 marker 位置由 extrinsic 自動推算
 - Repair mode：選取兩個 3D 軌跡點後，用 cubic Hermite spline 修復中間軌跡
 - CSV 匯出目前 Hit 標註資料
+- 前端使用 Web Worker 計算 SMPL forward，降低主執行緒負擔
 
 ---
 
@@ -42,6 +45,7 @@
 - `@react-three/fiber`
 - `@react-three/drei`
 - Canvas 2D overlay
+- Web Worker
 
 ### Backend
 
@@ -60,6 +64,15 @@
 - `cameraProjection.js` 負責 3D 座標投影到影片畫面
 - `cameraScenePose.js` 負責把 extrinsic 反推成 3D 場景中的相機位置與朝向
 
+### SMPL / Racket / Shuttlecock
+
+- SMPL forward assets 放在 `frontend/public/models/smpl/forward/`
+- 球拍模型放在 `frontend/public/models/racket/`
+- 羽毛球模型放在 `frontend/public/models/shuttlecock/`
+- `frontend/src/workers/smplForwardWorker.js` 負責每 frame 的 SMPL forward 與球拍 matrix 計算
+- `scripts/export_smpl_forward_assets.py` 負責把 SMPL `.pkl/.npz` 轉成前端可載入的 forward assets
+- `scripts/convert_new_racket_pth_to_npz.py` 負責把 new racket `.pth` 轉成 replay 用 `.npz`
+
 ---
 
 ## 3. 專案結構
@@ -71,6 +84,10 @@ badminton3D-main/
 ├─ package.json
 ├─ package-lock.json
 ├─ read_camera.py
+├─ body_models/
+│  └─ human_model_files/
+│     └─ smpl/
+│        └─ SMPL_NEUTRAL.pkl
 │
 ├─ cameras/
 │  ├─ Cam_0_intrinsic.npy
@@ -80,7 +97,12 @@ badminton3D-main/
 │  └─ Cam_9_extrinsic.npy
 │
 ├─ scripts/
-│  └─ convert_camera_params.py
+│  ├─ convert_camera_params.py
+│  ├─ convert_new_racket_pth_to_npz.py
+│  └─ export_smpl_forward_assets.py
+│
+├─ submodules/
+│  └─ smplx/
 │
 ├─ backend/
 │  ├─ Dockerfile
@@ -97,7 +119,11 @@ badminton3D-main/
 │     ├─ import_12_24_1_new.py
 │     ├─ read_balldata.ipynb
 │     └─ datasets/
-│        └─ 12_24_1_new/
+│        ├─ 12_24_1_new/
+│        ├─ ball_new/
+│        ├─ ball_final_mask_new/
+│        ├─ new_racket/
+│        └─ new_racket_npz/
 │
 └─ frontend/
    ├─ index.html
@@ -105,6 +131,15 @@ badminton3D-main/
    ├─ vite.config.js
    ├─ tailwind.config.cjs
    ├─ postcss.config.cjs
+   ├─ public/
+   │  └─ models/
+   │     ├─ racket/
+   │     │  └─ racket.obj
+   │     ├─ shuttlecock/
+   │     │  ├─ shuttlecock.obj
+   │     │  └─ shuttlecock.mtl
+   │     └─ smpl/
+   │        └─ forward/
    └─ src/
       ├─ main.jsx
       ├─ App.jsx
@@ -116,7 +151,10 @@ badminton3D-main/
       │  └─ camera_params.json
       ├─ utils/
       │  ├─ cameraProjection.js
-      │  └─ cameraScenePose.js
+      │  ├─ cameraScenePose.js
+      │  └─ smplForwardAssets.js
+      ├─ workers/
+      │  └─ smplForwardWorker.js
       └─ components/
          ├─ TopBar.jsx
          ├─ Scene3D.jsx
@@ -902,4 +940,97 @@ npm install
 npm run build
 ```
 
+
+---
+
+## 19. SMPL 人體、球拍與羽毛球 3D Replay
+
+新增 rally 內的人體與球拍 3D 動畫顯示。Scene3D 會依照目前 `currentFrame` 找出對應 rally，向 backend 取得兩位球員的 SMPL pose，再由前端 worker 計算人體 mesh vertices，最後在 3D 場景中同步顯示人體、球拍與羽毛球。
+
+### 19.1 Replay 資料流程
+
+```text
+backend/app/datasets/new_racket/241224_1/*.pth
+    ↓
+scripts/convert_new_racket_pth_to_npz.py
+    ↓
+backend/app/datasets/new_racket_npz/241224_1/*.npz
+    ↓
+GET /matches/{match_id}/smpl-replay?start={start}&end={end}
+    ↓
+frontend/src/components/Scene3D.jsx
+    ↓
+frontend/src/workers/smplForwardWorker.js
+    ↓
+SMPL human mesh + racket mesh + shuttlecock mesh
+```
+
+`.pth/.npz` 目前會保留這些欄位：
+
+```text
+body_pose            [N, 72]
+beta                 [1, 10]
+trans                [N, 3]
+racket_pose          [N, 3]
+mask                 [N]
+racket_transform     [N, 4, 4]
+racket_frame_offset  [N, 3]
+```
+
+### 19.2 Backend API
+
+新增或更新的 API：
+
+```text
+GET /matches/{match_id}/smpl-replay?start={start}&end={end}
+```
+
+回傳內容包含：
+
+- 每個 player 的 frame list
+- `body_pose`
+- `beta`
+- `trans`
+- `racket_pose`
+- `racket_transform`
+- `racket_frame_offset`
+- SMPL forward assets 的路徑設定
+
+前端會優先使用 `racket_transform` 與 `racket_frame_offset` 來放置球拍；如果資料內沒有預先算好的 transform，worker 會 fallback 用 `racket_pose` 估算球拍 matrix。
+
+### 19.3 Frontend 顯示邏輯
+
+流程：
+
+1. `Scene3D.jsx` 依照目前 frame 選出 active rally。
+2. 若該 rally 尚未載入 SMPL replay，呼叫 `/smpl-replay`。
+3. `smplForwardWorker.js` 計算人體 vertices。
+4. 主執行緒更新 SMPL mesh 的 position buffer。
+5. worker 同時回傳 `racketMatrix`，Scene3D 套用到 `racket.obj`。
+6. 羽毛球改用 `frontend/public/models/shuttlecock/` 底下的模型，並依照球路速度方向旋轉。
+7. Rally 播完後會自動切到下一個 rally，人體與球拍會停在下一個 rally 第一個 frame 的狀態。
+
+### 19.4 效能處理
+
+SMPL mesh 每 frame 運算量較大，目前做了幾個優化：
+
+- SMPL forward 放到 Web Worker，避免卡住 Three.js render loop。
+- `v_shaped` 與 joints 只在 worker 初始化或 player 資料改變時準備，不在每 frame 重算。
+- `computeVertexNormals()` 不每 frame 執行，而是每隔數 frame 更新一次。
+- SMPL pose 更新節流到約 30fps，render loop 仍可維持較高 fps。
+- worker 回傳 vertices 時使用 transferable buffer，減少 `Float32Array` 複製與 GC 壓力。
+
+### 19.5 前處理指令
+
+匯出瀏覽器使用的 SMPL forward assets：
+
+```bash
+python scripts/export_smpl_forward_assets.py
+```
+
+轉換 new racket `.pth` 到 `.npz`：
+
+```bash
+python scripts/convert_new_racket_pth_to_npz.py
+```
 ---
