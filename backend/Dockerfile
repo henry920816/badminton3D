@@ -5,7 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+
+# 只需要 CPU 版 PyTorch 讀取上傳的 .pth 並轉成 .npz。
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.6.0
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
 

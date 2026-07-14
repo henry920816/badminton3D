@@ -1,92 +1,174 @@
-// frontend/src/utils/cameraScenePose.js
-
-import cameraParamsJson from '../assets/camera_params.json'
-
-function mat3Transpose(R) {
+function mat3Transpose(matrix) {
   return [
-    [R[0][0], R[1][0], R[2][0]],
-    [R[0][1], R[1][1], R[2][1]],
-    [R[0][2], R[1][2], R[2][2]],
+    [
+      matrix[0][0],
+      matrix[1][0],
+      matrix[2][0],
+    ],
+    [
+      matrix[0][1],
+      matrix[1][1],
+      matrix[2][1],
+    ],
+    [
+      matrix[0][2],
+      matrix[1][2],
+      matrix[2][2],
+    ],
   ]
 }
 
-function mat3VecMul(M, v) {
+
+function mat3VecMul(
+  matrix,
+  vector,
+) {
   return [
-    M[0][0] * v[0] + M[0][1] * v[1] + M[0][2] * v[2],
-    M[1][0] * v[0] + M[1][1] * v[1] + M[1][2] * v[2],
-    M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2],
+    (
+      matrix[0][0] * vector[0]
+      + matrix[0][1] * vector[1]
+      + matrix[0][2] * vector[2]
+    ),
+    (
+      matrix[1][0] * vector[0]
+      + matrix[1][1] * vector[1]
+      + matrix[1][2] * vector[2]
+    ),
+    (
+      matrix[2][0] * vector[0]
+      + matrix[2][1] * vector[1]
+      + matrix[2][2] * vector[2]
+    ),
   ]
 }
 
-function addVec(a, b) {
-  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+
+function addVec(
+  first,
+  second,
+) {
+  return [
+    first[0] + second[0],
+    first[1] + second[1],
+    first[2] + second[2],
+  ]
 }
 
-function scaleVec(v, s) {
-  return [v[0] * s, v[1] * s, v[2] * s]
+
+function scaleVec(
+  vector,
+  scale,
+) {
+  return [
+    vector[0] * scale,
+    vector[1] * scale,
+    vector[2] * scale,
+  ]
 }
 
-function rawToScene(point) {
-  // 對齊 Scene3D.jsx 裡的 new THREE.Vector3(p.x, -p.y, -p.z)
-  return [point[0], -point[1], -point[2]]
+
+function rawToScene(
+  point,
+) {
+  return [
+    point[0],
+    -point[1],
+    -point[2],
+  ]
 }
 
-export function getCameraScenePose(cameraParams, lookDistance = 4) {
+
+export function getCameraScenePose(
+  cameraParams,
+  lookDistance = 4,
+) {
   if (!cameraParams?.extrinsic) {
     return {
-      position: [0, 3, 0],
-      target: [0, 0, 0],
+      position: [
+        0,
+        3,
+        0,
+      ],
+      target: [
+        0,
+        0,
+        0,
+      ],
     }
   }
 
-  const E = cameraParams.extrinsic
+  const extrinsic = (
+    cameraParams.extrinsic
+  )
 
-  const R = [
-    [E[0][0], E[0][1], E[0][2]],
-    [E[1][0], E[1][1], E[1][2]],
-    [E[2][0], E[2][1], E[2][2]],
+  const rotation = [
+    [
+      extrinsic[0][0],
+      extrinsic[0][1],
+      extrinsic[0][2],
+    ],
+    [
+      extrinsic[1][0],
+      extrinsic[1][1],
+      extrinsic[1][2],
+    ],
+    [
+      extrinsic[2][0],
+      extrinsic[2][1],
+      extrinsic[2][2],
+    ],
   ]
 
-  const t = [E[0][3], E[1][3], E[2][3]]
+  const translation = [
+    extrinsic[0][3],
+    extrinsic[1][3],
+    extrinsic[2][3],
+  ]
 
-  // extrinsic 是 world -> camera:
-  // X_cam = R * X_world + t
-  // camera center in world:
-  // C = -R^T * t
-  const Rt = mat3Transpose(R)
-  const cameraCenterRaw = scaleVec(mat3VecMul(Rt, t), -1)
+  const rotationTranspose = (
+    mat3Transpose(
+      rotation
+    )
+  )
 
-  // OpenCV camera optical axis 通常是 camera +Z
-  // 換回 world direction:
-  // forward_world = R^T * [0, 0, 1]
-  const forwardRaw = mat3VecMul(Rt, [0, 0, 1])
-  const targetRaw = addVec(cameraCenterRaw, scaleVec(forwardRaw, lookDistance))
+  const cameraCenterRaw = (
+    scaleVec(
+      mat3VecMul(
+        rotationTranspose,
+        translation,
+      ),
+      -1,
+    )
+  )
+
+  const forwardRaw = (
+    mat3VecMul(
+      rotationTranspose,
+      [
+        0,
+        0,
+        1,
+      ],
+    )
+  )
+
+  const targetRaw = (
+    addVec(
+      cameraCenterRaw,
+      scaleVec(
+        forwardRaw,
+        lookDistance,
+      ),
+    )
+  )
 
   return {
-    position: rawToScene(cameraCenterRaw),
-    target: rawToScene(targetRaw),
+    position: rawToScene(
+      cameraCenterRaw
+    ),
+
+    target: rawToScene(
+      targetRaw
+    ),
   }
-}
-
-export function buildDefaultCamerasFromCameraParams() {
-  const cameras = cameraParamsJson.cameras || {}
-
-  return Array.from({ length: 10 }, (_, index) => {
-    const id = `cam${index}`
-    const params = cameras[id]
-    const pose = getCameraScenePose(params, 4)
-
-    return {
-      id,
-      index,
-      label: `Cam ${index}`,
-      fileName: `${index}.mp4`,
-      video_url: null,
-      fps: 50,
-      offset_frame: 0,
-      position: pose.position,
-      target: pose.target,
-      enabled: true,
-    }
-  })
 }

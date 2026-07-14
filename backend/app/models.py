@@ -46,6 +46,7 @@ class BallTraj(Base):
     x: Mapped[float] = mapped_column(Float)
     y: Mapped[float] = mapped_column(Float)
     z: Mapped[float] = mapped_column(Float)
+    speed: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
 
 Index("idx_ball_match_frame", BallTraj.match_id, BallTraj.frame)

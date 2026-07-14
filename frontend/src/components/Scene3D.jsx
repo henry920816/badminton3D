@@ -33,7 +33,11 @@ async function loadShuttlecockObject() {
         child.geometry = child.geometry.clone()
         child.geometry.translate(-center.x, -center.y, -center.z)
         child.geometry.rotateX(Math.PI / 2)
-        child.geometry.scale(SHUTTLECOCK_MODEL_SCALE, SHUTTLECOCK_MODEL_SCALE, SHUTTLECOCK_MODEL_SCALE)
+        child.geometry.scale(
+          SHUTTLECOCK_MODEL_SCALE,
+          SHUTTLECOCK_MODEL_SCALE,
+          SHUTTLECOCK_MODEL_SCALE,
+        )
         child.geometry.computeVertexNormals()
       })
       return object
@@ -59,61 +63,70 @@ function AnimatedTrajectory({ points }) {
       .catch((err) => {
         console.warn('Shuttlecock OBJ unavailable:', err)
       })
+
     return () => {
       cancelled = true
     }
   }, [])
 
   const { pathVectors, trailVectors, ballPos, ballQuat } = useMemo(() => {
-    if (!points || points.length < 2) return { pathVectors: [], trailVectors: [], ballPos: null, ballQuat: null }
+    if (!points || points.length < 2) {
+      return {
+        pathVectors: [],
+        trailVectors: [],
+        ballPos: null,
+        ballQuat: null,
+      }
+    }
 
     const pathVectors = []
     const trailVectors = []
     let ballPos = null
     let ballDir = null
-
     const trailSec = 0.8
-    const toThree = (p) => new THREE.Vector3(p.x, -p.y, -p.z)
+    const toThree = point => new THREE.Vector3(point.x, -point.y, -point.z)
 
-    for (let i = 0; i < points.length; i++) {
-      pathVectors.push(toThree(points[i]))
+    for (let index = 0; index < points.length; index += 1) {
+      pathVectors.push(toThree(points[index]))
     }
 
     const exactFrame = currentTime * fps
-    const pLen = points.length
+    const pointCount = points.length
+    let currentIndex = -1
 
-    let idx = -1
-    for (let i = 0; i < pLen; i++) {
-      if (points[i].frame <= exactFrame) idx = i
+    for (let index = 0; index < pointCount; index += 1) {
+      if (points[index].frame <= exactFrame) currentIndex = index
       else break
     }
 
-    if (idx !== -1) {
-      if (idx === pLen - 1) {
-        ballPos = toThree(points[idx])
+    if (currentIndex !== -1) {
+      if (currentIndex === pointCount - 1) {
+        ballPos = toThree(points[currentIndex])
       } else {
-        const p1 = points[idx]
-        const p2 = points[idx + 1]
-        const diff = p2.frame - p1.frame
-        const t = diff === 0 ? 0 : (exactFrame - p1.frame) / diff
-        const v1 = toThree(p1)
-        const v2 = toThree(p2)
-        ballPos = v1.clone().lerp(v2, t)
-        ballDir = v2.clone().sub(v1)
+        const first = points[currentIndex]
+        const second = points[currentIndex + 1]
+        const frameDifference = second.frame - first.frame
+        const ratio = frameDifference === 0
+          ? 0
+          : (exactFrame - first.frame) / frameDifference
+        const firstVector = toThree(first)
+        const secondVector = toThree(second)
+        ballPos = firstVector.clone().lerp(secondVector, ratio)
+        ballDir = secondVector.clone().sub(firstVector)
       }
-    } else if (pLen > 0 && exactFrame < points[0].frame) {
+    } else if (exactFrame < points[0].frame) {
       ballPos = toThree(points[0])
       ballDir = toThree(points[1]).sub(toThree(points[0]))
     }
 
-    if (idx === pLen - 1 && pLen > 1) {
-      ballDir = toThree(points[pLen - 1]).sub(toThree(points[pLen - 2]))
+    if (currentIndex === pointCount - 1 && pointCount > 1) {
+      ballDir = toThree(points[pointCount - 1]).sub(toThree(points[pointCount - 2]))
     }
 
-    for (let i = 0; i < pLen; i++) {
-      const pTime = points[i].frame / fps
-      if (pTime <= currentTime && pTime >= currentTime - trailSec) {
-        trailVectors.push(toThree(points[i]))
+    for (let index = 0; index < pointCount; index += 1) {
+      const pointTime = points[index].frame / fps
+      if (pointTime <= currentTime && pointTime >= currentTime - trailSec) {
+        trailVectors.push(toThree(points[index]))
       }
     }
 
@@ -121,12 +134,17 @@ function AnimatedTrajectory({ points }) {
 
     const ballQuat = ballDir && ballDir.lengthSq() > 1e-8
       ? new THREE.Quaternion().setFromUnitVectors(
-        SHUTTLECOCK_HEAD_AXIS,
-        ballDir.normalize()
-      )
+          SHUTTLECOCK_HEAD_AXIS,
+          ballDir.normalize(),
+        )
       : null
 
-    return { pathVectors, trailVectors, ballPos, ballQuat }
+    return {
+      pathVectors,
+      trailVectors,
+      ballPos,
+      ballQuat,
+    }
   }, [points, currentTime, fps])
 
   if (pathVectors.length < 2) return null
@@ -136,7 +154,7 @@ function AnimatedTrajectory({ points }) {
       <Line points={pathVectors} lineWidth={1.5} color="#6b7280" opacity={0.3} transparent />
 
       {trailVectors.length > 1 && (
-        <Line points={trailVectors} lineWidth={2} color="#fcd34d" />
+        <Line points={trailVectors} lineWidth={3.5} color="#fcd34d" />
       )}
 
       {ballPos && (
@@ -156,19 +174,19 @@ function AnimatedTrajectory({ points }) {
         </group>
       )}
 
-      {repairMode && points.map(p => {
-        const isSelected = selectedTrajFrames.includes(p.frame)
+      {repairMode && points.map(point => {
+        const isSelected = selectedTrajFrames.includes(point.frame)
         const radius = isSelected ? 0.06 : 0.02
         const color = isSelected ? '#08597e' : '#94a3b8'
         const opacity = isSelected ? 1.0 : 0.4
 
         return (
           <mesh
-            key={p.frame}
-            position={[p.x, -p.y, -p.z]}
-            onClick={(e) => {
-              e.stopPropagation()
-              toggleTrajFrameSelection(p.frame)
+            key={point.frame}
+            position={[point.x, -point.y, -point.z]}
+            onClick={(event) => {
+              event.stopPropagation()
+              toggleTrajFrameSelection(point.frame)
             }}
           >
             <sphereGeometry args={[radius, 8, 8]} />
@@ -441,10 +459,13 @@ function SmplForwardAvatar({ playerReplay }) {
   useFrame((state) => {
     if (!ready || !workerRef.current || !geometryRef.current) return
     const poseFrame = getLocalPoseFrame(playerReplay, currentFrame)
-    if (!poseFrame) return
+    if (!poseFrame || poseFrame.valid === false) {
+      if (racketRef.current) racketRef.current.visible = false
+      return
+    }
     if (lastAppliedFrameRef.current === poseFrame.frame) return
-
     if (lastSentFrameRef.current === poseFrame.frame) return
+
     const now = state.clock.elapsedTime
     const lastSentFrame = lastSentFrameRef.current
     const isLargeFrameJump =
@@ -569,7 +590,7 @@ function CourtRef() {
         <meshStandardMaterial color="#cbd5e1" opacity={0.6} transparent />
       </mesh>
 
-      <mesh position={[courtWidth / 2 + 0.25, netHeight / 2 -0.49, 0]}>
+      <mesh position={[courtWidth / 2 + 0.25, netHeight / 2 - 0.49, 0]}>
         <cylinderGeometry args={[0.05, 0.05, netHeight]} />
         <meshStandardMaterial color="#e5e7eb" />
       </mesh>
@@ -819,6 +840,7 @@ export default function Scene3D() {
     setActiveReplaySegment(replaySegments[clamped].id)
   }
 
+
   useEffect(() => {
     if (!replaySegments.length) return
     if (
@@ -829,12 +851,20 @@ export default function Scene3D() {
       return
     }
 
-    const sortedSegments = [...replaySegments].sort((a, b) => a.start_frame - b.start_frame)
+    const sortedSegments = [...replaySegments].sort((first, second) => (
+      first.start_frame - second.start_frame
+    ))
     const segment = sortedSegments.find(item => currentFrame <= item.end_frame)
     if (segment && segment.id !== activeReplaySegmentId) {
       setActiveReplaySegment(segment.id)
     }
-  }, [currentFrame, replaySegments, activeReplaySegment, activeReplaySegmentId, setActiveReplaySegment])
+  }, [
+    currentFrame,
+    replaySegments,
+    activeReplaySegment,
+    activeReplaySegmentId,
+    setActiveReplaySegment,
+  ])
 
   useEffect(() => {
     if (!activeReplaySegment || smplReplayBySegmentId.has(activeReplaySegment.id)) return
@@ -848,17 +878,17 @@ export default function Scene3D() {
         const data = await api.getSmplReplay(
           matchId,
           activeReplaySegment.start_frame,
-          activeReplaySegment.end_frame
+          activeReplaySegment.end_frame,
         )
         if (cancelled) return
         setSmplReplayData(activeReplaySegment.id, data)
         setSmplReplayStatus(data?.players?.length ? 'ready' : 'empty')
-      } catch (err) {
+      } catch (error) {
         if (cancelled) return
-        console.warn('SMPL replay unavailable:', err)
+        console.warn('SMPL replay unavailable:', error)
         setSmplReplayData(activeReplaySegment.id, {
           players: [],
-          error: String(err),
+          error: String(error),
         })
         setSmplReplayStatus('error')
       }
@@ -867,7 +897,12 @@ export default function Scene3D() {
     return () => {
       cancelled = true
     }
-  }, [activeReplaySegment, matchId, smplReplayBySegmentId, setSmplReplayData])
+  }, [
+    activeReplaySegment,
+    matchId,
+    smplReplayBySegmentId,
+    setSmplReplayData,
+  ])
 
   const handleRepair = async () => {
     if (selectedTrajFrames.length !== 2) return
@@ -947,7 +982,9 @@ export default function Scene3D() {
     <div className="w-full h-full relative bg-zinc-950 overflow-hidden">
       <div className="absolute top-2 left-2 z-20 bg-zinc-900/80 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-200 shadow backdrop-blur-md">
         3D Camera：<span className="text-yellow-300 font-semibold">{activeCamera?.label || activeCameraId}</span>
-        
+        {activeCamera?.description && (
+          <span className="text-zinc-400 ml-2">{activeCamera.description}</span>
+        )}
         <span className="text-zinc-500 ml-2">滾輪依滑鼠位置縮放｜右鍵平移｜點 📷 切換影片</span>
       </div>
 
@@ -957,13 +994,33 @@ export default function Scene3D() {
             <div className="flex items-center bg-zinc-900/80 border border-zinc-800 rounded shadow backdrop-blur-md overflow-hidden text-xs">
               <button
                 type="button"
+                onClick={() => goToReplaySegment(activeReplayIndex - 1)}
+                disabled={activeReplayIndex <= 0}
+                className="px-2 py-1.5 text-zinc-300 disabled:opacity-30"
+                title="上一個 Rally 人體重播"
+              >
+                ◀
+              </button>
+              <button
+                type="button"
                 onClick={toggleSmplReplay}
                 className={`px-3 py-1.5 font-semibold border-x border-zinc-800 ${
-                  showSmplReplay ? 'text-emerald-200 bg-emerald-900/40' : 'text-zinc-300'
+                  showSmplReplay
+                    ? 'text-emerald-200 bg-emerald-900/40'
+                    : 'text-zinc-300'
                 }`}
-                title="Show / hide SMPL forward mesh"
+                title="顯示或隱藏人物與球拍"
               >
-                SMPL {showSmplReplay ? 'on' : 'off'} · {smplReplayStatus}
+                人物球拍 {showSmplReplay ? '開' : '關'} · {smplReplayStatus}
+              </button>
+              <button
+                type="button"
+                onClick={() => goToReplaySegment(activeReplayIndex + 1)}
+                disabled={activeReplayIndex < 0 || activeReplayIndex >= replaySegments.length - 1}
+                className="px-2 py-1.5 text-zinc-300 disabled:opacity-30"
+                title="下一個 Rally 人體重播"
+              >
+                ▶
               </button>
             </div>
           )}

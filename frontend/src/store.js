@@ -1,394 +1,942 @@
 import { create } from 'zustand'
-import { buildDefaultCamerasFromCameraParams } from './utils/cameraScenePose.js'
+import {
+  getCameraScenePose,
+} from './utils/cameraScenePose.js'
 
-function normalizeRange(start, end) {
-  const a = Math.max(0, Math.min(start, end))
-  const b = Math.max(0, Math.max(start, end))
-  return { start: a, end: b }
+
+function normalizeRange(
+  start,
+  end,
+) {
+  const first = Math.max(
+    0,
+    Math.min(
+      start,
+      end,
+    ),
+  )
+
+  const second = Math.max(
+    0,
+    Math.max(
+      start,
+      end,
+    ),
+  )
+
+  return {
+    start: first,
+    end: second,
+  }
 }
 
-export const DEFAULT_CAMERAS = buildDefaultCamerasFromCameraParams()
 
-function normalizeCameras(cameras, fallbackFps = 50) {
-  if (!Array.isArray(cameras) || cameras.length < 10) {
-    return DEFAULT_CAMERAS.map((camera) => ({
-      ...camera,
-      fps: fallbackFps || camera.fps || 50,
-    }))
+function normalizeCameras(
+  cameras,
+  fallbackFps = 50,
+) {
+  if (!Array.isArray(cameras)) {
+    return []
   }
 
-  return cameras.slice(0, 10).map((camera, index) => {
-    const fallback = DEFAULT_CAMERAS[index]
-    return {
-      ...fallback,
-      ...camera,
-      id: camera.id || fallback.id,
-      index: camera.index ?? index,
-      label: camera.label || fallback.label,
-      fileName: camera.fileName || camera.file_name || `${index}.mp4`,
-      video_url: camera.video_url ?? camera.url ?? fallback.video_url,
-      fps: camera.fps || fallbackFps || fallback.fps || 50,
-      offset_frame: camera.offset_frame ?? camera.offsetFrame ?? fallback.offset_frame ?? 0,
-      position: camera.position || fallback.position,
-      target: camera.target || fallback.target,
-      enabled: camera.enabled ?? true,
-    }
-  })
+  return cameras.map(
+    (
+      camera,
+      index,
+    ) => {
+      const projection = (
+        camera?.projection
+        || null
+      )
+
+      const derivedPose = (
+        projection
+          ? getCameraScenePose(
+              projection,
+              4,
+            )
+          : {
+              position: [
+                0,
+                3,
+                0,
+              ],
+              target: [
+                0,
+                0,
+                0,
+              ],
+            }
+      )
+
+      const cameraId = (
+        camera?.id
+        || `cam${index}`
+      )
+
+      return {
+        ...camera,
+
+        id: cameraId,
+
+        index: (
+          camera?.index
+          ?? index
+        ),
+
+        label: (
+          camera?.label
+          || `Cam ${index}`
+        ),
+
+        fileName: (
+          camera?.fileName
+          || camera?.file_name
+          || `${index}.mp4`
+        ),
+
+        video_url: (
+          camera?.video_url
+          ?? camera?.url
+          ?? null
+        ),
+
+        fps: (
+          camera?.fps
+          || fallbackFps
+          || 50
+        ),
+
+        offset_frame: (
+          camera?.offset_frame
+          ?? camera?.offsetFrame
+          ?? 0
+        ),
+
+        position: (
+          camera?.position
+          || derivedPose.position
+        ),
+
+        target: (
+          camera?.target
+          || derivedPose.target
+        ),
+
+        projection,
+
+        enabled: (
+          camera?.enabled
+          ?? true
+        ),
+      }
+    },
+  )
 }
 
-export const useAppStore = create((set, get) => ({
-  matchId: 1,
 
-  fps: 50,
-  durationSec: 0,
+export const useAppStore = create(
+  (
+    set,
+    get,
+  ) => ({
+    matchId: null,
 
-  cameras: DEFAULT_CAMERAS,
-  activeCameraId: 'cam0',
-  sceneCameraTargetId: 'cam0',
-  localVideoSrcMap: {},
+    fps: 50,
+    durationSec: 0,
 
-  currentTime: 0,
-  currentFrame: 0,
-  playing: false,
-  playbackRate: 1.0,
+    cameras: [],
+    activeCameraId: null,
+    sceneCameraTargetId: null,
+    localVideoSrcMap: {},
 
-  selection: {
-    inTime: null,
-    outTime: null,
-  },
+    currentTime: 0,
+    currentFrame: 0,
+    playing: false,
+    playbackRate: 1.0,
 
-  rallies: [],
-  hits: [],
-  anomalies: [],
-
-  replaySegments: [],
-  activeReplaySegmentId: null,
-  smplReplayBySegmentId: new Map(),
-  showSmplReplay: true,
-
-  trajByFrame: new Map(),
-  loadedTrajRanges: [],
-
-  pxPerSec: 100,
-  scrollLeft: 0,
-  bottomView: 'timeline',
-
-  activeItem: null,
-  selectedTrajFrames: [],
-  repairMode: false,
-
-  setZoom: (px) => set({ pxPerSec: px }),
-  setScrollLeft: (x) => set({ scrollLeft: x }),
-  setBottomView: (view) => set({
-    bottomView: view === 'projection2d' ? 'projection2d' : 'timeline',
-  }),
-
-  setMatchMeta: (m) => {
-    const fps = m?.fps || 50
-    const cameras = normalizeCameras(m?.cameras, fps)
-
-    set({
-      fps,
-      durationSec: m?.duration_sec ?? (m?.duration_frame ? m.duration_frame / fps : 0),
-      cameras,
-      activeCameraId: cameras[0]?.id || 'cam0',
-      sceneCameraTargetId: cameras[0]?.id || 'cam0',
-    })
-  },
-
-  setCurrentTime: (t) => {
-    const fps = get().fps || 50
-    const durationSec = get().durationSec || 0
-    const clamped = durationSec > 0 ? Math.min(Math.max(0, t), durationSec) : Math.max(0, t)
-    const frame = Math.max(0, Math.round(clamped * fps))
-
-    set({
-      currentTime: clamped,
-      currentFrame: frame,
-    })
-  },
-
-  setCurrentFrame: (f) => {
-    const fps = get().fps || 50
-    const durationSec = get().durationSec || 0
-    const maxFrame = durationSec > 0 ? Math.round(durationSec * fps) : Number.MAX_SAFE_INTEGER
-    const clampedFrame = Math.max(0, Math.min(f, maxFrame))
-    const t = clampedFrame / fps
-
-    set({
-      currentFrame: clampedFrame,
-      currentTime: t,
-    })
-  },
-
-  setPlaying: (v) => set({ playing: Boolean(v) }),
-
-  togglePlaying: () => set((s) => ({
-    playing: !s.playing,
-  })),
-
-  setPlaybackRate: (r) => set({
-    playbackRate: Number(r) || 1.0,
-  }),
-
-  setSelectionIn: () => {
-    const t = get().currentTime
-    const sel = get().selection
-
-    set({
-      selection: {
-        ...sel,
-        inTime: t,
-      },
-    })
-  },
-
-  setSelectionOut: () => {
-    const t = get().currentTime
-    const sel = get().selection
-
-    set({
-      selection: {
-        ...sel,
-        outTime: t,
-      },
-    })
-  },
-
-  setSelectionRange: (inTime, outTime) => {
-    const lo = Math.min(inTime, outTime)
-    const hi = Math.max(inTime, outTime)
-
-    set({
-      selection: {
-        inTime: lo,
-        outTime: hi,
-      },
-    })
-  },
-
-  clearSelection: () => set({
     selection: {
       inTime: null,
       outTime: null,
     },
-  }),
 
-  setTimelineData: ({ rallies, hits, anomalies }) => set({
-    rallies: rallies || [],
-    hits: hits || [],
-    anomalies: anomalies || [],
-  }),
+    rallies: [],
+    hits: [],
+    anomalies: [],
 
-  setReplaySegments: (segments) => set((s) => {
-    const next = segments || []
-    const activeStillExists = next.some(segment => segment.id === s.activeReplaySegmentId)
+    replaySegments: [],
+    activeReplaySegmentId: null,
+    smplReplayBySegmentId: new Map(),
+    showSmplReplay: true,
 
-    return {
-      replaySegments: next,
-      activeReplaySegmentId: activeStillExists
-        ? s.activeReplaySegmentId
-        : next[0]?.id ?? null,
-      smplReplayBySegmentId: new Map(),
-    }
-  }),
-
-  setActiveReplaySegment: (id) => set((s) => ({
-    activeReplaySegmentId: s.replaySegments.some(segment => segment.id === id)
-      ? id
-      : s.activeReplaySegmentId,
-  })),
-
-  setActiveReplaySegmentByRallyId: (rallyId) => set((s) => {
-    const segment = s.replaySegments.find(item => item.rally_id === rallyId)
-    if (!segment) return {}
-
-    return {
-      activeReplaySegmentId: segment.id,
-      showSmplReplay: true,
-    }
-  }),
-
-  setShowSmplReplay: (value) => set({
-    showSmplReplay: Boolean(value),
-  }),
-
-  toggleSmplReplay: () => set((s) => ({
-    showSmplReplay: !s.showSmplReplay,
-  })),
-
-  setSmplReplayData: (segmentId, data) => set((s) => {
-    const map = new Map(s.smplReplayBySegmentId)
-    map.set(segmentId, data)
-    return { smplReplayBySegmentId: map }
-  }),
-
-  updateHit: (id, updates) => set((s) => ({
-    hits: s.hits.map((h) => (
-      h.id === id ? { ...h, ...updates } : h
-    )),
-  })),
-
-  updateAnomaly: (id, updates) => set((s) => ({
-    anomalies: s.anomalies.map((a) => (
-      a.id === id ? { ...a, ...updates } : a
-    )),
-  })),
-
-  setActiveCamera: (id) => set({
-    activeCameraId: id,
-  }),
-
-  setActiveCameraFromScene: (id) => set({
-    activeCameraId: id,
-    sceneCameraTargetId: id,
-  }),
-
-  setSceneCameraTarget: (id) => set({
-    sceneCameraTargetId: id,
-  }),
-
-  setCameraOffset: (id, offsetFrame) => set((s) => ({
-    cameras: s.cameras.map((c) => (
-      c.id === id
-        ? {
-            ...c,
-            offset_frame: Number(offsetFrame) || 0,
-          }
-        : c
-    )),
-  })),
-
-  setLocalVideoSrc: (cameraId, src) => set((s) => ({
-    localVideoSrcMap: {
-      ...s.localVideoSrcMap,
-      [cameraId]: src,
-    },
-  })),
-
-  setLocalVideoSrcMap: (srcMap) => set({
-    localVideoSrcMap: srcMap || {},
-  }),
-
-  clearLocalVideoSrcMap: () => set({
-    localVideoSrcMap: {},
-  }),
-
-  setActiveItem: (type, id) => set({
-    activeItem: {
-      type,
-      id,
-    },
-  }),
-
-  clearActiveItem: () => set({
-    activeItem: null,
-  }),
-
-  setRepairMode: (v) => set({
-    repairMode: Boolean(v),
-  }),
-
-  toggleRepairMode: () => set((s) => ({
-    repairMode: !s.repairMode,
-  })),
-
-  toggleTrajFrameSelection: (frame) => set((s) => {
-    let next = [...s.selectedTrajFrames]
-
-    if (next.includes(frame)) {
-      next = next.filter((f) => f !== frame)
-    } else {
-      next.push(frame)
-      if (next.length > 2) next.shift()
-    }
-
-    return {
-      selectedTrajFrames: next,
-    }
-  }),
-
-  clearTrajSelection: () => set({
-    selectedTrajFrames: [],
-  }),
-
-  upsertTrajPoints: (points) => {
-    const map = new Map(get().trajByFrame)
-
-    for (const p of points || []) {
-      if (p && typeof p.frame !== 'undefined') {
-        map.set(p.frame, p)
-      }
-    }
-
-    set({
-      trajByFrame: map,
-    })
-  },
-
-  markTrajRangeLoaded: (start, end) => {
-    const nextRange = normalizeRange(start, end)
-    const ranges = [...get().loadedTrajRanges, nextRange].sort((a, b) => a.start - b.start)
-    const merged = []
-
-    for (const range of ranges) {
-      if (!merged.length) {
-        merged.push({ ...range })
-        continue
-      }
-
-      const last = merged[merged.length - 1]
-
-      if (range.start <= last.end + 1) {
-        last.end = Math.max(last.end, range.end)
-      } else {
-        merged.push({ ...range })
-      }
-    }
-
-    set({
-      loadedTrajRanges: merged,
-    })
-  },
-
-  hasTrajRangeLoaded: (start, end) => {
-    const target = normalizeRange(start, end)
-
-    return get().loadedTrajRanges.some((range) => (
-      target.start >= range.start && target.end <= range.end
-    ))
-  },
-
-  resetTrajCache: () => set({
     trajByFrame: new Map(),
     loadedTrajRanges: [],
+
+    pxPerSec: 100,
+    scrollLeft: 0,
+    bottomView: 'timeline',
+
+    activeItem: null,
+    selectedTrajFrames: [],
+    repairMode: false,
+
+    previewRange: null,
+
+    setMatchId: id => {
+      set({
+        matchId: id,
+      })
+    },
+
+    setZoom: px => {
+      set({
+        pxPerSec: px,
+      })
+    },
+
+    setScrollLeft: value => {
+      set({
+        scrollLeft: value,
+      })
+    },
+
+    setBottomView: view => {
+      set({
+        bottomView: (
+          view === 'projection2d'
+            ? 'projection2d'
+            : 'timeline'
+        ),
+      })
+    },
+
+    setMatchMeta: match => {
+      const fps = (
+        match?.fps
+        || 50
+      )
+
+      const cameras = normalizeCameras(
+        match?.cameras,
+        fps,
+      )
+
+      set({
+        fps,
+
+        durationSec: (
+          match?.duration_sec
+          ?? (
+            match?.duration_frame
+              ? (
+                  match.duration_frame
+                  / fps
+                )
+              : 0
+          )
+        ),
+
+        cameras,
+
+        activeCameraId: (
+          cameras[0]?.id
+          || null
+        ),
+
+        sceneCameraTargetId: (
+          cameras[0]?.id
+          || null
+        ),
+      })
+    },
+
+    setCurrentTime: time => {
+      const fps = (
+        get().fps
+        || 50
+      )
+
+      const durationSec = (
+        get().durationSec
+        || 0
+      )
+
+      const clampedTime = (
+        durationSec > 0
+          ? Math.min(
+              Math.max(
+                0,
+                time,
+              ),
+              durationSec,
+            )
+          : Math.max(
+              0,
+              time,
+            )
+      )
+
+      set({
+        currentTime: (
+          clampedTime
+        ),
+
+        currentFrame: Math.max(
+          0,
+          Math.round(
+            clampedTime
+            * fps,
+          ),
+        ),
+      })
+    },
+
+    setCurrentFrame: frame => {
+      const fps = (
+        get().fps
+        || 50
+      )
+
+      const durationSec = (
+        get().durationSec
+        || 0
+      )
+
+      const maximumFrame = (
+        durationSec > 0
+          ? Math.round(
+              durationSec
+              * fps,
+            )
+          : Number.MAX_SAFE_INTEGER
+      )
+
+      const clampedFrame = Math.max(
+        0,
+        Math.min(
+          frame,
+          maximumFrame,
+        ),
+      )
+
+      set({
+        currentFrame: (
+          clampedFrame
+        ),
+
+        currentTime: (
+          clampedFrame
+          / fps
+        ),
+      })
+    },
+
+    setPlaying: value => {
+      set({
+        playing: Boolean(value),
+      })
+    },
+
+    togglePlaying: () => {
+      set(
+        state => ({
+          playing: (
+            !state.playing
+          ),
+        }),
+      )
+    },
+
+    setPlaybackRate: rate => {
+      set({
+        playbackRate: (
+          Number(rate)
+          || 1.0
+        ),
+      })
+    },
+
+    setPreviewRange: range => {
+      set({
+        previewRange: range,
+      })
+    },
+
+    clearPreviewRange: () => {
+      set({
+        previewRange: null,
+      })
+    },
+
+    setSelectionIn: () => {
+      const time = get().currentTime
+      const selection = get().selection
+
+      set({
+        selection: {
+          ...selection,
+          inTime: time,
+        },
+      })
+    },
+
+    setSelectionOut: () => {
+      const time = get().currentTime
+      const selection = get().selection
+
+      set({
+        selection: {
+          ...selection,
+          outTime: time,
+        },
+      })
+    },
+
+    setSelectionRange: (
+      inTime,
+      outTime,
+    ) => {
+      set({
+        selection: {
+          inTime: Math.min(
+            inTime,
+            outTime,
+          ),
+
+          outTime: Math.max(
+            inTime,
+            outTime,
+          ),
+        },
+      })
+    },
+
+    clearSelection: () => {
+      set({
+        selection: {
+          inTime: null,
+          outTime: null,
+        },
+      })
+    },
+
+    setTimelineData: ({
+      rallies,
+      hits,
+      anomalies,
+    }) => {
+      set({
+        rallies: (
+          rallies
+          || []
+        ),
+
+        hits: (
+          hits
+          || []
+        ),
+
+        anomalies: (
+          anomalies
+          || []
+        ),
+      })
+    },
+
+    setReplaySegments: segments => {
+      set(
+        state => {
+          const nextSegments = segments || []
+          const activeStillExists = nextSegments.some(
+            segment => segment.id === state.activeReplaySegmentId,
+          )
+
+          return {
+            replaySegments: nextSegments,
+            activeReplaySegmentId: activeStillExists
+              ? state.activeReplaySegmentId
+              : nextSegments[0]?.id ?? null,
+            smplReplayBySegmentId: new Map(),
+          }
+        },
+      )
+    },
+
+    setActiveReplaySegment: id => {
+      set(
+        state => ({
+          activeReplaySegmentId: state.replaySegments.some(
+            segment => segment.id === id,
+          )
+            ? id
+            : state.activeReplaySegmentId,
+        }),
+      )
+    },
+
+    setActiveReplaySegmentByRallyId: rallyId => {
+      set(
+        state => {
+          const segment = state.replaySegments.find(
+            item => item.rally_id === rallyId,
+          )
+
+          if (!segment) return {}
+
+          return {
+            activeReplaySegmentId: segment.id,
+            showSmplReplay: true,
+          }
+        },
+      )
+    },
+
+    setShowSmplReplay: value => {
+      set({
+        showSmplReplay: Boolean(value),
+      })
+    },
+
+    toggleSmplReplay: () => {
+      set(
+        state => ({
+          showSmplReplay: !state.showSmplReplay,
+        }),
+      )
+    },
+
+    setSmplReplayData: (segmentId, data) => {
+      set(
+        state => {
+          const replayMap = new Map(
+            state.smplReplayBySegmentId,
+          )
+          replayMap.set(segmentId, data)
+          return {
+            smplReplayBySegmentId: replayMap,
+          }
+        },
+      )
+    },
+
+    updateHit: (
+      id,
+      updates,
+    ) => {
+      set(
+        state => ({
+          hits: state.hits.map(
+            hit => (
+              hit.id === id
+                ? {
+                    ...hit,
+                    ...updates,
+                  }
+                : hit
+            ),
+          ),
+        }),
+      )
+    },
+
+    updateAnomaly: (
+      id,
+      updates,
+    ) => {
+      set(
+        state => ({
+          anomalies: (
+            state.anomalies.map(
+              anomaly => (
+                anomaly.id === id
+                  ? {
+                      ...anomaly,
+                      ...updates,
+                    }
+                  : anomaly
+              ),
+            )
+          ),
+        }),
+      )
+    },
+
+    setActiveCamera: id => {
+      set({
+        activeCameraId: id,
+      })
+    },
+
+    setActiveCameraFromScene: id => {
+      set({
+        activeCameraId: id,
+        sceneCameraTargetId: id,
+      })
+    },
+
+    setSceneCameraTarget: id => {
+      set({
+        sceneCameraTargetId: id,
+      })
+    },
+
+    setCameraOffset: (
+      id,
+      offsetFrame,
+    ) => {
+      set(
+        state => ({
+          cameras: state.cameras.map(
+            camera => (
+              camera.id === id
+                ? {
+                    ...camera,
+
+                    offset_frame: (
+                      Number(
+                        offsetFrame
+                      )
+                      || 0
+                    ),
+                  }
+                : camera
+            ),
+          ),
+        }),
+      )
+    },
+
+    setLocalVideoSrc: (
+      cameraId,
+      source,
+    ) => {
+      set(
+        state => ({
+          localVideoSrcMap: {
+            ...state.localVideoSrcMap,
+
+            [cameraId]: source,
+          },
+        }),
+      )
+    },
+
+    setLocalVideoSrcMap: sourceMap => {
+      set({
+        localVideoSrcMap: (
+          sourceMap
+          || {}
+        ),
+      })
+    },
+
+    clearLocalVideoSrcMap: () => {
+      set({
+        localVideoSrcMap: {},
+      })
+    },
+
+    setActiveItem: (
+      type,
+      id,
+    ) => {
+      set({
+        activeItem: {
+          type,
+          id,
+        },
+      })
+    },
+
+    clearActiveItem: () => {
+      set({
+        activeItem: null,
+      })
+    },
+
+    setRepairMode: value => {
+      set({
+        repairMode: Boolean(value),
+      })
+    },
+
+    toggleRepairMode: () => {
+      set(
+        state => ({
+          repairMode: (
+            !state.repairMode
+          ),
+        }),
+      )
+    },
+
+    toggleTrajFrameSelection: frame => {
+      set(
+        state => {
+          let nextFrames = [
+            ...state.selectedTrajFrames,
+          ]
+
+          if (
+            nextFrames.includes(
+              frame
+            )
+          ) {
+            nextFrames = (
+              nextFrames.filter(
+                selectedFrame => (
+                  selectedFrame
+                  !== frame
+                ),
+              )
+            )
+          } else {
+            nextFrames.push(
+              frame
+            )
+
+            if (
+              nextFrames.length > 2
+            ) {
+              nextFrames.shift()
+            }
+          }
+
+          return {
+            selectedTrajFrames: (
+              nextFrames
+            ),
+          }
+        },
+      )
+    },
+
+    clearTrajSelection: () => {
+      set({
+        selectedTrajFrames: [],
+      })
+    },
+
+    upsertTrajPoints: points => {
+      const trajectoryMap = new Map(
+        get().trajByFrame,
+      )
+
+      for (
+        const point
+        of points || []
+      ) {
+        if (
+          point
+          && typeof point.frame
+            !== 'undefined'
+        ) {
+          trajectoryMap.set(
+            point.frame,
+            point,
+          )
+        }
+      }
+
+      set({
+        trajByFrame: (
+          trajectoryMap
+        ),
+      })
+    },
+
+    markTrajRangeLoaded: (
+      start,
+      end,
+    ) => {
+      const nextRange = normalizeRange(
+        start,
+        end,
+      )
+
+      const ranges = [
+        ...get().loadedTrajRanges,
+        nextRange,
+      ].sort(
+        (
+          first,
+          second,
+        ) => (
+          first.start
+          - second.start
+        ),
+      )
+
+      const merged = []
+
+      for (const range of ranges) {
+        if (merged.length === 0) {
+          merged.push({
+            ...range,
+          })
+
+          continue
+        }
+
+        const last = (
+          merged[
+            merged.length - 1
+          ]
+        )
+
+        if (
+          range.start
+          <= last.end + 1
+        ) {
+          last.end = Math.max(
+            last.end,
+            range.end,
+          )
+        } else {
+          merged.push({
+            ...range,
+          })
+        }
+      }
+
+      set({
+        loadedTrajRanges: (
+          merged
+        ),
+      })
+    },
+
+    hasTrajRangeLoaded: (
+      start,
+      end,
+    ) => {
+      const target = normalizeRange(
+        start,
+        end,
+      )
+
+      return (
+        get().loadedTrajRanges.some(
+          range => (
+            target.start
+              >= range.start
+            && target.end
+              <= range.end
+          ),
+        )
+      )
+    },
+
+    resetTrajCache: () => {
+      set({
+        trajByFrame: new Map(),
+        loadedTrajRanges: [],
+        smplReplayBySegmentId: new Map(),
+      })
+    },
+
+    getSelectionFrameRange: () => {
+      const {
+        inTime,
+        outTime,
+      } = get().selection
+
+      const fps = (
+        get().fps
+        || 50
+      )
+
+      if (
+        inTime == null
+        || outTime == null
+      ) {
+        return null
+      }
+
+      return [
+        Math.max(
+          0,
+          Math.floor(
+            Math.min(
+              inTime,
+              outTime,
+            )
+            * fps,
+          ),
+        ),
+
+        Math.max(
+          0,
+          Math.ceil(
+            Math.max(
+              inTime,
+              outTime,
+            )
+            * fps,
+          ),
+        ),
+      ]
+    },
+
+    getVisiblePointsFor3D: (
+      windowSec = 3.0,
+    ) => {
+      const currentTime = (
+        get().currentTime
+      )
+
+      const fps = (
+        get().fps
+        || 50
+      )
+
+      const startFrame = Math.max(
+        0,
+        Math.floor(
+          (
+            currentTime
+            - windowSec
+          )
+          * fps,
+        ),
+      )
+
+      const endFrame = Math.max(
+        0,
+        Math.ceil(
+          (
+            currentTime
+            + windowSec
+          )
+          * fps,
+        ),
+      )
+
+      const trajectoryMap = (
+        get().trajByFrame
+      )
+
+      const points = []
+
+      for (
+        let frame = startFrame;
+        frame <= endFrame;
+        frame += 1
+      ) {
+        const point = (
+          trajectoryMap.get(
+            frame
+          )
+        )
+
+        if (point) {
+          points.push(
+            point
+          )
+        }
+      }
+
+      return points
+    },
   }),
-
-  getSelectionFrameRange: () => {
-    const { inTime, outTime } = get().selection
-    const fps = get().fps || 50
-
-    if (inTime == null || outTime == null) return null
-
-    const s = Math.max(0, Math.floor(Math.min(inTime, outTime) * fps))
-    const e = Math.max(0, Math.ceil(Math.max(inTime, outTime) * fps))
-
-    return [s, e]
-  },
-
-  getVisiblePointsFor3D: (windowSec = 3.0) => {
-    const { currentTime } = get()
-    const fps = get().fps || 50
-    const startFrame = Math.max(0, Math.floor((currentTime - windowSec) * fps))
-    const endFrame = Math.max(0, Math.ceil((currentTime + windowSec) * fps))
-    const map = get().trajByFrame
-    const out = []
-
-    for (let f = startFrame; f <= endFrame; f++) {
-      const p = map.get(f)
-      if (p) out.push(p)
-    }
-
-    return out
-  },
-}))
+)

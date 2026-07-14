@@ -6,13 +6,13 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: badminton
     ports:
-    - 5432:5432
+      - "5432:5432"
     volumes:
-    - badminton_pgdata:/var/lib/postgresql/data
+      - badminton_pgdata:/var/lib/postgresql/data
     healthcheck:
       test:
-      - CMD-SHELL
-      - pg_isready -U postgres -d badminton || pg_isready -U postgres
+        - CMD-SHELL
+        - pg_isready -U postgres -d badminton || pg_isready -U postgres
       interval: 2s
       timeout: 3s
       retries: 30
@@ -22,14 +22,19 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/badminton
       CORS_ORIGINS: http://localhost:5173
+      DATASET_ASSET_ROOT: /app/data/datasets
+      DATASET_UPLOAD_SESSION_DIR: /app/data/upload-sessions
     volumes:
-    - ./backend/app:/app/app
+      - ./backend/app:/app/app
+      - badminton_dataset_assets:/app/data/datasets
+      - badminton_upload_sessions:/app/data/upload-sessions
     ports:
-    - 8000:8000
+      - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   badminton_pgdata: {}
-
+  badminton_dataset_assets: {}
+  badminton_upload_sessions: {}

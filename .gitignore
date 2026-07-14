@@ -1,40 +1,11 @@
-# Node
 node_modules/
 frontend/node_modules/
-dist/
-build/
 frontend/dist/
-
-# Python
 __pycache__/
-*.pyc
-.venv/
-venv/
-backend/.venv/
-backend/venv/
-
-# Environment
+*.py[cod]
 .env
-frontend/.env
-backend/.env
-
-# OS
+.vscode/
+.idea/
 .DS_Store
-Thumbs.db
-
-# Database
-*.db
-*.sqlite
-postgres_data/
-pgdata/
-
-# Large data
-videos/
-dataset/
-*.mp4
-*.tar
-*.zst
-*.pkl
-
-# test files
-tests
+backend/app/datasets/
+body_models/
