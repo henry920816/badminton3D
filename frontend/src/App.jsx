@@ -63,26 +63,6 @@ export default function App() {
     state => state.resetTrajCache,
   )
 
-  const cameras = useAppStore(
-    state => state.cameras,
-  )
-
-  const activeCameraId = useAppStore(
-    state => state.activeCameraId,
-  )
-
-  const upsertBall2DPoints = useAppStore(
-    state => state.upsertBall2DPoints,
-  )
-
-  const markBall2DRangeLoaded = useAppStore(
-    state => state.markBall2DRangeLoaded,
-  )
-
-  const hasBall2DRangeLoaded = useAppStore(
-    state => state.hasBall2DRangeLoaded,
-  )
-
   const currentFrame = useAppStore(
     state => state.currentFrame,
   )
@@ -108,10 +88,6 @@ export default function App() {
   )
 
   const inflightRef = useRef(
-    new Set(),
-  )
-
-  const ball2DInflightRef = useRef(
     new Set(),
   )
 
@@ -150,8 +126,6 @@ export default function App() {
     () => {
       bootstrapDoneRef.current = false
       inflightRef.current = new Set()
-      ball2DInflightRef.current = new Set()
-
       resetTrajCache()
 
       if (matchId == null) {
@@ -369,125 +343,6 @@ export default function App() {
       hasTrajRangeLoaded,
       upsertTrajPoints,
       markTrajRangeLoaded,
-    ],
-  )
-
-  useEffect(
-    () => {
-      if (matchId == null) {
-        return
-      }
-
-      const activeCamera = (
-        cameras.find(
-          camera => (
-            camera.id === activeCameraId
-          ),
-        )
-        || cameras[0]
-      )
-
-      if (
-        !activeCamera?.has_ball_2d
-        || !Number.isInteger(
-          Number(activeCamera.index),
-        )
-      ) {
-        return
-      }
-
-      const cameraIndex = Number(
-        activeCamera.index,
-      )
-      const durationFrame = Math.max(
-        0,
-        Math.round(
-          (durationSec || 0)
-          * (fps || 0),
-        ),
-      )
-      const start = Math.max(
-        0,
-        currentFrame
-        - PRELOAD_RADIUS_FRAMES,
-      )
-      const end = (
-        durationFrame > 0
-          ? Math.min(
-              durationFrame,
-              currentFrame
-              + PRELOAD_RADIUS_FRAMES,
-            )
-          : (
-              currentFrame
-              + PRELOAD_RADIUS_FRAMES
-            )
-      )
-
-      if (
-        hasBall2DRangeLoaded(
-          cameraIndex,
-          start,
-          end,
-        )
-      ) {
-        return
-      }
-
-      const key = (
-        `${matchId}-${cameraIndex}-${start}-${end}`
-      )
-
-      if (
-        ball2DInflightRef.current.has(
-          key,
-        )
-      ) {
-        return
-      }
-
-      ball2DInflightRef.current.add(
-        key,
-      )
-
-      ;(async () => {
-        try {
-          const points = await api.getTraj2D(
-            matchId,
-            cameraIndex,
-            start,
-            end,
-          )
-
-          upsertBall2DPoints(
-            cameraIndex,
-            points,
-          )
-
-          markBall2DRangeLoaded(
-            cameraIndex,
-            start,
-            end,
-          )
-        } catch (error) {
-          console.error(error)
-        } finally {
-          ball2DInflightRef.current.delete(
-            key,
-          )
-        }
-      })()
-    },
-    [
-      matchId,
-      cameras,
-      activeCameraId,
-      currentFrame,
-      fps,
-      durationSec,
-      hasBall2DRangeLoaded,
-      upsertBall2DPoints,
-      markBall2DRangeLoaded,
     ],
   )
 

@@ -1,6 +1,5 @@
 import React, {
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -17,6 +16,13 @@ import {
 import {
   project3DToImage,
 } from '../utils/cameraProjection.js'
+
+import {
+  api,
+} from '../api.js'
+
+
+const BALL_2D_PRELOAD_RADIUS_FRAMES = 300
 
 
 function resolveVideoUrl(url) {
@@ -475,16 +481,12 @@ export default function VideoPanel() {
     null
   )
 
-  const pendingVideoSeekFrameRef = useRef(
-    null
+  const ball2DInflightRef = useRef(
+    new Set()
   )
 
-  const videoSeekInProgressRef = useRef(
-    false
-  )
-
-  const previousVideoIdentityRef = useRef(
-    null
+  const matchId = useAppStore(
+    state => state.matchId
   )
 
   const cameras = useAppStore(
@@ -527,11 +529,27 @@ export default function VideoPanel() {
     state => state.ball2DByCameraFrame
   )
 
+  const upsertBall2DPoints = useAppStore(
+    state => state.upsertBall2DPoints
+  )
+
+  const markBall2DRangeLoaded = useAppStore(
+    state => state.markBall2DRangeLoaded
+  )
+
+  const hasBall2DRangeLoaded = useAppStore(
+    state => state.hasBall2DRangeLoaded
+  )
+
   const fps = (
     useAppStore(
       state => state.fps
     )
     || 50
+  )
+
+  const durationSec = useAppStore(
+    state => state.durationSec
   )
 
   const playing = useAppStore(
@@ -574,6 +592,11 @@ export default function VideoPanel() {
     showBall2D,
     setShowBall2D,
   ] = useState(true)
+
+  const [
+    videoReadyIdentity,
+    setVideoReadyIdentity,
+  ] = useState(null)
 
   const safePlaybackRate = (
     Number.isFinite(
@@ -665,6 +688,13 @@ export default function VideoPanel() {
       activeCamera,
       localVideoSrcMap,
     ],
+  )
+
+  const activeVideoIdentity = (
+    activeCamera?.id
+    && activeSource
+      ? `${activeCamera.id}|${activeSource}`
+      : null
   )
 
   const redrawOverlay = () => {
@@ -811,6 +841,133 @@ export default function VideoPanel() {
     ],
   )
 
+  useEffect(
+    () => {
+      ball2DInflightRef.current = new Set()
+    },
+    [
+      matchId,
+    ],
+  )
+
+  useEffect(
+    () => {
+      if (
+        matchId == null
+        || !activeVideoIdentity
+        || videoReadyIdentity
+          !== activeVideoIdentity
+        || !activeCamera?.has_ball_2d
+        || !Number.isInteger(
+          Number(activeCamera.index),
+        )
+      ) {
+        return
+      }
+
+      const cameraIndex = Number(
+        activeCamera.index,
+      )
+      const durationFrame = Math.max(
+        0,
+        Math.round(
+          (durationSec || 0)
+          * (fps || 0),
+        ),
+      )
+      const start = Math.max(
+        0,
+        currentFrame
+        - BALL_2D_PRELOAD_RADIUS_FRAMES,
+      )
+      const end = (
+        durationFrame > 0
+          ? Math.min(
+              durationFrame,
+              currentFrame
+              + BALL_2D_PRELOAD_RADIUS_FRAMES,
+            )
+          : (
+              currentFrame
+              + BALL_2D_PRELOAD_RADIUS_FRAMES
+            )
+      )
+
+      if (
+        hasBall2DRangeLoaded(
+          cameraIndex,
+          currentFrame,
+          currentFrame,
+        )
+      ) {
+        return
+      }
+
+      const key = (
+        `${matchId}-${cameraIndex}-${start}-${end}`
+      )
+
+      if (
+        ball2DInflightRef.current.has(
+          key,
+        )
+      ) {
+        return
+      }
+
+      ball2DInflightRef.current.add(
+        key,
+      )
+
+      ;(async () => {
+        try {
+          const points = await api.getTraj2D(
+            matchId,
+            cameraIndex,
+            start,
+            end,
+          )
+
+          if (
+            useAppStore.getState().matchId
+            !== matchId
+          ) {
+            return
+          }
+
+          upsertBall2DPoints(
+            cameraIndex,
+            points,
+          )
+
+          markBall2DRangeLoaded(
+            cameraIndex,
+            start,
+            end,
+          )
+        } catch (error) {
+          console.error(error)
+        } finally {
+          ball2DInflightRef.current.delete(
+            key,
+          )
+        }
+      })()
+    },
+    [
+      matchId,
+      activeVideoIdentity,
+      videoReadyIdentity,
+      activeCamera,
+      currentFrame,
+      fps,
+      durationSec,
+      hasBall2DRangeLoaded,
+      upsertBall2DPoints,
+      markBall2DRangeLoaded,
+    ],
+  )
+
   const pickLocalFiles = files => {
     const selectedFiles = Array.from(
       files
@@ -951,71 +1108,6 @@ export default function VideoPanel() {
     )
   }
 
-  const finishPendingVideoSeek = () => {
-    const preservedFrame = (
-      pendingVideoSeekFrameRef.current
-    )
-
-    if (preservedFrame == null) {
-      videoSeekInProgressRef.current = false
-      return
-    }
-
-    pendingVideoSeekFrameRef.current = null
-    videoSeekInProgressRef.current = false
-    lastVideoDrivenFrameRef.current = (
-      preservedFrame
-    )
-
-    setCurrentFrame(
-      preservedFrame
-    )
-
-    setCurrentTime(
-      preservedFrame / fps
-    )
-
-    window.requestAnimationFrame(
-      redrawOverlay
-    )
-  }
-
-  useLayoutEffect(
-    () => {
-      const identity = (
-        activeCamera?.id
-        && activeSource
-          ? `${activeCamera.id}|${activeSource}`
-          : null
-      )
-
-      if (
-        identity
-        === previousVideoIdentityRef.current
-      ) {
-        return
-      }
-
-      previousVideoIdentityRef.current = identity
-
-      if (!identity) {
-        pendingVideoSeekFrameRef.current = null
-        videoSeekInProgressRef.current = false
-        return
-      }
-
-      pendingVideoSeekFrameRef.current = (
-        useAppStore.getState().currentFrame
-      )
-      videoSeekInProgressRef.current = true
-      lastVideoDrivenFrameRef.current = null
-    },
-    [
-      activeCamera?.id,
-      activeSource,
-    ],
-  )
-
   useEffect(
     () => {
       const video = (
@@ -1097,7 +1189,6 @@ export default function VideoPanel() {
         !video
         || !activeCamera
         || !fps
-        || videoSeekInProgressRef.current
       ) {
         return
       }
@@ -1204,21 +1295,6 @@ export default function VideoPanel() {
       let callbackId = null
       let stopped = false
 
-      const requestNextFrame = callback => {
-        if (
-          !stopped
-          && videoRef.current
-            ?.requestVideoFrameCallback
-        ) {
-          callbackId = (
-            videoRef.current
-              .requestVideoFrameCallback(
-                callback
-              )
-          )
-        }
-      }
-
       const updateFrame = (
         now,
         metadata,
@@ -1227,15 +1303,6 @@ export default function VideoPanel() {
           stopped
           || !videoRef.current
         ) {
-          return
-        }
-
-        if (
-          videoSeekInProgressRef.current
-        ) {
-          requestNextFrame(
-            updateFrame
-          )
           return
         }
 
@@ -1296,17 +1363,29 @@ export default function VideoPanel() {
 
         syncFromVideoRef.current = false
 
-        requestNextFrame(
-          updateFrame
-        )
+        if (
+          videoRef.current
+            .requestVideoFrameCallback
+          && !stopped
+        ) {
+          callbackId = (
+            videoRef.current
+            .requestVideoFrameCallback(
+              updateFrame
+            )
+          )
+        }
       }
 
       if (
         video
           .requestVideoFrameCallback
       ) {
-        requestNextFrame(
-          updateFrame
+        callbackId = (
+          video
+          .requestVideoFrameCallback(
+            updateFrame
+          )
         )
       }
 
@@ -1344,7 +1423,6 @@ export default function VideoPanel() {
       !video
       || !activeCamera
       || !fps
-      || videoSeekInProgressRef.current
     ) {
       return
     }
@@ -1887,16 +1965,9 @@ export default function VideoPanel() {
                   // Ignore unsupported rate.
                 }
 
-                const preservedFrame = (
-                  pendingVideoSeekFrameRef.current
-                  ?? useAppStore
-                    .getState()
-                    .currentFrame
-                )
-
                 const targetTime = (
                   getCameraVideoTime(
-                    preservedFrame,
+                    currentFrame,
                     fps,
                     activeCamera,
                   )
@@ -1914,11 +1985,22 @@ export default function VideoPanel() {
                     targetTime
                   )
                 } catch {
-                  finishPendingVideoSeek()
+                  // Ignore invalid seek.
+
+                  if (activeVideoIdentity) {
+                    setVideoReadyIdentity(
+                      activeVideoIdentity
+                    )
+                  }
                 }
 
-                if (!requiresSeek) {
-                  finishPendingVideoSeek()
+                if (
+                  !requiresSeek
+                  && activeVideoIdentity
+                ) {
+                  setVideoReadyIdentity(
+                    activeVideoIdentity
+                  )
                 }
 
                 if (playing) {
@@ -1941,12 +2023,13 @@ export default function VideoPanel() {
                   redrawOverlay
                 )
               }}
-              onSeeked={
-                finishPendingVideoSeek
-              }
-              onError={
-                finishPendingVideoSeek
-              }
+              onSeeked={() => {
+                if (activeVideoIdentity) {
+                  setVideoReadyIdentity(
+                    activeVideoIdentity
+                  )
+                }
+              }}
               preload="auto"
               playsInline
               onClick={
