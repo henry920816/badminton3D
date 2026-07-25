@@ -236,6 +236,23 @@ export const api = {
     )
   ),
 
+  getTraj2D: (
+    matchId,
+    cameraIndex,
+    start,
+    end,
+  ) => (
+    request(
+      `/matches/${matchId}/traj2d?camera_index=${encodeURIComponent(
+        cameraIndex,
+      )}&start=${encodeURIComponent(
+        start,
+      )}&end=${encodeURIComponent(
+        end,
+      )}`,
+    )
+  ),
+
   patchHit: (
     hitId,
     updates,

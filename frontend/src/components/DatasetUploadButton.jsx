@@ -71,6 +71,16 @@ const CATEGORY_CONFIG = {
     required: false,
   },
 
+  'ball-2d': {
+    title: '2D 羽球位置',
+    description: (
+      '選擇 match2 類型的資料夾；系統會讀取 rally*/view*/v3/*_ball.csv，並依檔名換算全場 frame。'
+    ),
+    buttonText: '選擇 2D 羽球位置資料夾',
+    accept: '.csv,text/csv',
+    required: false,
+  },
+
   'human-racket': {
     title: '人體與球拍重建',
     description: (
@@ -86,6 +96,10 @@ const CATEGORY_CONFIG = {
 
 const CAMERA_FILE_PATTERN = (
   /^(?:cam(?:era)?[_-]?)?\d+[_-](intrinsic|extrinsic)\.npy$/i
+)
+
+const BALL_2D_FILE_PATTERN = (
+  /^match\d+_\d+_\d+_\d+_view\d+(?:_calib)?_ball\.csv$/i
 )
 
 const UPLOAD_BATCH_MAX_FILES = 100
@@ -149,6 +163,12 @@ function categoryFileAllowed(
     || category === 'ball-mask'
   ) {
     return name.endsWith('.npy')
+  }
+
+  if (category === 'ball-2d') {
+    return BALL_2D_FILE_PATTERN.test(
+      file?.name || '',
+    )
   }
 
   if (category === 'human-racket') {
@@ -423,6 +443,15 @@ function CategorySummary({
       `${data.competition_count || 0} 個比賽資料夾，`
       + `${data.motion_file_count || 0} 個動作檔，`
       + `${data.gender_file_count || 0} 個 gender.csv`
+    )
+  }
+
+  if (category === 'ball-2d') {
+    return (
+      `${data.file_count || 0} 個 CSV，`
+      + `${data.camera_count || 0} 個視角，`
+      + `${data.row_count || 0} 筆座標，`
+      + `${data.visible_count || 0} 筆可見`
     )
   }
 
@@ -2266,6 +2295,12 @@ export default function DatasetUploadButton() {
                       軌跡點：{result.trajectory_count ?? 0}
                       {'　'}
                       相機：{result.camera_count ?? 0}
+                    </div>
+                    <div>
+                      2D 羽球位置：{result.ball_2d_point_count ?? 0}
+                      {'（可見 '}
+                      {result.ball_2d_visible_count ?? 0}
+                      {'）'}
                     </div>
                     <div>
                       人體／球拍動作檔：

@@ -123,6 +123,7 @@ docker compose down
 | Rally 與擊球標註 | 必要 | `RallySeg.csv`、`shot_annotated.csv` | 系統會依相同 Set 資料夾自動配對 |
 | 球軌跡 | 選用 | `.npy` | 未提供時仍可建立資料集，但不會顯示 3D 球軌跡 |
 | 球軌跡 Mask | 選用 | `.npy` | 依檔名與球軌跡配對；缺少時不會匯入對應軌跡 |
+| 2D 羽球位置 | 選用 | `match{n}_{rally}_{start}_{end}_view{camera}[_calib]_ball.csv` | 讀取 `rally*/view*/v3` 下的 `Frame,Visibility,X,Y`，顯示於對應視角影片 |
 | 人體與球拍重建 | 選用 | `.pth`、`.npz`、`gender.csv` | `.pth` 會在建立資料集時由後端轉為 NPZ |
 
 相機檔名可使用 `Cam_0_intrinsic.npy`、`Cam_0_extrinsic.npy` 這類格式。Rally 資料應保留原本的 Set 資料夾層級，讓同一組 `RallySeg.csv` 與 `shot_annotated.csv` 能被正確配對。
@@ -133,7 +134,7 @@ docker compose down
 
 1. 點選「建立新資料集」。
 2. 輸入資料集名稱與 FPS；預設 FPS 為 50。
-3. 依序選擇相機參數、Rally 標註、球軌跡、Mask，以及人體／球拍資料夾。
+3. 依序選擇相機參數、Rally 標註、球軌跡、Mask、2D 羽球位置，以及人體／球拍資料夾。
 4. 確認系統顯示的檔案數量、配對結果、錯誤與提醒。
 5. 視資料格式設定影像寬高、座標模式、鏡頭畸變及球場座標微調。
 6. 若上傳多個人體重建比賽資料夾，選擇目前資料集要使用的比賽。
@@ -219,6 +220,8 @@ Timeline 操作：
 - 選取的影片編號與相機編號相同。
 - 影像寬高、座標模式與鏡頭畸變設定符合原始資料。
 - 相機 FPS 與 `offset_frame` 設定正確。
+
+若建立資料集時有上傳 2D 羽球位置，Video Panel 會另外提供「2D 標註」開關。青色點代表 CSV 中目前精確 frame 的可見座標；`Visibility=0` 不顯示且不會自動插值。2D 標註可與紅色 3D 投影同時開啟，以便比較兩者誤差。
 
 ### 6. Timeline 與 2D 檢視切換
 

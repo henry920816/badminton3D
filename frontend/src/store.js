@@ -125,6 +125,12 @@ function normalizeCameras(
 
         projection,
 
+        has_ball_2d: Boolean(
+          camera?.has_ball_2d
+          ?? camera?.hasBall2D
+          ?? false
+        ),
+
         enabled: (
           camera?.enabled
           ?? true
@@ -171,6 +177,8 @@ export const useAppStore = create(
 
     trajByFrame: new Map(),
     loadedTrajRanges: [],
+    ball2DByCameraFrame: new Map(),
+    loadedBall2DRanges: new Map(),
 
     pxPerSec: 100,
     scrollLeft: 0,
@@ -827,10 +835,118 @@ export const useAppStore = create(
       )
     },
 
+    upsertBall2DPoints: (
+      cameraIndex,
+      points,
+    ) => {
+      const byCamera = new Map(
+        get().ball2DByCameraFrame,
+      )
+      const cameraMap = new Map(
+        byCamera.get(cameraIndex)
+        || [],
+      )
+
+      for (const point of points || []) {
+        if (
+          point
+          && typeof point.frame
+            !== 'undefined'
+        ) {
+          cameraMap.set(
+            point.frame,
+            point,
+          )
+        }
+      }
+
+      byCamera.set(
+        cameraIndex,
+        cameraMap,
+      )
+
+      set({
+        ball2DByCameraFrame: byCamera,
+      })
+    },
+
+    markBall2DRangeLoaded: (
+      cameraIndex,
+      start,
+      end,
+    ) => {
+      const loadedByCamera = new Map(
+        get().loadedBall2DRanges,
+      )
+      const ranges = [
+        ...(loadedByCamera.get(cameraIndex) || []),
+        normalizeRange(start, end),
+      ].sort(
+        (first, second) => (
+          first.start - second.start
+        ),
+      )
+      const merged = []
+
+      for (const range of ranges) {
+        const last = merged[
+          merged.length - 1
+        ]
+
+        if (
+          last
+          && range.start <= last.end + 1
+        ) {
+          last.end = Math.max(
+            last.end,
+            range.end,
+          )
+        } else {
+          merged.push({
+            ...range,
+          })
+        }
+      }
+
+      loadedByCamera.set(
+        cameraIndex,
+        merged,
+      )
+
+      set({
+        loadedBall2DRanges: loadedByCamera,
+      })
+    },
+
+    hasBall2DRangeLoaded: (
+      cameraIndex,
+      start,
+      end,
+    ) => {
+      const target = normalizeRange(
+        start,
+        end,
+      )
+
+      return (
+        get().loadedBall2DRanges
+          .get(cameraIndex)
+          ?.some(
+            range => (
+              target.start >= range.start
+              && target.end <= range.end
+            ),
+          )
+        || false
+      )
+    },
+
     resetTrajCache: () => {
       set({
         trajByFrame: new Map(),
         loadedTrajRanges: [],
+        ball2DByCameraFrame: new Map(),
+        loadedBall2DRanges: new Map(),
         smplReplayBySegmentId: new Map(),
       })
     },

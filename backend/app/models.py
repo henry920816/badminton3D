@@ -51,6 +51,26 @@ class BallTraj(Base):
 
 Index("idx_ball_match_frame", BallTraj.match_id, BallTraj.frame)
 
+
+class BallPosition2D(Base):
+    __tablename__ = "ball_positions_2d"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    camera_index: Mapped[int] = mapped_column(Integer, index=True)
+    frame: Mapped[int] = mapped_column(Integer, index=True)
+    visibility: Mapped[int] = mapped_column(Integer, default=0)
+    x: Mapped[float] = mapped_column(Float)
+    y: Mapped[float] = mapped_column(Float)
+
+
+Index(
+    "uq_ball_2d_match_camera_frame",
+    BallPosition2D.match_id,
+    BallPosition2D.camera_index,
+    BallPosition2D.frame,
+    unique=True,
+)
+
 class Anomaly(Base):
     __tablename__ = "anomalies"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

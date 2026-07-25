@@ -18,7 +18,7 @@ from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from .db import get_db
-from .models import Anomaly, BallTraj, Hit, Match, Rally
+from .models import Anomaly, BallPosition2D, BallTraj, Hit, Match, Rally
 from .reconstruction_assets import (
     import_reconstruction_assets,
     inspect_reconstruction_records,
@@ -66,6 +66,7 @@ CATEGORY_NAMES = {
     "rally-data": "Rally 與擊球標註",
     "ball": "球軌跡",
     "ball-mask": "球軌跡 Mask",
+    "ball-2d": "2D 羽球位置",
     "human-racket": "人體與球拍重建",
 }
 
@@ -74,6 +75,7 @@ CATEGORY_EXTENSIONS = {
     "rally-data": {".csv"},
     "ball": {".npy"},
     "ball-mask": {".npy"},
+    "ball-2d": {".csv"},
     "human-racket": {".pth", ".npz", ".csv"},
 }
 
@@ -106,6 +108,25 @@ CAMERA_PATTERN = re.compile(
     r"^(?:cam(?:era)?[_-]?)?(\d+)[_-](intrinsic|extrinsic)\.npy$",
     re.IGNORECASE,
 )
+
+BALL_2D_FILENAME_PATTERN = re.compile(
+    r"^match(?P<match>\d+)_(?P<rally>\d+)_"
+    r"(?P<start>\d+)_(?P<end>\d+)_view(?P<camera>\d+)"
+    r"(?:_calib)?_ball\.csv$",
+    re.IGNORECASE,
+)
+
+BALL_2D_PATH_PATTERN = re.compile(
+    r"(?:^|/)rally(?P<rally>\d+)/view(?P<camera>\d+)/v3/[^/]+$",
+    re.IGNORECASE,
+)
+
+REQUIRED_BALL_2D_COLUMNS = {
+    "Frame",
+    "Visibility",
+    "X",
+    "Y",
+}
 
 TOKEN_PATTERN = re.compile(
     r"^[0-9a-f]{32}$"
@@ -641,6 +662,11 @@ def category_filename_allowed(
     }:
         return lower_name.endswith(".npy")
 
+    if category == "ball-2d":
+        return BALL_2D_FILENAME_PATTERN.fullmatch(
+            filename
+        ) is not None
+
     if category == "human-racket":
         return (
             lower_name == "gender.csv"
@@ -660,6 +686,7 @@ def find_replacement_record(
     for record in records:
         if category in {
             "rally-data",
+            "ball-2d",
             "human-racket",
         }:
             existing_key = str(
@@ -784,6 +811,11 @@ async def store_uploaded_files(
                 expected = (
                     "{Score}_0.pth、{Score}_1.pth、"
                     "對應 .npz 或 gender.csv"
+                )
+            elif category == "ball-2d":
+                expected = (
+                    "match2_1_3162_3778_view3_ball.csv 或 "
+                    "match2_1_3162_3778_view3_calib_ball.csv"
                 )
             elif category == "cameras":
                 expected = (
@@ -2153,6 +2185,288 @@ def inspect_trajectory_files(
     )
 
 
+def read_ball_2d_record(
+    base: Path,
+    record: dict,
+) -> tuple[dict | None, pd.DataFrame | None, list[str]]:
+    name = str(
+        record.get("original_name", "")
+    )
+    relative_path = str(
+        record.get("relative_path", name)
+    ).replace("\\", "/")
+    errors: list[str] = []
+
+    filename_match = BALL_2D_FILENAME_PATTERN.fullmatch(
+        name
+    )
+    path_match = BALL_2D_PATH_PATTERN.search(
+        relative_path
+    )
+
+    if filename_match is None:
+        return None, None, [
+            f"{name}: 檔名不符合 match/rally/frame/view 規則"
+        ]
+
+    metadata = {
+        key: int(value)
+        for key, value in filename_match.groupdict().items()
+    }
+
+    if path_match is None:
+        errors.append(
+            f"{name}: 必須位於 rally*/view*/v3 資料夾"
+        )
+    else:
+        path_rally = int(
+            path_match.group("rally")
+        )
+        path_camera = int(
+            path_match.group("camera")
+        )
+
+        if path_rally != metadata["rally"]:
+            errors.append(
+                f"{name}: 資料夾 rally{path_rally} 與檔名 rally{metadata['rally']} 不一致"
+            )
+
+        if path_camera != metadata["camera"]:
+            errors.append(
+                f"{name}: 資料夾 view{path_camera} 與檔名 view{metadata['camera']} 不一致"
+            )
+
+    if metadata["end"] <= metadata["start"]:
+        errors.append(
+            f"{name}: end frame 必須大於 start frame"
+        )
+
+    try:
+        source = pd.read_csv(
+            record_file_path(base, record)
+        )
+    except Exception as exc:
+        errors.append(
+            f"{name}: CSV 讀取失敗：{exc}"
+        )
+        return metadata, None, errors
+
+    missing_columns = sorted(
+        REQUIRED_BALL_2D_COLUMNS
+        - set(source.columns)
+    )
+
+    if missing_columns:
+        errors.append(
+            f"{name}: 缺少欄位 {', '.join(missing_columns)}"
+        )
+        return metadata, None, errors
+
+    if source.empty:
+        errors.append(
+            f"{name}: CSV 沒有資料列"
+        )
+        return metadata, None, errors
+
+    numeric: dict[str, pd.Series] = {}
+
+    for column in REQUIRED_BALL_2D_COLUMNS:
+        numeric[column] = pd.to_numeric(
+            source[column],
+            errors="coerce",
+        )
+
+        if not np.isfinite(
+            numeric[column].to_numpy(
+                dtype=float,
+                na_value=np.nan,
+            )
+        ).all():
+            errors.append(
+                f"{name}: {column} 必須全部是有限數值"
+            )
+
+    if errors:
+        return metadata, None, errors
+
+    frame_values = numeric["Frame"].to_numpy(
+        dtype=float
+    )
+    visibility_values = numeric["Visibility"].to_numpy(
+        dtype=float
+    )
+
+    if not np.equal(
+        frame_values,
+        np.floor(frame_values),
+    ).all():
+        errors.append(
+            f"{name}: Frame 必須是整數"
+        )
+
+    if not np.isin(
+        visibility_values,
+        [0, 1],
+    ).all():
+        errors.append(
+            f"{name}: Visibility 只能是 0 或 1"
+        )
+
+    frame_span = (
+        metadata["end"]
+        - metadata["start"]
+    )
+
+    if (
+        (frame_values < 0).any()
+        or (frame_values >= frame_span).any()
+    ):
+        errors.append(
+            f"{name}: Frame 必須介於 0（含）與 {frame_span}（不含）之間"
+        )
+
+    if pd.Series(frame_values).duplicated().any():
+        errors.append(
+            f"{name}: Frame 不可重複"
+        )
+
+    if errors:
+        return metadata, None, errors
+
+    normalized = pd.DataFrame(
+        {
+            "frame": frame_values.astype(np.int64),
+            "visibility": visibility_values.astype(np.int64),
+            "x": numeric["X"].to_numpy(dtype=float),
+            "y": numeric["Y"].to_numpy(dtype=float),
+        }
+    )
+
+    return metadata, normalized, errors
+
+
+def inspect_ball_2d_files(
+    base: Path,
+    manifest: dict,
+) -> tuple[dict, list[str], list[str]]:
+    records = ordered_records(
+        manifest,
+        "ball-2d",
+    )
+    items: list[dict] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    match_numbers: set[int] = set()
+    camera_indices: set[int] = set()
+    occupied_frames: set[tuple[int, int]] = set()
+    total_rows = 0
+    visible_rows = 0
+    maximum_end_frame = 0
+
+    for record in records:
+        metadata, frame, item_errors = read_ball_2d_record(
+            base,
+            record,
+        )
+        name = str(
+            record.get("original_name", "")
+        )
+
+        if metadata is not None:
+            match_numbers.add(
+                metadata["match"]
+            )
+            camera_indices.add(
+                metadata["camera"]
+            )
+            maximum_end_frame = max(
+                maximum_end_frame,
+                metadata["end"],
+            )
+
+        if frame is not None and metadata is not None:
+            for local_frame in frame["frame"]:
+                global_frame = (
+                    metadata["start"]
+                    + int(local_frame)
+                )
+                key = (
+                    metadata["camera"],
+                    global_frame,
+                )
+
+                if key in occupied_frames:
+                    item_errors.append(
+                        f"{name}: view{key[0]} 的 global frame {key[1]} 與其他檔案重複"
+                    )
+                    break
+
+                occupied_frames.add(key)
+
+            total_rows += len(frame)
+            visible_rows += int(
+                (frame["visibility"] == 1).sum()
+            )
+
+        item = {
+            "id": record.get("id"),
+            "name": name,
+            "relative_path": record.get("relative_path"),
+            "valid": not item_errors,
+            "errors": item_errors,
+            "row_count": len(frame) if frame is not None else 0,
+            "visible_count": (
+                int((frame["visibility"] == 1).sum())
+                if frame is not None
+                else 0
+            ),
+        }
+
+        if metadata is not None:
+            item.update(
+                {
+                    "match_number": metadata["match"],
+                    "rally_index": metadata["rally"],
+                    "start_frame": metadata["start"],
+                    "end_frame": metadata["end"],
+                    "camera_index": metadata["camera"],
+                }
+            )
+
+        items.append(item)
+        errors.extend(item_errors)
+
+    if len(match_numbers) > 1:
+        error = (
+            "2D 羽球位置不可混用不同 match："
+            + ", ".join(
+                f"match{number}"
+                for number in sorted(match_numbers)
+            )
+        )
+        errors.append(error)
+
+    if not records:
+        warnings.append(
+            "未上傳 2D 羽球位置；Video Panel 將只顯示既有 3D 投影"
+        )
+
+    result = {
+        "file_count": len(records),
+        "camera_count": len(camera_indices),
+        "camera_indices": sorted(camera_indices),
+        "row_count": total_rows,
+        "visible_count": visible_rows,
+        "maximum_end_frame": maximum_end_frame,
+        "valid": not errors,
+        "items": items,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+    return result, errors, warnings
+
+
 def uploaded_rally_scores(
     base: Path,
     manifest: dict,
@@ -2216,6 +2530,15 @@ def inspect_upload_session(
         manifest,
     )
 
+    (
+        ball_2d,
+        ball_2d_errors,
+        ball_2d_warnings,
+    ) = inspect_ball_2d_files(
+        base,
+        manifest,
+    )
+
     human_racket = inspect_reconstruction_records(
         resolved_category_records(
             base,
@@ -2225,10 +2548,33 @@ def inspect_upload_session(
         rally_scores=uploaded_rally_scores(base, manifest),
     )
 
+    uploaded_camera_indices = {
+        int(item["index"])
+        for item in cameras.get("items", [])
+        if "index" in item
+    }
+    missing_ball_2d_cameras = sorted(
+        set(ball_2d.get("camera_indices", []))
+        - uploaded_camera_indices
+    )
+
+    if missing_ball_2d_cameras:
+        error = (
+            "2D 羽球位置找不到對應的相機參數："
+            + ", ".join(
+                f"Cam {index}"
+                for index in missing_ball_2d_cameras
+            )
+        )
+        ball_2d_errors.append(error)
+        ball_2d["errors"].append(error)
+        ball_2d["valid"] = False
+
     errors = [
         *cameras["errors"],
         *rally_data["errors"],
         *trajectory_errors,
+        *ball_2d_errors,
         *human_racket["errors"],
     ]
 
@@ -2236,6 +2582,7 @@ def inspect_upload_session(
         *cameras["warnings"],
         *rally_data["warnings"],
         *trajectory_warnings,
+        *ball_2d_warnings,
         *human_racket["warnings"],
     ]
 
@@ -2251,6 +2598,7 @@ def inspect_upload_session(
             "rally-data": rally_data,
             "ball": ball,
             "ball-mask": ball_mask,
+            "ball-2d": ball_2d,
             "human-racket": human_racket,
         },
         "errors": errors,
@@ -2394,6 +2742,67 @@ def trajectory_rows(
     return rows
 
 
+def import_ball_2d_rows(
+    db: Session,
+    match_id: int,
+    base: Path,
+    manifest: dict,
+) -> tuple[int, int]:
+    pending_rows: list[dict] = []
+    point_count = 0
+    visible_count = 0
+
+    def flush_rows() -> None:
+        nonlocal pending_rows
+
+        if not pending_rows:
+            return
+
+        db.execute(
+            insert(BallPosition2D),
+            pending_rows,
+        )
+        pending_rows = []
+
+    for record in ordered_records(
+        manifest,
+        "ball-2d",
+    ):
+        metadata, frame, errors = read_ball_2d_record(
+            base,
+            record,
+        )
+
+        if errors or metadata is None or frame is None:
+            raise ValueError(
+                "；".join(errors)
+                or "2D 羽球位置資料無法解析"
+            )
+
+        for row in frame.itertuples(index=False):
+            pending_rows.append(
+                {
+                    "match_id": match_id,
+                    "camera_index": metadata["camera"],
+                    "frame": metadata["start"] + int(row.frame),
+                    "visibility": int(row.visibility),
+                    "x": float(row.x),
+                    "y": float(row.y),
+                }
+            )
+            point_count += 1
+            visible_count += int(
+                row.visibility == 1
+            )
+
+            if len(pending_rows) >= 5000:
+                flush_rows()
+
+    flush_rows()
+
+    return point_count, visible_count
+
+
 def import_dataset_from_session(
     db: Session,
     base: Path,
@@ -2465,12 +2874,79 @@ def import_dataset_from_session(
             (record, frame)
         )
 
+    (
+        ball_2d_inspection,
+        ball_2d_errors,
+        _,
+    ) = inspect_ball_2d_files(
+        base,
+        manifest,
+    )
+
+    if ball_2d_errors:
+        raise ValueError(
+            "；".join(ball_2d_errors)
+        )
+
+    duration_frame = max(
+        duration_frame,
+        int(
+            ball_2d_inspection.get(
+                "maximum_end_frame",
+                0,
+            )
+            or 0
+        ),
+    )
+
     cameras = load_cameras(
         base,
         manifest,
         settings,
         fps,
     )
+
+    ball_2d_camera_indices = set(
+        ball_2d_inspection.get(
+            "camera_indices",
+            [],
+        )
+    )
+    ball_2d_files_by_camera: dict[int, int] = {}
+
+    for item in ball_2d_inspection.get(
+        "items",
+        [],
+    ):
+        camera_index = safe_int(
+            item.get("camera_index")
+        )
+
+        if camera_index is None:
+            continue
+
+        ball_2d_files_by_camera[camera_index] = (
+            ball_2d_files_by_camera.get(
+                camera_index,
+                0,
+            )
+            + 1
+        )
+
+    for camera in cameras:
+        camera_index = safe_int(
+            camera.get("index"),
+            -1,
+        )
+        camera["has_ball_2d"] = (
+            camera_index in ball_2d_camera_indices
+        )
+        camera["ball_2d_file_count"] = (
+            ball_2d_files_by_camera.get(
+                camera_index,
+                0,
+            )
+        )
 
     ball_map = npy_record_map(
         base,
@@ -2497,6 +2973,16 @@ def import_dataset_from_session(
 
     db.add(match)
     db.flush()
+
+    (
+        ball_2d_point_count,
+        ball_2d_visible_count,
+    ) = import_ball_2d_rows(
+        db,
+        match.id,
+        base,
+        manifest,
+    )
 
     warnings: list[str] = []
     rally_count = 0
@@ -2691,6 +3177,9 @@ def import_dataset_from_session(
         "rally_count": rally_count,
         "hit_count": hit_count,
         "trajectory_count": trajectory_count,
+        "ball_2d_file_count": ball_2d_inspection["file_count"],
+        "ball_2d_point_count": ball_2d_point_count,
+        "ball_2d_visible_count": ball_2d_visible_count,
         "camera_count": len(cameras),
         "reconstruction_competition": reconstruction.get("competition"),
         "reconstruction_gender": reconstruction.get("gender"),
@@ -3016,6 +3505,24 @@ def list_datasets(
                     )
                     .count()
                 ),
+                "ball_2d_point_count": (
+                    db.query(BallPosition2D)
+                    .filter(
+                        BallPosition2D.match_id
+                        == match.id
+                    )
+                    .count()
+                ),
+                "ball_2d_file_count": sum(
+                    int(
+                        camera.get(
+                            "ball_2d_file_count",
+                            0,
+                        )
+                        or 0
+                    )
+                    for camera in cameras
+                ),
                 "anomaly_count": (
                     db.query(Anomaly)
                     .filter(
@@ -3096,6 +3603,14 @@ def delete_dataset(
             )
             .count()
         ),
+        "ball_2d_positions": (
+            db.query(BallPosition2D)
+            .filter(
+                BallPosition2D.match_id
+                == match_id
+            )
+            .count()
+        ),
     }
 
     try:
@@ -3115,6 +3630,13 @@ def delete_dataset(
 
         db.query(BallTraj).filter(
             BallTraj.match_id
+            == match_id
+        ).delete(
+            synchronize_session=False
+        )
+
+        db.query(BallPosition2D).filter(
+            BallPosition2D.match_id
             == match_id
         ).delete(
             synchronize_session=False

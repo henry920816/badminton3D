@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 
 from .db import engine, get_db
 from .dataset_upload import router as dataset_upload_router
-from .models import Anomaly, BallTraj, Base, Hit, Match, Rally
+from .models import Anomaly, BallPosition2D, BallTraj, Base, Hit, Match, Rally
 from .schemas import (
     AnomalyPatch,
+    BallPosition2DPoint,
     HitPatch,
     MatchOut,
     TimelineOut,
@@ -271,6 +272,66 @@ def get_traj(
         )
 
     return results
+
+
+@app.get(
+    "/matches/{match_id}/traj2d",
+    response_model=list[BallPosition2DPoint],
+)
+def get_traj_2d(
+    match_id: int,
+    camera_index: int,
+    start: int = 0,
+    end: int = 999999999,
+    db: Session = Depends(get_db),
+):
+    match = db.get(
+        Match,
+        match_id,
+    )
+
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail="match not found",
+        )
+
+    if camera_index < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="camera_index must be non-negative",
+        )
+
+    if end < start:
+        raise HTTPException(
+            status_code=400,
+            detail="end must be greater than or equal to start",
+        )
+
+    rows = (
+        db.query(BallPosition2D)
+        .filter(
+            BallPosition2D.match_id == match_id,
+            BallPosition2D.camera_index == camera_index,
+            BallPosition2D.frame >= start,
+            BallPosition2D.frame <= end,
+        )
+        .order_by(
+            BallPosition2D.frame
+        )
+        .all()
+    )
+
+    return [
+        BallPosition2DPoint(
+            frame=row.frame,
+            camera_index=row.camera_index,
+            visibility=row.visibility,
+            x=row.x,
+            y=row.y,
+        )
+        for row in rows
+    ]
 
 
 @app.patch("/hits/{hit_id}")

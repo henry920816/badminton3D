@@ -27,6 +27,14 @@ class TrajPoint(BaseModel):
     speed: Optional[float] = None
     confidence: float
 
+
+class BallPosition2DPoint(BaseModel):
+    frame: int
+    camera_index: int
+    visibility: int
+    x: float
+    y: float
+
 class HitPatch(BaseModel):
     new_hit_frame: Optional[int] = None
     shot_type: Optional[str] = None

@@ -577,7 +577,7 @@ export default function DatasetSwitchButton() {
                                 text-zinc-400
                                 grid
                                 grid-cols-2
-                                md:grid-cols-4
+                                md:grid-cols-5
                                 gap-1.5
                               "
                             >
@@ -599,6 +599,13 @@ export default function DatasetSwitchButton() {
                                 軌跡點：
                                 {formatNumber(
                                   dataset.trajectory_count,
+                                )}
+                              </span>
+
+                              <span>
+                                2D 點：
+                                {formatNumber(
+                                  dataset.ball_2d_point_count,
                                 )}
                               </span>
 
