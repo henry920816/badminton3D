@@ -12,13 +12,22 @@ export function PlaybackUI({
   const setPlaybackRate = useAppStore(s => s.setPlaybackRate)
   const selection = useAppStore(s => s.selection)
   const setCurrentTime = useAppStore(s => s.setCurrentTime)
-  const currentTime = useAppStore(s => s.currentTime)
-  const fps = useAppStore(s => s.fps) || 60
 
   const holdTimerRef = useRef(null)
   const holdIntervalRef = useRef(null)
 
-  const stepSmall = 1 / fps
+  const stepFrame = (direction) => {
+    const state = useAppStore.getState()
+    const activeFps = Number(state.fps) || 60
+    const currentFrame = Number.isFinite(state.currentFrame)
+      ? Math.round(state.currentFrame)
+      : Math.round(state.currentTime * activeFps)
+
+    // Manual frame navigation owns the playhead. Pausing first prevents the
+    // playback loop from immediately replacing the requested frame.
+    state.setPlaying(false)
+    state.setCurrentFrame(currentFrame + direction)
+  }
 
   const stopHold = () => {
     if (holdTimerRef.current) {
@@ -32,13 +41,12 @@ export function PlaybackUI({
     }
   }
 
-  const startHold = (delta) => {
+  const startHold = (direction) => {
     stopHold()
 
     holdTimerRef.current = setTimeout(() => {
       holdIntervalRef.current = setInterval(() => {
-        const now = useAppStore.getState().currentTime
-        useAppStore.getState().setCurrentTime(Math.max(0, now + delta))
+        stepFrame(direction)
       }, 40)
     }, 220)
   }
@@ -47,8 +55,8 @@ export function PlaybackUI({
     return () => stopHold()
   }, [])
 
-  const holdEvents = (delta) => ({
-    onPointerDown: () => startHold(delta),
+  const holdEvents = (direction) => ({
+    onPointerDown: () => startHold(direction),
     onPointerUp: stopHold,
     onPointerLeave: stopHold,
     onPointerCancel: stopHold,
@@ -77,10 +85,8 @@ export function PlaybackUI({
       </button>
 
       <button
-        onClick={() => {
-          setCurrentTime(Math.max(0, currentTime - stepSmall))
-        }}
-        {...holdEvents(-stepSmall)}
+        onClick={() => stepFrame(-1)}
+        {...holdEvents(-1)}
         className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
         title="Prev frame"
       >
@@ -120,10 +126,8 @@ export function PlaybackUI({
       </button>
 
       <button
-        onClick={() => {
-          setCurrentTime(currentTime + stepSmall)
-        }}
-        {...holdEvents(stepSmall)}
+        onClick={() => stepFrame(1)}
+        {...holdEvents(1)}
         className="w-7 h-7 flex items-center justify-center text-zinc-300 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors rounded-md shrink-0"
         title="Next frame"
       >

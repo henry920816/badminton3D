@@ -1306,6 +1306,26 @@ export default function VideoPanel() {
           return
         }
 
+        // While paused, the store is the source of truth (timeline buttons,
+        // scrubbing, rally selection). A queued video-frame callback can still
+        // arrive after pause and must not overwrite that manual navigation.
+        if (!useAppStore.getState().playing) {
+          if (
+            videoRef.current
+              .requestVideoFrameCallback
+            && !stopped
+          ) {
+            callbackId = (
+              videoRef.current
+                .requestVideoFrameCallback(
+                  updateFrame
+                )
+            )
+          }
+
+          return
+        }
+
         const mediaTime = (
           metadata?.mediaTime
           ?? videoRef.current.currentTime
@@ -1424,6 +1444,12 @@ export default function VideoPanel() {
       || !activeCamera
       || !fps
     ) {
+      return
+    }
+
+    // Programmatic seeks also emit timeupdate. When paused, currentFrame is
+    // deliberately controlled by the timeline/store rather than the video.
+    if (!useAppStore.getState().playing) {
       return
     }
 
