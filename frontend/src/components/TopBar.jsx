@@ -50,6 +50,8 @@ export default function TopBar() {
         border-b
         border-zinc-800
         bg-zinc-950
+        relative
+        z-[100]
       "
     >
       <div
