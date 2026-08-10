@@ -253,6 +253,41 @@ export const api = {
     )
   ),
 
+  repairTraj2D: (
+    matchId,
+    payload,
+  ) => (
+    request(
+      `/matches/${matchId}/traj2d/repair`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': (
+            'application/json'
+          ),
+        },
+        body: JSON.stringify(
+          payload,
+        ),
+      },
+    )
+  ),
+
+  undoTraj2DRepair: (
+    matchId,
+    repairId,
+  ) => (
+    request(
+      (
+        `/matches/${matchId}/traj2d/`
+        + `repairs/${repairId}/undo`
+      ),
+      {
+        method: 'POST',
+      },
+    )
+  ),
+
   patchHit: (
     hitId,
     updates,

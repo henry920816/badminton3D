@@ -51,3 +51,17 @@ class AnomalyPatch(BaseModel):
 class TrajRepairPayload(BaseModel):
     start_frame: int
     end_frame: int
+
+
+class Traj2DObservation(BaseModel):
+    camera_index: int
+    x: float
+    y: float
+
+
+class Traj2DRepairPayload(BaseModel):
+    frame: int
+    observations: List[
+        Traj2DObservation
+    ]
+    confirm: bool = False

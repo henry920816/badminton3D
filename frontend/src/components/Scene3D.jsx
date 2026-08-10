@@ -646,12 +646,7 @@ function CameraMarker({ cameraConfig }) {
         ]}
       />
 
-      <Html
-        center
-        distanceFactor={12}
-        position={[0, 0.22, 0]}
-        zIndexRange={[20, 0]}
-      >
+      <Html center distanceFactor={12} position={[0, 0.22, 0]}>
         <button
           type="button"
           onClick={(e) => {
@@ -984,7 +979,7 @@ export default function Scene3D() {
   }, [selection.inTime, selection.outTime, fps, trajMap, currentTime, rallies])
 
   return (
-    <div className="w-full h-full relative isolate z-0 bg-zinc-950 overflow-hidden">
+    <div className="w-full h-full relative bg-zinc-950 overflow-hidden">
       <div className="absolute top-2 left-2 z-20 bg-zinc-900/80 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-200 shadow backdrop-blur-md">
         3D Camera：<span className="text-yellow-300 font-semibold">{activeCamera?.label || activeCameraId}</span>
         {activeCamera?.description && (

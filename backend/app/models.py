@@ -71,6 +71,22 @@ Index(
     unique=True,
 )
 
+
+class TrajectoryRepairHistory(Base):
+    __tablename__ = "trajectory_repair_history"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    frame: Mapped[int] = mapped_column(Integer, index=True)
+    source: Mapped[str] = mapped_column(String(30), default="manual_2d")
+    original_point: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    repaired_point: Mapped[dict] = mapped_column(JSON)
+    original_2d: Mapped[list] = mapped_column(JSON, default=list)
+    repaired_2d: Mapped[list] = mapped_column(JSON, default=list)
+    reprojection: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    reverted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Anomaly(Base):
     __tablename__ = "anomalies"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

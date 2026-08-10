@@ -614,6 +614,29 @@ export const useAppStore = create(
       )
     },
 
+    setCameraHasBall2D: (
+      cameraIndex,
+      value,
+    ) => {
+      set(
+        state => ({
+          cameras: state.cameras.map(
+            camera => (
+              Number(camera.index)
+                === Number(cameraIndex)
+                ? {
+                    ...camera,
+                    has_ball_2d: (
+                      Boolean(value)
+                    ),
+                  }
+                : camera
+            ),
+          ),
+        }),
+      )
+    },
+
     setLocalVideoSrc: (
       cameraId,
       source,
@@ -753,6 +776,22 @@ export const useAppStore = create(
       })
     },
 
+    removeTrajFrames: frames => {
+      const trajectoryMap = new Map(
+        get().trajByFrame,
+      )
+
+      for (const frame of frames || []) {
+        trajectoryMap.delete(
+          frame
+        )
+      }
+
+      set({
+        trajByFrame: trajectoryMap,
+      })
+    },
+
     markTrajRangeLoaded: (
       start,
       end,
@@ -858,6 +897,34 @@ export const useAppStore = create(
             point,
           )
         }
+      }
+
+      byCamera.set(
+        cameraIndex,
+        cameraMap,
+      )
+
+      set({
+        ball2DByCameraFrame: byCamera,
+      })
+    },
+
+    removeBall2DPoints: (
+      cameraIndex,
+      frames,
+    ) => {
+      const byCamera = new Map(
+        get().ball2DByCameraFrame,
+      )
+      const cameraMap = new Map(
+        byCamera.get(cameraIndex)
+        || [],
+      )
+
+      for (const frame of frames || []) {
+        cameraMap.delete(
+          frame
+        )
       }
 
       byCamera.set(

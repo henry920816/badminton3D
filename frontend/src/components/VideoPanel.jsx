@@ -262,6 +262,85 @@ function getObjectContainRect(
 }
 
 
+function getImagePointFromPointer({
+  event,
+  canvas,
+  container,
+  video,
+  cameraParams,
+}) {
+  if (
+    !event
+    || !canvas
+    || !container
+    || !video
+  ) {
+    return null
+  }
+
+  const rectangle = (
+    getObjectContainRect(
+      container,
+      video,
+    )
+  )
+  const canvasRectangle = (
+    canvas.getBoundingClientRect()
+  )
+  const canvasX = (
+    event.clientX
+    - canvasRectangle.left
+  )
+  const canvasY = (
+    event.clientY
+    - canvasRectangle.top
+  )
+
+  if (
+    canvasX < rectangle.x
+    || canvasX
+      > rectangle.x
+        + rectangle.width
+    || canvasY < rectangle.y
+    || canvasY
+      > rectangle.y
+        + rectangle.height
+  ) {
+    return null
+  }
+
+  const imageWidth = (
+    cameraParams?.imageWidth
+    || video.videoWidth
+    || 1920
+  )
+  const imageHeight = (
+    cameraParams?.imageHeight
+    || video.videoHeight
+    || 1200
+  )
+
+  return {
+    x: (
+      (
+        canvasX
+        - rectangle.x
+      )
+      * imageWidth
+      / rectangle.width
+    ),
+    y: (
+      (
+        canvasY
+        - rectangle.y
+      )
+      * imageHeight
+      / rectangle.height
+    ),
+  }
+}
+
+
 function drawProjectionOverlay({
   canvas,
   container,
@@ -272,6 +351,9 @@ function drawProjectionOverlay({
   showProjection,
   ball2DMap,
   showBall2D,
+  repair2DMode,
+  repairObservation,
+  repairPreviewPoint,
 }) {
   if (
     !canvas
@@ -465,6 +547,62 @@ function drawProjectionOverlay({
       radius: 5,
     })
   }
+
+  if (
+    repair2DMode
+    && repairObservation
+  ) {
+    drawPoint({
+      u: repairObservation.x,
+      v: repairObservation.y,
+      imageWidth: (
+        cameraParams?.imageWidth
+        || video.videoWidth
+        || 1920
+      ),
+      imageHeight: (
+        cameraParams?.imageHeight
+        || video.videoHeight
+        || 1200
+      ),
+      fillStyle: '#d946ef',
+      strokeStyle: '#fae8ff',
+      radius: 6,
+    })
+  }
+
+  if (
+    repair2DMode
+    && repairPreviewPoint
+    && cameraParams
+  ) {
+    const previewProjection = (
+      project3DToImage(
+        repairPreviewPoint,
+        cameraParams,
+      )
+    )
+
+    if (previewProjection) {
+      drawPoint({
+        u: previewProjection.u,
+        v: previewProjection.v,
+        imageWidth: (
+          cameraParams.imageWidth
+          || video.videoWidth
+          || 1920
+        ),
+        imageHeight: (
+          cameraParams.imageHeight
+          || video.videoHeight
+          || 1200
+        ),
+        fillStyle: '#22c55e',
+        strokeStyle: '#dcfce7',
+        radius: 7,
+      })
+    }
+  }
 }
 
 
@@ -509,6 +647,10 @@ export default function VideoPanel() {
     state => state.setSceneCameraTarget
   )
 
+  const setCameraHasBall2D = useAppStore(
+    state => state.setCameraHasBall2D
+  )
+
   const currentFrame = useAppStore(
     state => state.currentFrame
   )
@@ -525,12 +667,24 @@ export default function VideoPanel() {
     state => state.trajByFrame
   )
 
+  const upsertTrajPoints = useAppStore(
+    state => state.upsertTrajPoints
+  )
+
+  const removeTrajFrames = useAppStore(
+    state => state.removeTrajFrames
+  )
+
   const ball2DByCameraFrame = useAppStore(
     state => state.ball2DByCameraFrame
   )
 
   const upsertBall2DPoints = useAppStore(
     state => state.upsertBall2DPoints
+  )
+
+  const removeBall2DPoints = useAppStore(
+    state => state.removeBall2DPoints
   )
 
   const markBall2DRangeLoaded = useAppStore(
@@ -598,6 +752,41 @@ export default function VideoPanel() {
     setVideoReadyIdentity,
   ] = useState(null)
 
+  const [
+    repair2DMode,
+    setRepair2DMode,
+  ] = useState(false)
+
+  const [
+    repair2DFrame,
+    setRepair2DFrame,
+  ] = useState(null)
+
+  const [
+    repair2DObservations,
+    setRepair2DObservations,
+  ] = useState({})
+
+  const [
+    repair2DPreview,
+    setRepair2DPreview,
+  ] = useState(null)
+
+  const [
+    repair2DStatus,
+    setRepair2DStatus,
+  ] = useState('idle')
+
+  const [
+    repair2DError,
+    setRepair2DError,
+  ] = useState('')
+
+  const [
+    lastRepair2DId,
+    setLastRepair2DId,
+  ] = useState(null)
+
   const safePlaybackRate = (
     Number.isFinite(
       Number(playbackRate)
@@ -653,6 +842,53 @@ export default function VideoPanel() {
 
   const ball2DAvailable = Boolean(
     activeCamera?.has_ball_2d
+  )
+
+  const repairCapableCameraCount = (
+    safeCameras.filter(
+      camera => (
+        camera
+          ?.projection
+          ?.intrinsic
+        && camera
+          ?.projection
+          ?.extrinsic
+      ),
+    ).length
+  )
+
+  const repair2DObservationList = (
+    Object.values(
+      repair2DObservations
+      || {},
+    )
+  )
+
+  const activeRepair2DObservation = (
+    repair2DMode
+    && repair2DFrame
+      === currentFrame
+      ? (
+          repair2DObservations[
+            Number(
+              activeCamera?.index
+            )
+          ]
+          || null
+        )
+      : null
+  )
+
+  const repair2DPreviewPoint = (
+    repair2DMode
+    && repair2DPreview?.frame
+      === currentFrame
+      ? (
+          repair2DPreview
+            ?.trajectory_point
+          || null
+        )
+      : null
   )
 
   const activeBall2DMap = useMemo(
@@ -719,6 +955,13 @@ export default function VideoPanel() {
         ball2DAvailable
         && showBall2D
       ),
+      repair2DMode,
+      repairObservation: (
+        activeRepair2DObservation
+      ),
+      repairPreviewPoint: (
+        repair2DPreviewPoint
+      ),
     })
   }
 
@@ -771,6 +1014,9 @@ export default function VideoPanel() {
       showBall2D,
       ball2DAvailable,
       activeSource,
+      repair2DMode,
+      activeRepair2DObservation,
+      repair2DPreviewPoint,
     ],
   )
 
@@ -800,6 +1046,9 @@ export default function VideoPanel() {
       showProjection,
       showBall2D,
       ball2DAvailable,
+      repair2DMode,
+      activeRepair2DObservation,
+      repair2DPreviewPoint,
     ],
   )
 
@@ -838,15 +1087,73 @@ export default function VideoPanel() {
       showProjection,
       showBall2D,
       ball2DAvailable,
+      repair2DMode,
+      activeRepair2DObservation,
+      repair2DPreviewPoint,
     ],
   )
 
   useEffect(
     () => {
       ball2DInflightRef.current = new Set()
+
+      setRepair2DMode(false)
+      setRepair2DFrame(null)
+      setRepair2DObservations({})
+      setRepair2DPreview(null)
+      setRepair2DStatus('idle')
+      setRepair2DError('')
+      setLastRepair2DId(null)
     },
     [
       matchId,
+    ],
+  )
+
+  useEffect(
+    () => {
+      if (
+        !repair2DMode
+        || lastRepair2DId != null
+      ) {
+        return
+      }
+
+      if (
+        repair2DFrame == null
+        || repair2DFrame
+          !== currentFrame
+      ) {
+        setRepair2DFrame(
+          currentFrame
+        )
+        setRepair2DObservations({})
+        setRepair2DPreview(null)
+        setRepair2DStatus('idle')
+        setRepair2DError('')
+      }
+    },
+    [
+      currentFrame,
+      repair2DMode,
+      repair2DFrame,
+      lastRepair2DId,
+    ],
+  )
+
+  useEffect(
+    () => {
+      if (
+        repair2DMode
+        && playing
+      ) {
+        setPlaying(false)
+      }
+    },
+    [
+      repair2DMode,
+      playing,
+      setPlaying,
     ],
   )
 
@@ -1306,26 +1613,6 @@ export default function VideoPanel() {
           return
         }
 
-        // While paused, the store is the source of truth (timeline buttons,
-        // scrubbing, rally selection). A queued video-frame callback can still
-        // arrive after pause and must not overwrite that manual navigation.
-        if (!useAppStore.getState().playing) {
-          if (
-            videoRef.current
-              .requestVideoFrameCallback
-            && !stopped
-          ) {
-            callbackId = (
-              videoRef.current
-                .requestVideoFrameCallback(
-                  updateFrame
-                )
-            )
-          }
-
-          return
-        }
-
         const mediaTime = (
           metadata?.mediaTime
           ?? videoRef.current.currentTime
@@ -1447,12 +1734,6 @@ export default function VideoPanel() {
       return
     }
 
-    // Programmatic seeks also emit timeupdate. When paused, currentFrame is
-    // deliberately controlled by the timeline/store rather than the video.
-    if (!useAppStore.getState().playing) {
-      return
-    }
-
     if (
       video
         .requestVideoFrameCallback
@@ -1534,7 +1815,13 @@ export default function VideoPanel() {
           event.code === 'Space'
         ) {
           event.preventDefault()
-          togglePlaying()
+
+          if (repair2DMode) {
+            setPlaying(false)
+          } else {
+            togglePlaying()
+          }
+
           return
         }
 
@@ -1600,6 +1887,8 @@ export default function VideoPanel() {
     [
       togglePlaying,
       safeCameras,
+      repair2DMode,
+      setPlaying,
     ],
   )
 
@@ -1630,6 +1919,308 @@ export default function VideoPanel() {
     ),
     [],
   )
+
+  const resetRepair2DWork = (
+    frame = currentFrame
+  ) => {
+    setRepair2DFrame(frame)
+    setRepair2DObservations({})
+    setRepair2DPreview(null)
+    setRepair2DStatus('idle')
+    setRepair2DError('')
+    setLastRepair2DId(null)
+  }
+
+  const toggleRepair2DMode = () => {
+    if (repair2DMode) {
+      setRepair2DMode(false)
+      resetRepair2DWork(null)
+      return
+    }
+
+    if (
+      repairCapableCameraCount < 2
+    ) {
+      return
+    }
+
+    setPlaying(false)
+    setShowProjection(true)
+    setRepair2DMode(true)
+    resetRepair2DWork(
+      currentFrame
+    )
+  }
+
+  const handleRepair2DPointerDown = (
+    event
+  ) => {
+    if (
+      !repair2DMode
+      || lastRepair2DId != null
+      || !projectionAvailable
+      || !Number.isInteger(
+        Number(activeCamera?.index)
+      )
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    setPlaying(false)
+
+    const point = (
+      getImagePointFromPointer({
+        event,
+        canvas: (
+          overlayCanvasRef.current
+        ),
+        container: (
+          videoWrapRef.current
+        ),
+        video: (
+          videoRef.current
+        ),
+        cameraParams: (
+          activeCameraParams
+        ),
+      })
+    )
+
+    if (!point) {
+      setRepair2DError(
+        '請點在影片畫面範圍內'
+      )
+      return
+    }
+
+    const cameraIndex = Number(
+      activeCamera.index
+    )
+
+    setRepair2DFrame(
+      currentFrame
+    )
+    setRepair2DObservations(
+      previous => ({
+        ...previous,
+
+        [cameraIndex]: {
+          camera_index: (
+            cameraIndex
+          ),
+          x: point.x,
+          y: point.y,
+        },
+      }),
+    )
+    setRepair2DPreview(null)
+    setRepair2DStatus('idle')
+    setRepair2DError('')
+  }
+
+  const previewRepair2D = async () => {
+    if (
+      matchId == null
+      || repair2DFrame == null
+      || repair2DObservationList.length
+        < 2
+    ) {
+      setRepair2DError(
+        '請先在至少兩個不同相機點選羽球'
+      )
+      return
+    }
+
+    setRepair2DStatus('previewing')
+    setRepair2DError('')
+
+    try {
+      const result = await api.repairTraj2D(
+        matchId,
+        {
+          frame: repair2DFrame,
+          observations: (
+            repair2DObservationList
+          ),
+          confirm: false,
+        },
+      )
+
+      setRepair2DPreview(
+        result
+      )
+      setRepair2DStatus('previewed')
+    } catch (error) {
+      console.error(error)
+      setRepair2DStatus('error')
+      setRepair2DError(
+        error?.message
+        || String(error)
+      )
+    }
+  }
+
+  const confirmRepair2D = async () => {
+    if (
+      matchId == null
+      || repair2DFrame == null
+      || !repair2DPreview
+      || repair2DObservationList.length
+        < 2
+    ) {
+      setRepair2DError(
+        '請先完成 3D 預覽'
+      )
+      return
+    }
+
+    setRepair2DStatus('saving')
+    setRepair2DError('')
+
+    try {
+      const result = await api.repairTraj2D(
+        matchId,
+        {
+          frame: repair2DFrame,
+          observations: (
+            repair2DObservationList
+          ),
+          confirm: true,
+        },
+      )
+
+      if (result?.trajectory_point) {
+        upsertTrajPoints(
+          [
+            result.trajectory_point,
+          ]
+        )
+      }
+
+      for (
+        const point
+        of result?.ball_2d_points
+          || []
+      ) {
+        upsertBall2DPoints(
+          Number(
+            point.camera_index
+          ),
+          [
+            point,
+          ],
+        )
+        setCameraHasBall2D(
+          Number(
+            point.camera_index
+          ),
+          true,
+        )
+      }
+
+      setRepair2DPreview(
+        result
+      )
+      setLastRepair2DId(
+        result.repair_id
+      )
+      setRepair2DStatus('saved')
+    } catch (error) {
+      console.error(error)
+      setRepair2DStatus('error')
+      setRepair2DError(
+        error?.message
+        || String(error)
+      )
+    }
+  }
+
+  const undoRepair2D = async () => {
+    if (
+      matchId == null
+      || lastRepair2DId == null
+    ) {
+      return
+    }
+
+    setRepair2DStatus('undoing')
+    setRepair2DError('')
+
+    try {
+      const result = (
+        await api.undoTraj2DRepair(
+          matchId,
+          lastRepair2DId,
+        )
+      )
+
+      if (result?.trajectory_point) {
+        upsertTrajPoints(
+          [
+            result.trajectory_point,
+          ]
+        )
+      } else if (
+        result?.trajectory_deleted
+      ) {
+        removeTrajFrames(
+          [
+            result.frame,
+          ]
+        )
+      }
+
+      for (
+        const point
+        of result?.ball_2d_points
+          || []
+      ) {
+        const cameraIndex = Number(
+          point.camera_index
+        )
+
+        if (point.deleted) {
+          removeBall2DPoints(
+            cameraIndex,
+            [
+              point.frame,
+            ],
+          )
+        } else {
+          upsertBall2DPoints(
+            cameraIndex,
+            [
+              point,
+            ],
+          )
+        }
+
+        if (
+          typeof point.has_ball_2d
+          !== 'undefined'
+        ) {
+          setCameraHasBall2D(
+            cameraIndex,
+            point.has_ball_2d,
+          )
+        }
+      }
+
+      setLastRepair2DId(null)
+      setRepair2DPreview(null)
+      setRepair2DObservations({})
+      setRepair2DStatus('undone')
+    } catch (error) {
+      console.error(error)
+      setRepair2DStatus('error')
+      setRepair2DError(
+        error?.message
+        || String(error)
+      )
+    }
+  }
 
   return (
     <div
@@ -1830,6 +2421,10 @@ export default function VideoPanel() {
             ? ' / 2D 標註 ON'
             : ''}
 
+          {repair2DMode
+            ? ' / 2D 修復 ON'
+            : ''}
+
           {` / ${safePlaybackRate}x`}
         </div>
 
@@ -1909,6 +2504,44 @@ export default function VideoPanel() {
                 ●
               </span>
               {' 2D 標註'}
+            </button>
+
+            <button
+              type="button"
+              disabled={
+                repairCapableCameraCount
+                < 2
+              }
+              onClick={
+                toggleRepair2DMode
+              }
+              className={[
+                'px-2 py-1 rounded border text-xs',
+
+                repairCapableCameraCount
+                  >= 2
+                  ? (
+                      repair2DMode
+                        ? 'bg-fuchsia-900/90 border-fuchsia-500 text-fuchsia-50 hover:bg-fuchsia-800/90'
+                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
+                    )
+                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
+              ].join(' ')}
+              title={
+                repairCapableCameraCount
+                  >= 2
+                  ? (
+                      '從至少兩個相機點選 2D 羽球位置並重建 3D 點'
+                    )
+                  : (
+                      '至少需要兩個具有 camera params 的視角'
+                    )
+              }
+            >
+              <span className="text-fuchsia-400">
+                ●
+              </span>
+              {' 2D 修復'}
             </button>
           </div>
         )}
@@ -2059,20 +2692,458 @@ export default function VideoPanel() {
               preload="auto"
               playsInline
               onClick={
-                togglePlaying
+                repair2DMode
+                  ? undefined
+                  : togglePlaying
               }
             />
 
             <canvas
               ref={overlayCanvasRef}
-              className="
-                absolute
-                inset-0
-                pointer-events-none
-              "
+              onPointerDown={
+                handleRepair2DPointerDown
+              }
+              className={[
+                'absolute inset-0',
+
+                repair2DMode
+                && lastRepair2DId == null
+                  ? (
+                      'pointer-events-auto cursor-crosshair'
+                    )
+                  : (
+                      'pointer-events-none'
+                    ),
+              ].join(' ')}
             />
           </div>
         )}
+
+        {activeSource
+          && repair2DMode
+          && (
+            <div
+              className="
+                absolute
+                left-3
+                bottom-3
+                z-30
+                w-80
+                max-w-[calc(100%_-_1.5rem)]
+                rounded
+                border
+                border-fuchsia-700/80
+                bg-zinc-950/95
+                p-3
+                text-xs
+                text-zinc-200
+                shadow-2xl
+                backdrop-blur
+              "
+            >
+              <div
+                className="
+                  flex
+                  items-center
+                  justify-between
+                  gap-2
+                "
+              >
+                <div
+                  className="
+                    font-semibold
+                    text-fuchsia-200
+                  "
+                >
+                  2D 多視角修復
+                </div>
+
+                <button
+                  type="button"
+                  onClick={
+                    toggleRepair2DMode
+                  }
+                  className="
+                    text-zinc-400
+                    hover:text-white
+                  "
+                  title="關閉 2D 修復"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div
+                className="
+                  mt-2
+                  leading-5
+                  text-zinc-400
+                "
+              >
+                Frame
+                {' '}
+                <span
+                  className="
+                    text-zinc-100
+                    font-semibold
+                  "
+                >
+                  {repair2DFrame
+                    ?? currentFrame}
+                </span>
+                ：在目前影片點選羽球，
+                再切換另一個相機點選同一 frame。
+              </div>
+
+              <div
+                className="
+                  mt-2
+                  flex
+                  flex-wrap
+                  gap-1
+                "
+              >
+                {repair2DObservationList.length
+                  === 0
+                  ? (
+                      <span
+                        className="
+                          text-zinc-500
+                        "
+                      >
+                        尚未選取 2D 點
+                      </span>
+                    )
+                  : (
+                      [
+                        ...repair2DObservationList,
+                      ]
+                        .sort(
+                          (
+                            first,
+                            second,
+                          ) => (
+                            first.camera_index
+                            - second.camera_index
+                          ),
+                        )
+                        .map(
+                          observation => (
+                            <span
+                              key={
+                                observation
+                                  .camera_index
+                              }
+                              className="
+                                rounded
+                                border
+                                border-fuchsia-700
+                                bg-fuchsia-950/70
+                                px-2
+                                py-0.5
+                                text-fuchsia-100
+                              "
+                            >
+                              Cam
+                              {' '}
+                              {
+                                observation
+                                  .camera_index
+                              }
+                              {' '}
+                              ✓
+                            </span>
+                          ),
+                        )
+                    )}
+              </div>
+
+              <div
+                className="
+                  mt-2
+                  flex
+                  items-center
+                  gap-3
+                  text-[11px]
+                  text-zinc-400
+                "
+              >
+                <span>
+                  <span
+                    className="
+                      text-fuchsia-400
+                    "
+                  >
+                    ●
+                  </span>
+                  {' 點選位置'}
+                </span>
+
+                <span>
+                  <span
+                    className="
+                      text-green-400
+                    "
+                  >
+                    ●
+                  </span>
+                  {' 預覽投影'}
+                </span>
+              </div>
+
+              {repair2DPreview
+                && (
+                  <div
+                    className="
+                      mt-2
+                      rounded
+                      border
+                      border-emerald-900
+                      bg-emerald-950/30
+                      p-2
+                      leading-5
+                    "
+                  >
+                    <div
+                      className="
+                        text-emerald-200
+                        font-semibold
+                      "
+                    >
+                      3D 預覽
+                      {repair2DPreview
+                        .confirmed
+                        ? '（已儲存）'
+                        : '（尚未寫入）'}
+                    </div>
+
+                    <div
+                      className="
+                        text-zinc-300
+                      "
+                    >
+                      X
+                      {' '}
+                      {Number(
+                        repair2DPreview
+                          ?.trajectory_point
+                          ?.x,
+                      ).toFixed(4)}
+                      {' / Y '}
+                      {Number(
+                        repair2DPreview
+                          ?.trajectory_point
+                          ?.y,
+                      ).toFixed(4)}
+                      {' / Z '}
+                      {Number(
+                        repair2DPreview
+                          ?.trajectory_point
+                          ?.z,
+                      ).toFixed(4)}
+                    </div>
+
+                    <div
+                      className="
+                        text-zinc-400
+                      "
+                    >
+                      RMS
+                      {' '}
+                      {Number(
+                        repair2DPreview
+                          ?.rms_error,
+                      ).toFixed(2)}
+                      {' px / Max '}
+                      {Number(
+                        repair2DPreview
+                          ?.max_error,
+                      ).toFixed(2)}
+                      {' px'}
+                    </div>
+
+                    {(repair2DPreview
+                      ?.warnings
+                      || [])
+                      .map(
+                        warning => (
+                          <div
+                            key={warning}
+                            className="
+                              text-amber-300
+                            "
+                          >
+                            {warning}
+                          </div>
+                        ),
+                      )}
+                  </div>
+                )}
+
+              {repair2DError
+                && (
+                  <div
+                    className="
+                      mt-2
+                      break-words
+                      text-red-300
+                    "
+                  >
+                    {repair2DError}
+                  </div>
+                )}
+
+              <div
+                className="
+                  mt-3
+                  flex
+                  flex-wrap
+                  gap-2
+                "
+              >
+                {lastRepair2DId == null
+                  ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={
+                            previewRepair2D
+                          }
+                          disabled={
+                            repair2DObservationList
+                              .length < 2
+                            || repair2DStatus
+                              === 'previewing'
+                            || repair2DStatus
+                              === 'saving'
+                          }
+                          className="
+                            rounded
+                            bg-sky-700
+                            px-2.5
+                            py-1
+                            text-white
+                            hover:bg-sky-600
+                            disabled:cursor-not-allowed
+                            disabled:opacity-40
+                          "
+                        >
+                          {repair2DStatus
+                            === 'previewing'
+                            ? '計算中...'
+                            : '預覽 3D'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={
+                            confirmRepair2D
+                          }
+                          disabled={
+                            !repair2DPreview
+                            || repair2DStatus
+                              === 'saving'
+                            || repair2DStatus
+                              === 'previewing'
+                          }
+                          className="
+                            rounded
+                            bg-emerald-700
+                            px-2.5
+                            py-1
+                            text-white
+                            hover:bg-emerald-600
+                            disabled:cursor-not-allowed
+                            disabled:opacity-40
+                          "
+                        >
+                          {repair2DStatus
+                            === 'saving'
+                            ? '儲存中...'
+                            : '確認寫入'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            resetRepair2DWork(
+                              currentFrame
+                            )
+                          }}
+                          disabled={
+                            repair2DStatus
+                              === 'saving'
+                            || repair2DStatus
+                              === 'previewing'
+                          }
+                          className="
+                            rounded
+                            border
+                            border-zinc-700
+                            bg-zinc-900
+                            px-2.5
+                            py-1
+                            text-zinc-300
+                            hover:bg-zinc-800
+                            disabled:opacity-40
+                          "
+                        >
+                          清除點選
+                        </button>
+                      </>
+                    )
+                  : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={
+                            undoRepair2D
+                          }
+                          disabled={
+                            repair2DStatus
+                            === 'undoing'
+                          }
+                          className="
+                            rounded
+                            bg-amber-700
+                            px-2.5
+                            py-1
+                            text-white
+                            hover:bg-amber-600
+                            disabled:opacity-40
+                          "
+                        >
+                          {repair2DStatus
+                            === 'undoing'
+                            ? '復原中...'
+                            : '復原此次修復'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            resetRepair2DWork(
+                              currentFrame
+                            )
+                          }}
+                          className="
+                            rounded
+                            border
+                            border-zinc-700
+                            bg-zinc-900
+                            px-2.5
+                            py-1
+                            text-zinc-200
+                            hover:bg-zinc-800
+                          "
+                        >
+                          修下一點
+                        </button>
+                      </>
+                    )}
+              </div>
+            </div>
+          )}
 
         {activeSource
           && !projectionAvailable
