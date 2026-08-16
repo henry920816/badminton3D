@@ -1,5 +1,4 @@
 let model = null
-let pendingFrameMessage = null
 
 function rodrigues(v) {
   const x0 = Number(v?.[0] || 0)
@@ -68,18 +67,6 @@ function buildPose(globalOrient, bodyPose) {
   }
 
   return { rotMats, poseFeature }
-}
-
-function computeVPosedInto(out, vShaped, posedirs, poseFeature, vertexCount) {
-  out.set(vShaped)
-  const coordCount = vertexCount * 3
-  for (let coord = 0; coord < coordCount; coord++) {
-    let sum = 0
-    for (let p = 0; p < poseFeature.length; p++) {
-      sum += poseFeature[p] * posedirs[p * coordCount + coord]
-    }
-    out[coord] += sum
-  }
 }
 
 function computeVShaped(beta) {
@@ -261,80 +248,36 @@ function computeRacketMatrix(racketPose, rotMats, joints, parents, trans) {
   ]
 }
 
-function skinInto(positions, vPosed, transforms, weights, trans, vertexCount, jointCount) {
-  const tx = Number(trans?.[0] || 0)
-  const ty = Number(trans?.[1] || 0)
-  const tz = Number(trans?.[2] || 0)
-
-  for (let vertex = 0; vertex < vertexCount; vertex++) {
-    const x = vPosed[vertex * 3]
-    const y = vPosed[vertex * 3 + 1]
-    const z = vPosed[vertex * 3 + 2]
-    let ox = 0
-    let oy = 0
-    let oz = 0
-
-    for (let joint = 0; joint < jointCount; joint++) {
-      const w = weights[vertex * jointCount + joint]
-      if (!w) continue
-      const m = transforms[joint]
-      ox += w * (m[0] * x + m[1] * y + m[2] * z + m[3])
-      oy += w * (m[4] * x + m[5] * y + m[6] * z + m[7])
-      oz += w * (m[8] * x + m[9] * y + m[10] * z + m[11])
-    }
-
-    positions[vertex * 3] = ox + tx
-    positions[vertex * 3 + 1] = -(oy + ty)
-    positions[vertex * 3 + 2] = -(oz + tz)
-  }
-}
-
-function computeFrameInto(message, positions) {
+function computeFrame(message) {
   const { rotMats, poseFeature } = buildPose(message.global_orient, message.body_pose)
-  computeVPosedInto(model.vPosed, model.vShaped, model.shared.posedirs, poseFeature, model.vertexCount)
   const transforms = computeTransforms(rotMats, model.joints, model.shared.parents, model.jointCount)
-  skinInto(positions, model.vPosed, transforms, model.shared.lbs_weights, message.trans, model.vertexCount, model.jointCount)
+  const jointMatrices = new Float32Array(model.jointCount * 16)
+  transforms.forEach((transform, index) => jointMatrices.set(transform, index * 16))
   const precomputedRacketMatrix = sourceRacketTransformToThreeMatrix(
     message.racket_transform,
     message.racket_frame_offset
   )
-  if (precomputedRacketMatrix) return precomputedRacketMatrix
-  return computeRacketMatrix(message.racket_pose, rotMats, model.joints, model.shared.parents, message.trans)
-}
-
-function acquireOutputBuffer() {
-  return model.outputPool.pop() || null
-}
-
-function releaseOutputBuffer(buffer) {
-  const coordCount = model.vertexCount * 3
-  if (!buffer || buffer.byteLength !== coordCount * Float32Array.BYTES_PER_ELEMENT) return
-  model.outputPool.push(new Float32Array(buffer))
+  return {
+    jointMatrices,
+    poseFeature,
+    racketMatrix: precomputedRacketMatrix || computeRacketMatrix(
+      message.racket_pose, rotMats, model.joints, model.shared.parents, message.trans
+    ),
+  }
 }
 
 function processFrameMessage(message) {
-  const positions = acquireOutputBuffer()
-  if (!positions) {
-    pendingFrameMessage = message
-    return
-  }
-
-  const racketMatrix = computeFrameInto(message, positions)
+  const { jointMatrices, poseFeature, racketMatrix } = computeFrame(message)
   self.postMessage({
     type: 'frame',
     requestId: message.requestId,
     playerId: message.playerId,
     frame: message.frame,
-    positions,
+    jointMatrices,
+    poseFeature,
+    trans: message.trans,
     racketMatrix,
-  }, [positions.buffer])
-}
-
-function flushPendingFrame() {
-  if (!pendingFrameMessage || !model?.outputPool?.length) return
-  const message = pendingFrameMessage
-  pendingFrameMessage = null
-  processFrameMessage(message)
+  }, [jointMatrices.buffer, poseFeature.buffer])
 }
 
 self.onmessage = (event) => {
@@ -355,23 +298,11 @@ self.onmessage = (event) => {
       model.joints[23 * 3 + 1],
       model.joints[23 * 3 + 2],
     ]
-    model.vPosed = new Float32Array(model.vertexCount * 3)
-    model.outputPool = [
-      new Float32Array(model.vertexCount * 3),
-      new Float32Array(model.vertexCount * 3),
-    ]
-    pendingFrameMessage = null
-    self.postMessage({ type: 'ready' })
+    self.postMessage({ type: 'ready', vShaped: model.vShaped })
     return
   }
 
   if (!model) return
-
-  if (message.type === 'release') {
-    releaseOutputBuffer(message.buffer)
-    flushPendingFrame()
-    return
-  }
 
   if (message.type === 'frame') {
     processFrameMessage(message)

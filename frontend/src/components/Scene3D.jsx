@@ -247,31 +247,101 @@ function sourceToThreePositions(source) {
   return out
 }
 
-const SMPL_NORMAL_RECOMPUTE_INTERVAL = 4
-const SMPL_MAX_UPDATE_FPS = 30
-const SMPL_MIN_UPDATE_INTERVAL_SEC = 1 / SMPL_MAX_UPDATE_FPS
-const SMPL_IMMEDIATE_FRAME_JUMP = 3
+const SMPL_JOINT_COUNT = 24
+const SMPL_POSE_FEATURE_COUNT = 207
+const SMPL_POSEDIRS_TEXTURE_WIDTH = 2048
 const RACKET_OBJ_URL = '/models/racket/racket.obj'
 const RACKET_SCALE = 1
 const RACKET_PIVOT = new THREE.Vector3(0, 0, 0)
 const RACKET_OFFSET = new THREE.Vector3(0, 0, 0)
 let racketObjectPromise = null
 
-function applyGeometryPositions(geometry, positions, recomputeNormals = false) {
-  if (!geometry || !positions) return
-  const attribute = geometry.getAttribute('position')
-  if (!attribute || attribute.array.length !== positions.length) return
-  attribute.array.set(positions)
-  attribute.needsUpdate = true
-  if (recomputeNormals) geometry.computeVertexNormals()
+function createSmplPoseDirectionsTexture(posedirs) {
+  const scalarCount = posedirs.length
+  const height = Math.ceil(scalarCount / (SMPL_POSEDIRS_TEXTURE_WIDTH * 4))
+  const data = new Float32Array(SMPL_POSEDIRS_TEXTURE_WIDTH * height * 4)
+  data.set(posedirs)
+  const texture = new THREE.DataTexture(
+    data,
+    SMPL_POSEDIRS_TEXTURE_WIDTH,
+    height,
+    THREE.RGBAFormat,
+    THREE.FloatType,
+  )
+  texture.minFilter = THREE.NearestFilter
+  texture.magFilter = THREE.NearestFilter
+  texture.generateMipmaps = false
+  texture.flipY = false
+  texture.needsUpdate = true
+  return texture
 }
 
-function releaseWorkerPositions(worker, positions) {
-  if (!worker || !positions?.buffer || positions.buffer.byteLength === 0) return
-  worker.postMessage({
-    type: 'release',
-    buffer: positions.buffer,
-  }, [positions.buffer])
+function createSmplMaterial(color, poseDirections, vertexCount) {
+  const uniforms = {
+    smplJointMatrices: { value: Array.from({ length: SMPL_JOINT_COUNT }, () => new THREE.Matrix4()) },
+    smplPoseFeatures: { value: new Float32Array(SMPL_POSE_FEATURE_COUNT) },
+    smplTranslation: { value: new THREE.Vector3() },
+    smplPoseDirections: { value: poseDirections },
+    smplPoseDirectionsSize: { value: new THREE.Vector2(poseDirections.image.width, poseDirections.image.height) },
+    smplCoordinateCount: { value: vertexCount * 3 },
+  }
+  const material = new THREE.MeshStandardMaterial({ color, roughness: 0.66, metalness: 0 })
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms)
+    shader.vertexShader = shader.vertexShader.replace('#include <common>', `#include <common>
+uniform mat4 smplJointMatrices[24];
+uniform float smplPoseFeatures[207];
+uniform vec3 smplTranslation;
+uniform sampler2D smplPoseDirections;
+uniform vec2 smplPoseDirectionsSize;
+uniform float smplCoordinateCount;
+attribute float smplVertexIndex;
+attribute vec4 smplWeight0;
+attribute vec4 smplWeight1;
+attribute vec4 smplWeight2;
+attribute vec4 smplWeight3;
+attribute vec4 smplWeight4;
+attribute vec4 smplWeight5;
+
+float smplPoseDirection(float scalarIndex) {
+  float texelIndex = floor(scalarIndex * 0.25);
+  float component = mod(scalarIndex, 4.0);
+  vec2 uv = (vec2(mod(texelIndex, smplPoseDirectionsSize.x), floor(texelIndex / smplPoseDirectionsSize.x)) + 0.5) / smplPoseDirectionsSize;
+  vec4 value = texture(smplPoseDirections, uv);
+  if (component < 0.5) return value.r;
+  if (component < 1.5) return value.g;
+  if (component < 2.5) return value.b;
+  return value.a;
+}
+
+mat4 smplSkinMatrix() {
+  return smplJointMatrices[0] * smplWeight0.x + smplJointMatrices[1] * smplWeight0.y + smplJointMatrices[2] * smplWeight0.z + smplJointMatrices[3] * smplWeight0.w
+    + smplJointMatrices[4] * smplWeight1.x + smplJointMatrices[5] * smplWeight1.y + smplJointMatrices[6] * smplWeight1.z + smplJointMatrices[7] * smplWeight1.w
+    + smplJointMatrices[8] * smplWeight2.x + smplJointMatrices[9] * smplWeight2.y + smplJointMatrices[10] * smplWeight2.z + smplJointMatrices[11] * smplWeight2.w
+    + smplJointMatrices[12] * smplWeight3.x + smplJointMatrices[13] * smplWeight3.y + smplJointMatrices[14] * smplWeight3.z + smplJointMatrices[15] * smplWeight3.w
+    + smplJointMatrices[16] * smplWeight4.x + smplJointMatrices[17] * smplWeight4.y + smplJointMatrices[18] * smplWeight4.z + smplJointMatrices[19] * smplWeight4.w
+    + smplJointMatrices[20] * smplWeight5.x + smplJointMatrices[21] * smplWeight5.y + smplJointMatrices[22] * smplWeight5.z + smplJointMatrices[23] * smplWeight5.w;
+}
+`)
+    shader.vertexShader = shader.vertexShader.replace('#include <beginnormal_vertex>', `
+mat4 smplNormalSkinMatrix = smplSkinMatrix();
+vec3 smplSourceNormal = vec3(normal.x, -normal.y, -normal.z);
+vec3 smplNormal = normalize(mat3(smplNormalSkinMatrix) * smplSourceNormal);
+vec3 objectNormal = vec3(smplNormal.x, -smplNormal.y, -smplNormal.z);`)
+    shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
+vec3 smplVPosed = vec3(position.x, -position.y, -position.z);
+for (int feature = 0; feature < 207; feature++) {
+  float offset = float(feature) * smplCoordinateCount + smplVertexIndex * 3.0;
+  float coefficient = smplPoseFeatures[feature];
+  smplVPosed.x += coefficient * smplPoseDirection(offset);
+  smplVPosed.y += coefficient * smplPoseDirection(offset + 1.0);
+  smplVPosed.z += coefficient * smplPoseDirection(offset + 2.0);
+}
+vec3 smplSourcePosition = (smplSkinMatrix() * vec4(smplVPosed, 1.0)).xyz + smplTranslation;
+vec3 transformed = vec3(smplSourcePosition.x, -smplSourcePosition.y, -smplSourcePosition.z);`)
+  }
+  material.userData.smplUniforms = uniforms
+  return material
 }
 
 function prepareRacketObject(source) {
@@ -308,15 +378,12 @@ function loadRacketObject() {
 
 function SmplForwardAvatar({ playerReplay }) {
   const currentFrame = useAppStore(s => s.currentFrame)
-  const geometryRef = useRef(null)
   const racketRef = useRef(null)
   const workerRef = useRef(null)
   const requestIdRef = useRef(0)
   const lastSentFrameRef = useRef(null)
-  const lastAppliedFrameRef = useRef(null)
-  const lastNormalFrameRef = useRef(null)
-  const lastDispatchTimeRef = useRef(-Infinity)
   const [model, setModel] = useState(null)
+  const [vShaped, setVShaped] = useState(null)
   const [racketObject, setRacketObject] = useState(null)
   const [ready, setReady] = useState(false)
   const [hasAppliedFrame, setHasAppliedFrame] = useState(false)
@@ -329,9 +396,7 @@ function SmplForwardAvatar({ playerReplay }) {
     setHasAppliedFrame(false)
     setFailed('')
     lastSentFrameRef.current = null
-    lastAppliedFrameRef.current = null
-    lastNormalFrameRef.current = null
-    lastDispatchTimeRef.current = -Infinity
+    setVShaped(null)
 
     ;(async () => {
       try {
@@ -350,9 +415,6 @@ function SmplForwardAvatar({ playerReplay }) {
 
   useEffect(() => {
     lastSentFrameRef.current = null
-    lastAppliedFrameRef.current = null
-    lastNormalFrameRef.current = null
-    lastDispatchTimeRef.current = -Infinity
     requestIdRef.current += 1
     setHasAppliedFrame(false)
     if (racketRef.current) racketRef.current.visible = false
@@ -376,23 +438,48 @@ function SmplForwardAvatar({ playerReplay }) {
   }, [])
 
   const geometry = useMemo(() => {
-    if (!model?.shared?.arrays?.v_template?.length) return null
+    if (!model?.shared?.arrays?.v_template?.length || !vShaped?.length) return null
     const geom = new THREE.BufferGeometry()
     geom.setIndex(new THREE.BufferAttribute(model.shared.arrays.faces, 1))
     geom.setAttribute(
       'position',
-      new THREE.BufferAttribute(sourceToThreePositions(model.shared.arrays.v_template), 3)
+      new THREE.BufferAttribute(sourceToThreePositions(vShaped), 3)
     )
+    const vertexCount = model.shared.meta.vertexCount
+    const vertexIndices = new Float32Array(vertexCount)
+    for (let vertex = 0; vertex < vertexCount; vertex++) vertexIndices[vertex] = vertex
+    geom.setAttribute('smplVertexIndex', new THREE.BufferAttribute(vertexIndices, 1))
+    for (let group = 0; group < 6; group++) {
+      const weights = new Float32Array(vertexCount * 4)
+      for (let vertex = 0; vertex < vertexCount; vertex++) {
+        weights.set(model.shared.arrays.lbs_weights.subarray(vertex * SMPL_JOINT_COUNT + group * 4, vertex * SMPL_JOINT_COUNT + group * 4 + 4), vertex * 4)
+      }
+      geom.setAttribute(`smplWeight${group}`, new THREE.BufferAttribute(weights, 4))
+    }
     geom.computeVertexNormals()
     return geom
-  }, [model])
+  }, [model, vShaped])
+
+  const poseDirections = useMemo(
+    () => model?.shared?.arrays?.posedirs?.length ? createSmplPoseDirectionsTexture(model.shared.arrays.posedirs) : null,
+    [model],
+  )
+
+  useEffect(() => () => poseDirections?.dispose(), [poseDirections])
+
+  const material = useMemo(() => {
+    if (!poseDirections || !model) return null
+    return createSmplMaterial(
+      playerReplay.player_index === 0 ? '#9fb7d9' : '#d6b69c',
+      poseDirections,
+      model.shared.meta.vertexCount,
+    )
+  }, [model, playerReplay.player_index, poseDirections])
+
+  useEffect(() => () => material?.dispose(), [material])
 
   useEffect(() => {
-    geometryRef.current = geometry
-  }, [geometry])
-
-  useEffect(() => {
-    if (!model || !geometry) return undefined
+    if (!model || !material) return undefined
 
     const worker = new Worker(new URL('../workers/smplForwardWorker.js', import.meta.url), {
       type: 'module',
@@ -403,20 +490,22 @@ function SmplForwardAvatar({ playerReplay }) {
     worker.onmessage = (event) => {
       const message = event.data
       if (message.type === 'ready') {
+        setVShaped(message.vShaped)
         setReady(true)
         return
       }
       if (message.type !== 'frame') return
 
       if (message.requestId === requestIdRef.current) {
-        const shouldRecomputeNormals =
-          lastNormalFrameRef.current == null ||
-          Math.abs(message.frame - lastNormalFrameRef.current) >= SMPL_NORMAL_RECOMPUTE_INTERVAL
-
-        applyGeometryPositions(geometryRef.current, message.positions, shouldRecomputeNormals)
-        lastAppliedFrameRef.current = message.frame
+        const uniforms = material.userData.smplUniforms
+        for (let joint = 0; joint < SMPL_JOINT_COUNT; joint++) {
+          uniforms.smplJointMatrices.value[joint]
+            .fromArray(message.jointMatrices, joint * 16)
+            .transpose()
+        }
+        uniforms.smplPoseFeatures.value.set(message.poseFeature)
+        uniforms.smplTranslation.value.fromArray(message.trans || [0, 0, 0])
         setHasAppliedFrame(true)
-        if (shouldRecomputeNormals) lastNormalFrameRef.current = message.frame
 
         if (racketRef.current && Array.isArray(message.racketMatrix)) {
           racketRef.current.visible = true
@@ -424,7 +513,6 @@ function SmplForwardAvatar({ playerReplay }) {
           racketRef.current.matrixWorldNeedsUpdate = true
         }
       }
-      releaseWorkerPositions(workerRef.current, message.positions)
     }
 
     worker.onerror = (err) => {
@@ -443,8 +531,6 @@ function SmplForwardAvatar({ playerReplay }) {
         v_template: model.shared.arrays.v_template,
         shapedirs: model.shared.arrays.shapedirs,
         J_regressor: model.shared.arrays.J_regressor,
-        lbs_weights: model.shared.arrays.lbs_weights,
-        posedirs: model.shared.arrays.posedirs,
       },
       player: {},
     })
@@ -454,33 +540,18 @@ function SmplForwardAvatar({ playerReplay }) {
       workerRef.current = null
       setReady(false)
     }
-  }, [model, geometry, playerReplay.beta])
+  }, [model, material, playerReplay.beta])
 
   useFrame((state) => {
-    if (!ready || !workerRef.current || !geometryRef.current) return
+    if (!ready || !workerRef.current || !geometry) return
     const poseFrame = getLocalPoseFrame(playerReplay, currentFrame)
     if (!poseFrame || poseFrame.valid === false) {
       if (racketRef.current) racketRef.current.visible = false
       return
     }
-    if (lastAppliedFrameRef.current === poseFrame.frame) return
     if (lastSentFrameRef.current === poseFrame.frame) return
 
-    const now = state.clock.elapsedTime
-    const lastSentFrame = lastSentFrameRef.current
-    const isLargeFrameJump =
-      lastSentFrame == null ||
-      Math.abs(poseFrame.frame - lastSentFrame) >= SMPL_IMMEDIATE_FRAME_JUMP
-
-    if (
-      !isLargeFrameJump &&
-      now - lastDispatchTimeRef.current < SMPL_MIN_UPDATE_INTERVAL_SEC
-    ) {
-      return
-    }
-
     lastSentFrameRef.current = poseFrame.frame
-    lastDispatchTimeRef.current = now
     const requestId = requestIdRef.current + 1
     requestIdRef.current = requestId
 
@@ -497,17 +568,11 @@ function SmplForwardAvatar({ playerReplay }) {
     })
   })
 
-  if (failed || !geometry) return null
+  if (failed || !geometry || !material) return null
 
   return (
     <group>
-      <mesh geometry={geometry} frustumCulled={false} castShadow receiveShadow visible={hasAppliedFrame}>
-        <meshStandardMaterial
-          color={playerReplay.player_index === 0 ? '#9fb7d9' : '#d6b69c'}
-          roughness={0.66}
-          metalness={0.0}
-        />
-      </mesh>
+      <mesh geometry={geometry} material={material} frustumCulled={false} castShadow receiveShadow visible={hasAppliedFrame} />
       {racketObject && (
         <primitive
           ref={racketRef}
