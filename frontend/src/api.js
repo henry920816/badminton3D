@@ -253,6 +253,20 @@ export const api = {
     )
   ),
 
+  getTraj2DCameraGrid: (
+    matchId,
+    startFrame,
+    endFrame,
+  ) => (
+    request(
+      `/matches/${matchId}/traj2d/camera-grid?start_frame=${encodeURIComponent(
+        startFrame,
+      )}&end_frame=${encodeURIComponent(
+        endFrame,
+      )}`,
+    )
+  ),
+
   repairTraj2D: (
     matchId,
     payload,

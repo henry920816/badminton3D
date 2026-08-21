@@ -12,6 +12,7 @@ import Scene3D from './components/Scene3D.jsx'
 import VideoPanel from './components/VideoPanel.jsx'
 import TimelinePanel from './components/TimelinePanel.jsx'
 import Projection2DPanel from './components/Projection2DPanel.jsx'
+import Quality2DPanel from './components/Quality2DPanel.jsx'
 import RightDock from './components/RightDock.jsx'
 
 const PRELOAD_RADIUS_FRAMES = 300
@@ -814,9 +815,14 @@ export default function App() {
                 ? (
                     <Projection2DPanel />
                   )
-                : (
-                    <TimelinePanel />
-                  )}
+                : bottomView
+                  === 'quality2d'
+                  ? (
+                      <Quality2DPanel />
+                    )
+                  : (
+                      <TimelinePanel />
+                    )}
             </div>
           </div>
         </div>

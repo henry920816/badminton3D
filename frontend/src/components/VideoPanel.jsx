@@ -542,8 +542,8 @@ function drawProjectionOverlay({
         || video.videoHeight
         || 1200
       ),
-      fillStyle: '#22d3ee',
-      strokeStyle: '#ecfeff',
+      fillStyle: '#22d3ee00',
+      strokeStyle: '#22d3ee',
       radius: 5,
     })
   }
@@ -1630,6 +1630,25 @@ export default function VideoPanel() {
           frame
         )
 
+        if (
+          !useAppStore.getState().playing
+        ) {
+          if (
+            videoRef.current
+              .requestVideoFrameCallback
+            && !stopped
+          ) {
+            callbackId = (
+              videoRef.current
+              .requestVideoFrameCallback(
+                updateFrame
+              )
+            )
+          }
+
+          return
+        }
+
         syncFromVideoRef.current = true
 
         if (
@@ -1752,6 +1771,12 @@ export default function VideoPanel() {
     lastVideoDrivenFrameRef.current = (
       frame
     )
+
+    if (
+      !useAppStore.getState().playing
+    ) {
+      return
+    }
 
     syncFromVideoRef.current = true
 
@@ -2436,7 +2461,8 @@ export default function VideoPanel() {
               right-2
               z-20
               flex
-              items-center
+              flex-col
+              items-end
               gap-2
             "
           >
@@ -2626,7 +2652,7 @@ export default function VideoPanel() {
 
                 const targetTime = (
                   getCameraVideoTime(
-                    currentFrame,
+                    useAppStore.getState().currentFrame,
                     fps,
                     activeCamera,
                   )
@@ -2662,7 +2688,7 @@ export default function VideoPanel() {
                   )
                 }
 
-                if (playing) {
+                if (useAppStore.getState().playing) {
                   const promise = (
                     video.play()
                   )

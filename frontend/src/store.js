@@ -212,7 +212,8 @@ export const useAppStore = create(
       set({
         bottomView: (
           view === 'projection2d'
-            ? 'projection2d'
+          || view === 'quality2d'
+            ? view
             : 'timeline'
         ),
       })

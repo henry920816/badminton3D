@@ -30,6 +30,8 @@ from .schemas import (
     TrajRepairPayload,
 )
 from .triangulation import (
+    pairwise_triangulation_diagnostics,
+    scan_2d_camera_grid,
     triangulate_observations,
 )
 
@@ -346,6 +348,79 @@ def get_traj_2d(
         )
         for row in rows
     ]
+
+
+def cameras_by_index_for_match(match: Match) -> dict[int, dict]:
+    cameras = match.cameras if isinstance(match.cameras, list) else []
+    cameras_by_index: dict[int, dict] = {}
+
+    for fallback_index, camera in enumerate(cameras):
+        if not isinstance(camera, dict):
+            continue
+        try:
+            cameras_by_index[int(camera.get("index", fallback_index))] = camera
+        except (TypeError, ValueError):
+            continue
+
+    return cameras_by_index
+
+MAX_CAMERA_GRID_FRAMES = 6000
+
+@app.get("/matches/{match_id}/traj2d/camera-grid")
+def get_traj_2d_camera_grid(
+    match_id: int,
+    start_frame: int,
+    end_frame: int,
+    db: Session = Depends(get_db),
+):
+    """Classify every camera at every frame in a range as ok / bad / no_data.
+
+    Powers the per-rally, per-camera quality grid: one row per camera, one
+    column per frame, so a user can see at a glance which view is missing
+    or disagreeing with the rest.
+    """
+    match = db.get(Match, match_id)
+    if match is None:
+        raise HTTPException(status_code=404, detail="match not found")
+    if end_frame < start_frame:
+        raise HTTPException(
+            status_code=400,
+            detail="end_frame must be greater than or equal to start_frame",
+        )
+    if end_frame - start_frame > MAX_CAMERA_GRID_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"range too large (max {MAX_CAMERA_GRID_FRAMES} frames)",
+        )
+
+    cameras_by_index = cameras_by_index_for_match(match)
+
+    rows = (
+        db.query(BallPosition2D)
+        .filter(
+            BallPosition2D.match_id == match_id,
+            BallPosition2D.frame >= start_frame,
+            BallPosition2D.frame <= end_frame,
+            BallPosition2D.visibility > 0,
+        )
+        .order_by(BallPosition2D.frame, BallPosition2D.camera_index)
+        .all()
+    )
+
+    observations_by_frame: dict[int, list[dict]] = {}
+    for row in rows:
+        if row.camera_index not in cameras_by_index:
+            continue
+        observations_by_frame.setdefault(row.frame, []).append(
+            {"camera_index": row.camera_index, "x": row.x, "y": row.y}
+        )
+
+    return scan_2d_camera_grid(
+        cameras_by_index,
+        observations_by_frame,
+        start_frame,
+        end_frame,
+    )
 
 
 def trajectory_point_dict(

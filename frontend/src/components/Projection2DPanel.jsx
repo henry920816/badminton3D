@@ -502,6 +502,7 @@ export default function Projection2DPanel() {
           {[
             ['timeline', 'TIMELINE'],
             ['projection2d', '2D'],
+            ['quality2d', '品質檢查'],
           ].map(([id, label]) => (
             <button
               key={id}

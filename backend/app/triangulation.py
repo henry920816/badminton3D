@@ -1,4 +1,5 @@
 import math
+from itertools import combinations
 from typing import Any
 
 import numpy as np
@@ -700,3 +701,182 @@ def triangulate_observations(
             )
         ],
     }
+
+
+def pairwise_triangulation_diagnostics(
+    cameras_by_index: dict[int, dict],
+    observations: list[dict],
+) -> dict:
+    """Compare every two-camera reconstruction to identify an outlier view.
+
+    A camera's score is the median distance between points reconstructed by
+    pairs containing that camera and every other valid pair reconstruction.
+    The median keeps one bad pair from making each otherwise-good camera look
+    faulty.
+    """
+    observations_by_camera: dict[int, dict] = {}
+
+    for observation in observations:
+        camera_index = int(observation.get("camera_index"))
+        observations_by_camera[camera_index] = {
+            "camera_index": camera_index,
+            "x": _finite_float(observation.get("x"), "2D x"),
+            "y": _finite_float(observation.get("y"), "2D y"),
+        }
+
+    if len(observations_by_camera) < 3:
+        raise ValueError("至少需要三個有效視角才能比較視角一致性")
+
+    pairs = []
+    skipped_pairs = []
+
+    for first, second in combinations(sorted(observations_by_camera), 2):
+        try:
+            result = triangulate_observations(
+                cameras_by_index,
+                [observations_by_camera[first], observations_by_camera[second]],
+            )
+        except ValueError as exc:
+            skipped_pairs.append({
+                "camera_indices": [first, second],
+                "reason": str(exc),
+            })
+            continue
+
+        pairs.append({
+            "camera_indices": [first, second],
+            "point": result["point"],
+            "rms_error": result["rms_error"],
+            "max_error": result["max_error"],
+            "condition_ratio": result["condition_ratio"],
+        })
+
+    if len(pairs) < 2:
+        raise ValueError("有效的兩視角重建組合不足，無法比較 3D 位置差")
+
+    points = np.asarray(
+        [[item["point"][axis] for axis in ("x", "y", "z")] for item in pairs],
+        dtype=np.float64,
+    )
+    consensus = np.median(points, axis=0)
+    pair_distances = np.linalg.norm(points - consensus, axis=1)
+
+    for pair, distance in zip(pairs, pair_distances):
+        pair["distance_to_consensus"] = float(distance)
+
+    camera_scores = []
+    for camera_index in sorted(observations_by_camera):
+        distances = [
+            pair["distance_to_consensus"]
+            for pair in pairs
+            if camera_index in pair["camera_indices"]
+        ]
+        if not distances:
+            continue
+        camera_scores.append({
+            "camera_index": camera_index,
+            "pair_count": len(distances),
+            "median_3d_difference": float(np.median(distances)),
+            "mean_3d_difference": float(np.mean(distances)),
+        })
+
+    camera_scores.sort(
+        key=lambda item: item["median_3d_difference"],
+        reverse=True,
+    )
+
+    return {
+        "pair_reconstructions": pairs,
+        "camera_scores": camera_scores,
+        "consensus_point": {
+            "x": float(consensus[0]),
+            "y": float(consensus[1]),
+            "z": float(consensus[2]),
+        },
+        "suspected_camera_index": (
+            camera_scores[0]["camera_index"] if camera_scores else None
+        ),
+        "skipped_pairs": skipped_pairs,
+    }
+
+
+DEFAULT_BAD_CAMERA_THRESHOLD_METERS = 0.3
+MIN_AVAILABLE_CAMERAS = 3
+
+
+def scan_2d_camera_grid(
+    cameras_by_index: dict[int, dict],
+    observations_by_frame: dict[int, list[dict]],
+    start_frame: int,
+    end_frame: int,
+    bad_threshold_meters: float = DEFAULT_BAD_CAMERA_THRESHOLD_METERS,
+    min_available_cameras: int = MIN_AVAILABLE_CAMERAS,
+) -> list[dict]:
+    """Classify every camera at every frame in a range as ok / bad / no_data.
+
+    A camera is ``no_data`` at a frame when it has no 2D observation there
+    (occluded or never annotated). Otherwise, when at least three cameras
+    have observations that frame, each camera's two-view reconstructions are
+    compared via ``pairwise_triangulation_diagnostics``; a camera whose
+    median disagreement with the others exceeds ``bad_threshold_meters`` is
+    ``bad``. A camera with an observation that can't be cross-checked
+    (fewer than three visible views, or a degenerate camera pair) defaults
+    to ``ok`` - there's no evidence against it.
+
+    Each frame also reports ``ok_camera_count`` (how many cameras are ``ok``
+    that frame) and ``low_coverage`` (whether that count is below
+    ``min_available_cameras``), so callers don't need to re-derive coverage
+    from the per-camera statuses themselves.
+    """
+    camera_indices = sorted(cameras_by_index)
+    results = []
+
+    for frame in range(start_frame, end_frame + 1):
+        observations = observations_by_frame.get(frame, [])
+        observed_indices = {
+            observation["camera_index"] for observation in observations
+        }
+
+        camera_score_by_index: dict[int, float] = {}
+
+        if len(observations) >= 3:
+            try:
+                diagnostics = pairwise_triangulation_diagnostics(
+                    cameras_by_index,
+                    observations,
+                )
+                camera_score_by_index = {
+                    item["camera_index"]: item["median_3d_difference"]
+                    for item in diagnostics["camera_scores"]
+                }
+            except ValueError:
+                pass
+
+        cameras_status = []
+        ok_camera_count = 0
+
+        for camera_index in camera_indices:
+            if camera_index not in observed_indices:
+                status = "no_data"
+            elif (
+                camera_score_by_index.get(camera_index, 0.0)
+                > bad_threshold_meters
+            ):
+                status = "bad"
+            else:
+                status = "ok"
+                ok_camera_count += 1
+
+            cameras_status.append({
+                "camera_index": camera_index,
+                "status": status,
+            })
+
+        results.append({
+            "frame": frame,
+            "cameras": cameras_status,
+            "ok_camera_count": ok_camera_count,
+            "low_coverage": ok_camera_count < min_available_cameras,
+        })
+
+    return results
