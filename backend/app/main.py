@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .db import engine, get_db
 from .dataset_upload import router as dataset_upload_router
+from .auto_repair import router as auto_repair_router
 from .models import (
     Anomaly,
     BallPosition2D,
@@ -43,6 +44,10 @@ app = FastAPI(
 
 app.include_router(
     dataset_upload_router
+)
+
+app.include_router(
+    auto_repair_router
 )
 
 
@@ -350,69 +355,142 @@ def get_traj_2d(
     ]
 
 
-def cameras_by_index_for_match(match: Match) -> dict[int, dict]:
-    cameras = match.cameras if isinstance(match.cameras, list) else []
-    cameras_by_index: dict[int, dict] = {}
+def cameras_by_index_for_match(
+    match: Match,
+) -> dict[int, dict]:
+    cameras = (
+        match.cameras
+        if isinstance(
+            match.cameras,
+            list,
+        )
+        else []
+    )
 
-    for fallback_index, camera in enumerate(cameras):
-        if not isinstance(camera, dict):
+    cameras_by_index = {}
+
+    for fallback_index, camera in enumerate(
+        cameras
+    ):
+        if not isinstance(
+            camera,
+            dict,
+        ):
             continue
+
         try:
-            cameras_by_index[int(camera.get("index", fallback_index))] = camera
-        except (TypeError, ValueError):
+            camera_index = int(
+                camera.get(
+                    "index",
+                    fallback_index,
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
             continue
+
+        cameras_by_index[
+            camera_index
+        ] = camera
 
     return cameras_by_index
 
+
 MAX_CAMERA_GRID_FRAMES = 6000
 
-@app.get("/matches/{match_id}/traj2d/camera-grid")
+
+@app.get(
+    "/matches/{match_id}/traj2d/camera-grid"
+)
 def get_traj_2d_camera_grid(
     match_id: int,
     start_frame: int,
     end_frame: int,
     db: Session = Depends(get_db),
 ):
-    """Classify every camera at every frame in a range as ok / bad / no_data.
+    match = db.get(
+        Match,
+        match_id,
+    )
 
-    Powers the per-rally, per-camera quality grid: one row per camera, one
-    column per frame, so a user can see at a glance which view is missing
-    or disagreeing with the rest.
-    """
-    match = db.get(Match, match_id)
     if match is None:
-        raise HTTPException(status_code=404, detail="match not found")
+        raise HTTPException(
+            status_code=404,
+            detail="match not found",
+        )
+
     if end_frame < start_frame:
         raise HTTPException(
             status_code=400,
-            detail="end_frame must be greater than or equal to start_frame",
-        )
-    if end_frame - start_frame > MAX_CAMERA_GRID_FRAMES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"range too large (max {MAX_CAMERA_GRID_FRAMES} frames)",
+            detail=(
+                "end_frame must be greater "
+                "than or equal to start_frame"
+            ),
         )
 
-    cameras_by_index = cameras_by_index_for_match(match)
+    if (
+        end_frame
+        - start_frame
+        > MAX_CAMERA_GRID_FRAMES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"range too large "
+                f"(max {MAX_CAMERA_GRID_FRAMES} frames)"
+            ),
+        )
+
+    cameras_by_index = (
+        cameras_by_index_for_match(
+            match
+        )
+    )
 
     rows = (
         db.query(BallPosition2D)
         .filter(
-            BallPosition2D.match_id == match_id,
-            BallPosition2D.frame >= start_frame,
-            BallPosition2D.frame <= end_frame,
-            BallPosition2D.visibility > 0,
+            BallPosition2D.match_id
+            == match_id,
+            BallPosition2D.frame
+            >= start_frame,
+            BallPosition2D.frame
+            <= end_frame,
+            BallPosition2D.visibility
+            > 0,
         )
-        .order_by(BallPosition2D.frame, BallPosition2D.camera_index)
+        .order_by(
+            BallPosition2D.frame,
+            BallPosition2D.camera_index,
+        )
         .all()
     )
 
-    observations_by_frame: dict[int, list[dict]] = {}
+    observations_by_frame = {}
+
     for row in rows:
-        if row.camera_index not in cameras_by_index:
+        if (
+            row.camera_index
+            not in cameras_by_index
+        ):
             continue
-        observations_by_frame.setdefault(row.frame, []).append(
-            {"camera_index": row.camera_index, "x": row.x, "y": row.y}
+
+        observations_by_frame.setdefault(
+            row.frame,
+            [],
+        ).append(
+            {
+                "camera_index":
+                    row.camera_index,
+
+                "x":
+                    row.x,
+
+                "y":
+                    row.y,
+            }
         )
 
     return scan_2d_camera_grid(
@@ -427,15 +505,26 @@ def trajectory_point_dict(
     point: BallTraj,
 ) -> dict:
     return {
-        "frame": point.frame,
-        "t_sec": point.t_sec,
-        "x": point.x,
-        "y": point.y,
-        "z": point.z,
-        "speed": point.speed,
-        "confidence": (
-            point.confidence
-        ),
+        "frame":
+            point.frame,
+
+        "t_sec":
+            point.t_sec,
+
+        "x":
+            point.x,
+
+        "y":
+            point.y,
+
+        "z":
+            point.z,
+
+        "speed":
+            point.speed,
+
+        "confidence":
+            point.confidence,
     }
 
 
@@ -476,6 +565,7 @@ def repair_traj_from_2d(
         )
         else []
     )
+
     cameras_by_index = {}
 
     for fallback_index, camera in enumerate(
@@ -508,9 +598,8 @@ def repair_traj_from_2d(
 
     observations = [
         observation.model_dump()
-        for observation in (
-            payload.observations
-        )
+        for observation
+        in payload.observations
     ]
 
     try:
@@ -536,6 +625,7 @@ def repair_traj_from_2d(
         )
         .first()
     )
+
     previous_point = (
         trajectory_point_dict(
             existing_point
@@ -543,8 +633,11 @@ def repair_traj_from_2d(
         if existing_point
         else None
     )
+
     repaired_point = {
-        "frame": payload.frame,
+        "frame":
+            payload.frame,
+
         "t_sec": (
             existing_point.t_sec
             if existing_point
@@ -556,26 +649,41 @@ def repair_traj_from_2d(
                 )
             )
         ),
-        "x": triangulation[
-            "point"
-        ]["x"],
-        "y": triangulation[
-            "point"
-        ]["y"],
-        "z": triangulation[
-            "point"
-        ]["z"],
+
+        "x":
+            triangulation[
+                "point"
+            ][
+                "x"
+            ],
+
+        "y":
+            triangulation[
+                "point"
+            ][
+                "y"
+            ],
+
+        "z":
+            triangulation[
+                "point"
+            ][
+                "z"
+            ],
+
         "speed": (
             existing_point.speed
             if existing_point
             else None
         ),
+
         "confidence": (
             existing_point.confidence
             if existing_point
             else 1.0
         ),
     }
+
     warnings = []
 
     if (
@@ -599,38 +707,54 @@ def repair_traj_from_2d(
         )
 
     result = {
-        "ok": True,
-        "confirmed": False,
-        "repair_id": None,
-        "frame": payload.frame,
-        "previous_point": (
-            previous_point
-        ),
-        "trajectory_point": (
-            repaired_point
-        ),
-        "observations": (
+        "ok":
+            True,
+
+        "confirmed":
+            False,
+
+        "repair_id":
+            None,
+
+        "frame":
+            payload.frame,
+
+        "previous_point":
+            previous_point,
+
+        "trajectory_point":
+            repaired_point,
+
+        "observations":
             triangulation[
                 "observations"
-            ]
-        ),
-        "reprojection": (
+            ],
+
+        "reprojection":
             triangulation[
                 "reprojection"
-            ]
-        ),
-        "rms_error": (
+            ],
+
+        "rms_error":
             triangulation[
                 "rms_error"
-            ]
-        ),
-        "max_error": (
+            ],
+
+        "max_error":
             triangulation[
                 "max_error"
-            ]
-        ),
-        "warnings": warnings,
-        "ball_2d_points": [],
+            ],
+
+        "condition_ratio":
+            triangulation[
+                "condition_ratio"
+            ],
+
+        "warnings":
+            warnings,
+
+        "ball_2d_points":
+            [],
     }
 
     if not payload.confirm:
@@ -642,35 +766,60 @@ def repair_traj_from_2d(
     try:
         if existing_point is None:
             existing_point = BallTraj(
-                match_id=match_id,
-                frame=payload.frame,
-                t_sec=(
+                match_id=
+                    match_id,
+
+                frame=
+                    payload.frame,
+
+                t_sec=
                     repaired_point[
                         "t_sec"
-                    ]
-                ),
-                x=(
-                    repaired_point["x"]
-                ),
-                y=(
-                    repaired_point["y"]
-                ),
-                z=(
-                    repaired_point["z"]
-                ),
-                speed=None,
-                confidence=1.0,
+                    ],
+
+                x=
+                    repaired_point[
+                        "x"
+                    ],
+
+                y=
+                    repaired_point[
+                        "y"
+                    ],
+
+                z=
+                    repaired_point[
+                        "z"
+                    ],
+
+                speed=
+                    None,
+
+                confidence=
+                    1.0,
             )
-            db.add(existing_point)
+
+            db.add(
+                existing_point
+            )
+
         else:
             existing_point.x = (
-                repaired_point["x"]
+                repaired_point[
+                    "x"
+                ]
             )
+
             existing_point.y = (
-                repaired_point["y"]
+                repaired_point[
+                    "y"
+                ]
             )
+
             existing_point.z = (
-                repaired_point["z"]
+                repaired_point[
+                    "z"
+                ]
             )
 
         for observation in (
@@ -685,10 +834,12 @@ def repair_traj_from_2d(
                 .filter(
                     BallPosition2D.match_id
                     == match_id,
+
                     BallPosition2D.camera_index
                     == observation[
                         "camera_index"
                     ],
+
                     BallPosition2D.frame
                     == payload.frame,
                 )
@@ -697,24 +848,27 @@ def repair_traj_from_2d(
 
             original_2d.append(
                 {
-                    "camera_index": (
+                    "camera_index":
                         observation[
                             "camera_index"
-                        ]
-                    ),
-                    "existed": (
-                        row is not None
-                    ),
+                        ],
+
+                    "existed":
+                        row
+                        is not None,
+
                     "visibility": (
                         row.visibility
                         if row
                         else None
                     ),
+
                     "x": (
                         row.x
                         if row
                         else None
                     ),
+
                     "y": (
                         row.y
                         if row
@@ -724,37 +878,75 @@ def repair_traj_from_2d(
             )
 
             if row is None:
-                row = BallPosition2D(
-                    match_id=match_id,
-                    camera_index=(
-                        observation[
-                            "camera_index"
-                        ]
-                    ),
-                    frame=payload.frame,
-                    visibility=1,
-                    x=observation["x"],
-                    y=observation["y"],
+                row = (
+                    BallPosition2D(
+                        match_id=
+                            match_id,
+
+                        camera_index=
+                            observation[
+                                "camera_index"
+                            ],
+
+                        frame=
+                            payload.frame,
+
+                        visibility=
+                            1,
+
+                        x=
+                            observation[
+                                "x"
+                            ],
+
+                        y=
+                            observation[
+                                "y"
+                            ],
+                    )
                 )
-                db.add(row)
+
+                db.add(
+                    row
+                )
+
             else:
                 row.visibility = 1
-                row.x = observation["x"]
-                row.y = observation["y"]
+
+                row.x = (
+                    observation[
+                        "x"
+                    ]
+                )
+
+                row.y = (
+                    observation[
+                        "y"
+                    ]
+                )
 
             repaired_2d.append(
                 {
-                    "camera_index": (
+                    "camera_index":
                         observation[
                             "camera_index"
-                        ]
-                    ),
-                    "frame": (
-                        payload.frame
-                    ),
-                    "visibility": 1,
-                    "x": observation["x"],
-                    "y": observation["y"],
+                        ],
+
+                    "frame":
+                        payload.frame,
+
+                    "visibility":
+                        1,
+
+                    "x":
+                        observation[
+                            "x"
+                        ],
+
+                    "y":
+                        observation[
+                            "y"
+                        ],
                 }
             )
 
@@ -764,12 +956,12 @@ def repair_traj_from_2d(
                     "camera_index"
                 ]
             )
-            for observation in (
-                triangulation[
-                    "observations"
-                ]
-            )
+            for observation
+            in triangulation[
+                "observations"
+            ]
         }
+
         next_cameras = []
 
         for fallback_index, camera in enumerate(
@@ -782,6 +974,7 @@ def repair_traj_from_2d(
                 next_cameras.append(
                     camera
                 )
+
                 continue
 
             try:
@@ -802,6 +995,7 @@ def repair_traj_from_2d(
             next_cameras.append(
                 {
                     **camera,
+
                     "has_ball_2d": (
                         True
                         if camera_index
@@ -814,57 +1008,75 @@ def repair_traj_from_2d(
                 }
             )
 
-        match.cameras = next_cameras
+        match.cameras = (
+            next_cameras
+        )
 
         history = (
             TrajectoryRepairHistory(
-                match_id=match_id,
-                frame=payload.frame,
-                source="manual_2d",
-                original_point=(
-                    previous_point
-                ),
-                repaired_point=(
-                    repaired_point
-                ),
-                original_2d=(
-                    original_2d
-                ),
-                repaired_2d=(
-                    repaired_2d
-                ),
+                match_id=
+                    match_id,
+
+                frame=
+                    payload.frame,
+
+                source=
+                    "manual_2d",
+
+                original_point=
+                    previous_point,
+
+                repaired_point=
+                    repaired_point,
+
+                original_2d=
+                    original_2d,
+
+                repaired_2d=
+                    repaired_2d,
+
                 reprojection={
-                    "rms_error": (
+                    "rms_error":
                         triangulation[
                             "rms_error"
-                        ]
-                    ),
-                    "max_error": (
+                        ],
+
+                    "max_error":
                         triangulation[
                             "max_error"
-                        ]
-                    ),
-                    "by_camera": (
+                        ],
+
+                    "by_camera":
                         triangulation[
                             "reprojection"
-                        ]
-                    ),
+                        ],
                 },
             )
         )
-        db.add(history)
+
+        db.add(
+            history
+        )
+
         db.flush()
+
         db.commit()
 
     except Exception:
         db.rollback()
         raise
 
-    result["confirmed"] = True
-    result["repair_id"] = history.id
-    result["ball_2d_points"] = (
-        repaired_2d
-    )
+    result[
+        "confirmed"
+    ] = True
+
+    result[
+        "repair_id"
+    ] = history.id
+
+    result[
+        "ball_2d_points"
+    ] = repaired_2d
 
     return result
 
@@ -895,7 +1107,10 @@ def undo_traj_2d_repair(
             detail="找不到指定的 2D 修復紀錄",
         )
 
-    if history.reverted_at is not None:
+    if (
+        history.reverted_at
+        is not None
+    ):
         raise HTTPException(
             status_code=409,
             detail="此修復已經復原",
@@ -917,11 +1132,13 @@ def undo_traj_2d_repair(
         .filter(
             BallTraj.match_id
             == match_id,
+
             BallTraj.frame
             == history.frame,
         )
         .first()
     )
+
     repaired_point = (
         history.repaired_point
         or {}
@@ -966,37 +1183,56 @@ def undo_traj_2d_repair(
     restored_2d = []
 
     try:
-        if history.original_point is None:
+        if (
+            history.original_point
+            is None
+        ):
             db.delete(
                 current_point
             )
+
         else:
             original = (
                 history.original_point
             )
+
             current_point.t_sec = (
-                original["t_sec"]
+                original[
+                    "t_sec"
+                ]
             )
+
             current_point.x = (
-                original["x"]
+                original[
+                    "x"
+                ]
             )
+
             current_point.y = (
-                original["y"]
+                original[
+                    "y"
+                ]
             )
+
             current_point.z = (
-                original["z"]
+                original[
+                    "z"
+                ]
             )
+
             current_point.speed = (
                 original.get(
                     "speed"
                 )
             )
+
             current_point.confidence = (
                 original.get(
                     "confidence",
                     1.0,
                 )
             )
+
             restored_point = (
                 trajectory_point_dict(
                     current_point
@@ -1012,6 +1248,7 @@ def undo_traj_2d_repair(
                     "camera_index"
                 ]
             )
+
             row = (
                 db.query(
                     BallPosition2D
@@ -1019,8 +1256,10 @@ def undo_traj_2d_repair(
                 .filter(
                     BallPosition2D.match_id
                     == match_id,
+
                     BallPosition2D.camera_index
                     == camera_index,
+
                     BallPosition2D.frame
                     == history.frame,
                 )
@@ -1030,69 +1269,105 @@ def undo_traj_2d_repair(
             if not original.get(
                 "existed"
             ):
-                if row is not None:
-                    db.delete(row)
+                if (
+                    row is not None
+                ):
+                    db.delete(
+                        row
+                    )
 
                 restored_2d.append(
                     {
-                        "camera_index": (
-                            camera_index
-                        ),
-                        "frame": (
-                            history.frame
-                        ),
-                        "deleted": True,
+                        "camera_index":
+                            camera_index,
+
+                        "frame":
+                            history.frame,
+
+                        "deleted":
+                            True,
                     }
                 )
+
                 continue
 
             if row is None:
-                row = BallPosition2D(
-                    match_id=match_id,
-                    camera_index=(
-                        camera_index
-                    ),
-                    frame=history.frame,
-                    visibility=int(
-                        original[
-                            "visibility"
-                        ]
-                    ),
-                    x=float(
-                        original["x"]
-                    ),
-                    y=float(
-                        original["y"]
-                    ),
+                row = (
+                    BallPosition2D(
+                        match_id=
+                            match_id,
+
+                        camera_index=
+                            camera_index,
+
+                        frame=
+                            history.frame,
+
+                        visibility=
+                            int(
+                                original[
+                                    "visibility"
+                                ]
+                            ),
+
+                        x=
+                            float(
+                                original[
+                                    "x"
+                                ]
+                            ),
+
+                        y=
+                            float(
+                                original[
+                                    "y"
+                                ]
+                            ),
+                    )
                 )
-                db.add(row)
+
+                db.add(
+                    row
+                )
+
             else:
                 row.visibility = int(
                     original[
                         "visibility"
                     ]
                 )
+
                 row.x = float(
-                    original["x"]
+                    original[
+                        "x"
+                    ]
                 )
+
                 row.y = float(
-                    original["y"]
+                    original[
+                        "y"
+                    ]
                 )
 
             restored_2d.append(
                 {
-                    "camera_index": (
-                        camera_index
-                    ),
-                    "frame": (
-                        history.frame
-                    ),
-                    "visibility": (
-                        row.visibility
-                    ),
-                    "x": row.x,
-                    "y": row.y,
-                    "deleted": False,
+                    "camera_index":
+                        camera_index,
+
+                    "frame":
+                        history.frame,
+
+                    "visibility":
+                        row.visibility,
+
+                    "x":
+                        row.x,
+
+                    "y":
+                        row.y,
+
+                    "deleted":
+                        False,
                 }
             )
 
@@ -1104,8 +1379,10 @@ def undo_traj_2d_repair(
                     "camera_index"
                 ]
             )
-            for item in restored_2d
+            for item
+            in restored_2d
         }
+
         camera_2d_status = {
             camera_index: (
                 db.query(
@@ -1114,16 +1391,17 @@ def undo_traj_2d_repair(
                 .filter(
                     BallPosition2D.match_id
                     == match_id,
+
                     BallPosition2D.camera_index
                     == camera_index,
                 )
                 .count()
                 > 0
             )
-            for camera_index in (
-                restored_camera_indices
-            )
+            for camera_index
+            in restored_camera_indices
         }
+
         cameras = (
             match.cameras
             if isinstance(
@@ -1132,6 +1410,7 @@ def undo_traj_2d_repair(
             )
             else []
         )
+
         next_cameras = []
 
         for fallback_index, camera in enumerate(
@@ -1144,6 +1423,7 @@ def undo_traj_2d_repair(
                 next_cameras.append(
                     camera
                 )
+
                 continue
 
             try:
@@ -1164,6 +1444,7 @@ def undo_traj_2d_repair(
             next_cameras.append(
                 {
                     **camera,
+
                     "has_ball_2d": (
                         camera_2d_status.get(
                             camera_index,
@@ -1176,22 +1457,27 @@ def undo_traj_2d_repair(
                 }
             )
 
-        match.cameras = next_cameras
+        match.cameras = (
+            next_cameras
+        )
 
         for item in restored_2d:
             item[
                 "has_ball_2d"
-            ] = camera_2d_status[
-                int(
-                    item[
-                        "camera_index"
-                    ]
-                )
-            ]
+            ] = (
+                camera_2d_status[
+                    int(
+                        item[
+                            "camera_index"
+                        ]
+                    )
+                ]
+            )
 
         history.reverted_at = (
             datetime.utcnow()
         )
+
         db.commit()
 
     except Exception:
@@ -1199,22 +1485,31 @@ def undo_traj_2d_repair(
         raise
 
     return {
-        "ok": True,
-        "repair_id": history.id,
-        "frame": history.frame,
-        "trajectory_point": (
-            restored_point
-        ),
+        "ok":
+            True,
+
+        "repair_id":
+            history.id,
+
+        "frame":
+            history.frame,
+
+        "trajectory_point":
+            restored_point,
+
         "trajectory_deleted": (
-            restored_point is None
+            restored_point
+            is None
         ),
-        "ball_2d_points": (
-            restored_2d
-        ),
+
+        "ball_2d_points":
+            restored_2d,
     }
 
 
-@app.patch("/hits/{hit_id}")
+@app.patch(
+    "/hits/{hit_id}"
+)
 def patch_hit(
     hit_id: int,
     payload: HitPatch,
@@ -1231,11 +1526,15 @@ def patch_hit(
             detail="hit not found",
         )
 
-    update_data = payload.model_dump(
-        exclude_unset=True
+    update_data = (
+        payload.model_dump(
+            exclude_unset=True
+        )
     )
 
-    for key, value in update_data.items():
+    for key, value in (
+        update_data.items()
+    ):
         setattr(
             hit,
             key,
@@ -1243,21 +1542,45 @@ def patch_hit(
         )
 
     db.commit()
-    db.refresh(hit)
+
+    db.refresh(
+        hit
+    )
 
     return {
-        "ok": True,
+        "ok":
+            True,
+
         "hit": {
-            "id": hit.id,
-            "rally_id": hit.rally_id,
-            "ball_round": hit.ball_round,
-            "player": hit.player,
-            "hit_frame": hit.hit_frame,
-            "new_hit_frame": hit.new_hit_frame,
-            "shot_type": hit.shot_type,
-            "hand": hit.hand,
-            "note": hit.note,
-            "confidence": hit.confidence,
+            "id":
+                hit.id,
+
+            "rally_id":
+                hit.rally_id,
+
+            "ball_round":
+                hit.ball_round,
+
+            "player":
+                hit.player,
+
+            "hit_frame":
+                hit.hit_frame,
+
+            "new_hit_frame":
+                hit.new_hit_frame,
+
+            "shot_type":
+                hit.shot_type,
+
+            "hand":
+                hit.hand,
+
+            "note":
+                hit.note,
+
+            "confidence":
+                hit.confidence,
         },
     }
 
@@ -1281,11 +1604,15 @@ def patch_anomaly(
             detail="anomaly not found",
         )
 
-    update_data = payload.model_dump(
-        exclude_unset=True
+    update_data = (
+        payload.model_dump(
+            exclude_unset=True
+        )
     )
 
-    for key, value in update_data.items():
+    for key, value in (
+        update_data.items()
+    ):
         setattr(
             anomaly,
             key,
@@ -1293,18 +1620,36 @@ def patch_anomaly(
         )
 
     db.commit()
-    db.refresh(anomaly)
+
+    db.refresh(
+        anomaly
+    )
 
     return {
-        "ok": True,
+        "ok":
+            True,
+
         "anomaly": {
-            "id": anomaly.id,
-            "start_frame": anomaly.start_frame,
-            "end_frame": anomaly.end_frame,
-            "kind": anomaly.kind,
-            "severity": anomaly.severity,
-            "status": anomaly.status,
-            "comment": anomaly.comment,
+            "id":
+                anomaly.id,
+
+            "start_frame":
+                anomaly.start_frame,
+
+            "end_frame":
+                anomaly.end_frame,
+
+            "kind":
+                anomaly.kind,
+
+            "severity":
+                anomaly.severity,
+
+            "status":
+                anomaly.status,
+
+            "comment":
+                anomaly.comment,
         },
     }
 
@@ -1338,7 +1683,10 @@ def repair_traj(
         payload.end_frame,
     )
 
-    if start_frame == end_frame:
+    if (
+        start_frame
+        == end_frame
+    ):
         return {
             "ok": True,
             "count": 0,
@@ -1347,8 +1695,11 @@ def repair_traj(
     start_point = (
         db.query(BallTraj)
         .filter(
-            BallTraj.match_id == match_id,
-            BallTraj.frame == start_frame,
+            BallTraj.match_id
+            == match_id,
+
+            BallTraj.frame
+            == start_frame,
         )
         .first()
     )
@@ -1356,8 +1707,11 @@ def repair_traj(
     end_point = (
         db.query(BallTraj)
         .filter(
-            BallTraj.match_id == match_id,
-            BallTraj.frame == end_frame,
+            BallTraj.match_id
+            == match_id,
+
+            BallTraj.frame
+            == end_frame,
         )
         .first()
     )
@@ -1377,9 +1731,14 @@ def repair_traj(
     points = (
         db.query(BallTraj)
         .filter(
-            BallTraj.match_id == match_id,
-            BallTraj.frame > start_frame,
-            BallTraj.frame < end_frame,
+            BallTraj.match_id
+            == match_id,
+
+            BallTraj.frame
+            > start_frame,
+
+            BallTraj.frame
+            < end_frame,
         )
         .all()
     )
@@ -1392,8 +1751,11 @@ def repair_traj(
     previous_point = (
         db.query(BallTraj)
         .filter(
-            BallTraj.match_id == match_id,
-            BallTraj.frame < start_frame,
+            BallTraj.match_id
+            == match_id,
+
+            BallTraj.frame
+            < start_frame,
         )
         .order_by(
             BallTraj.frame.desc()
@@ -1404,8 +1766,11 @@ def repair_traj(
     next_point = (
         db.query(BallTraj)
         .filter(
-            BallTraj.match_id == match_id,
-            BallTraj.frame > end_frame,
+            BallTraj.match_id
+            == match_id,
+
+            BallTraj.frame
+            > end_frame,
         )
         .order_by(
             BallTraj.frame.asc()
@@ -1428,7 +1793,10 @@ def repair_traj(
         - start_point.z
     )
 
-    if previous_point is not None:
+    if (
+        previous_point
+        is not None
+    ):
         time_difference = (
             end_frame
             - previous_point.frame
@@ -1476,7 +1844,10 @@ def repair_traj(
         - start_point.z
     )
 
-    if next_point is not None:
+    if (
+        next_point
+        is not None
+    ):
         time_difference = (
             next_point.frame
             - start_frame
@@ -1555,24 +1926,36 @@ def repair_traj(
         )
 
         point.x = (
-            h00 * start_point.x
-            + h10 * start_velocity_x
-            + h01 * end_point.x
-            + h11 * end_velocity_x
+            h00
+            * start_point.x
+            + h10
+            * start_velocity_x
+            + h01
+            * end_point.x
+            + h11
+            * end_velocity_x
         )
 
         point.y = (
-            h00 * start_point.y
-            + h10 * start_velocity_y
-            + h01 * end_point.y
-            + h11 * end_velocity_y
+            h00
+            * start_point.y
+            + h10
+            * start_velocity_y
+            + h01
+            * end_point.y
+            + h11
+            * end_velocity_y
         )
 
         point.z = (
-            h00 * start_point.z
-            + h10 * start_velocity_z
-            + h01 * end_point.z
-            + h11 * end_velocity_z
+            h00
+            * start_point.z
+            + h10
+            * start_velocity_z
+            + h01
+            * end_point.z
+            + h11
+            * end_velocity_z
         )
 
         count += 1
@@ -1580,12 +1963,17 @@ def repair_traj(
     db.commit()
 
     return {
-        "ok": True,
-        "count": count,
+        "ok":
+            True,
+
+        "count":
+            count,
     }
 
 
-@app.get("/export/csv")
+@app.get(
+    "/export/csv"
+)
 def export_csv(
     match_id: int,
     db: Session = Depends(get_db),
@@ -1605,10 +1993,12 @@ def export_csv(
         db.query(Hit)
         .join(
             Rally,
-            Hit.rally_id == Rally.id,
+            Hit.rally_id
+            == Rally.id,
         )
         .filter(
-            Hit.match_id == match_id
+            Hit.match_id
+            == match_id
         )
         .order_by(
             Hit.rally_id,
@@ -1617,8 +2007,13 @@ def export_csv(
         .all()
     )
 
-    output = StringIO()
-    writer = csv.writer(output)
+    output = (
+        StringIO()
+    )
+
+    writer = csv.writer(
+        output
+    )
 
     writer.writerow(
         [
@@ -1639,27 +2034,45 @@ def export_csv(
         writer.writerow(
             [
                 hit.id,
+
                 hit.rally_id,
+
                 hit.ball_round,
+
                 hit.player,
+
                 hit.hit_frame,
+
                 (
                     hit.new_hit_frame
-                    if hit.new_hit_frame is not None
+                    if (
+                        hit.new_hit_frame
+                        is not None
+                    )
                     else ""
                 ),
+
                 hit.shot_type,
+
                 hit.hand,
+
                 hit.note,
+
                 f"{hit.confidence:.3f}",
             ]
         )
 
-    csv_text = output.getvalue()
+    csv_text = (
+        output.getvalue()
+    )
 
     return Response(
-        content=csv_text,
-        media_type="text/csv",
+        content=
+            csv_text,
+
+        media_type=
+            "text/csv",
+
         headers={
             "Content-Disposition": (
                 "attachment; "
