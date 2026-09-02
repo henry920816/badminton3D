@@ -1654,6 +1654,15 @@ def rally_data_group_label(
     return key
 
 
+def natural_sort_key(
+    text: str,
+) -> list:
+    return [
+        int(chunk) if chunk.isdigit() else chunk
+        for chunk in re.split(r"(\d+)", str(text).lower())
+    ]
+
+
 def split_rally_data_records(
     manifest: dict,
 ) -> tuple[list[dict], list[dict]]:
@@ -1662,7 +1671,7 @@ def split_rally_data_records(
         "rally-data",
     )
 
-    rallies = []
+    rallies_by_group: dict[str, list[dict]] = {}
     shots = []
 
     for record in records:
@@ -1671,10 +1680,24 @@ def split_rally_data_records(
         ).lower()
 
         if name == "rallyseg.csv":
-            rallies.append(record)
+            rallies_by_group.setdefault(
+                rally_data_group_key(record),
+                [],
+            ).append(record)
 
         elif name == "shot_annotated.csv":
             shots.append(record)
+
+    # Set 資料夾的實際上傳順序（browser 目錄列舉順序）不可靠，
+    # 依資料夾名稱自然排序，確保 Rally 編號依照 Set 順序遞增。
+    rallies = [
+        record
+        for key in sorted(
+            rallies_by_group,
+            key=natural_sort_key,
+        )
+        for record in rallies_by_group[key]
+    ]
 
     return rallies, shots
 
@@ -1732,16 +1755,7 @@ def inspect_rally_data(
 
     ordered_groups = sorted(
         grouped.items(),
-        key=lambda pair: min(
-            [
-                int(record.get("order", 0))
-                for record in [
-                    *pair[1]["rallies"],
-                    *pair[1]["shots"],
-                ]
-            ]
-            or [0]
-        ),
+        key=lambda pair: natural_sort_key(pair[0]),
     )
 
     total_rally_rows = 0
