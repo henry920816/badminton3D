@@ -22,7 +22,8 @@ import {
 } from '../api.js'
 
 
-const BALL_2D_PRELOAD_RADIUS_FRAMES = 300
+// 後端 get_traj2d 的 end 預設值，代表「這台相機全部」
+const ALL_FRAMES = 999999999
 
 
 function resolveVideoUrl(url) {
@@ -687,12 +688,12 @@ export default function VideoPanel() {
     state => state.removeBall2DPoints
   )
 
-  const markBall2DRangeLoaded = useAppStore(
-    state => state.markBall2DRangeLoaded
+  const markBall2DCameraLoaded = useAppStore(
+    state => state.markBall2DCameraLoaded
   )
 
-  const hasBall2DRangeLoaded = useAppStore(
-    state => state.hasBall2DRangeLoaded
+  const hasBall2DCameraLoaded = useAppStore(
+    state => state.hasBall2DCameraLoaded
   )
 
   const fps = (
@@ -1175,64 +1176,44 @@ export default function VideoPanel() {
       const cameraIndex = Number(
         activeCamera.index,
       )
-      const durationFrame = Math.max(
-        0,
-        Math.round(
-          (durationSec || 0)
-          * (fps || 0),
-        ),
-      )
-      const start = Math.max(
-        0,
-        currentFrame
-        - BALL_2D_PRELOAD_RADIUS_FRAMES,
-      )
-      const end = (
-        durationFrame > 0
-          ? Math.min(
-              durationFrame,
-              currentFrame
-              + BALL_2D_PRELOAD_RADIUS_FRAMES,
-            )
-          : (
-              currentFrame
-              + BALL_2D_PRELOAD_RADIUS_FRAMES
-            )
-      )
 
       if (
-        hasBall2DRangeLoaded(
+        hasBall2DCameraLoaded(
           cameraIndex,
-          currentFrame,
-          currentFrame,
         )
       ) {
         return
       }
 
-      const key = (
-        `${matchId}-${cameraIndex}-${start}-${end}`
-      )
-
       if (
         ball2DInflightRef.current.has(
-          key,
+          cameraIndex,
         )
       ) {
         return
       }
 
       ball2DInflightRef.current.add(
-        key,
+        cameraIndex,
       )
 
+      /*
+       * 切換相機時把這台的 2D 球點一次抓完，
+       * 不隨播放位置做滑動視窗。
+       *
+       * 實測單台約 1.6MB / 0.9s，和開場就一次載完的
+       * 3D 軌跡（2.8MB）同一個量級。原本的 ±300 格視窗
+       * 是以 `${matchId}-${cameraIndex}-${start}-${end}` 去重，
+       * 但 start/end 隨播放每格都在變，去重從來沒生效過：
+       * 回應還沒回來就已經每一格再發一次請求。
+       */
       ;(async () => {
         try {
           const points = await api.getTraj2D(
             matchId,
             cameraIndex,
-            start,
-            end,
+            0,
+            ALL_FRAMES,
           )
 
           if (
@@ -1247,16 +1228,14 @@ export default function VideoPanel() {
             points,
           )
 
-          markBall2DRangeLoaded(
+          markBall2DCameraLoaded(
             cameraIndex,
-            start,
-            end,
           )
         } catch (error) {
           console.error(error)
         } finally {
           ball2DInflightRef.current.delete(
-            key,
+            cameraIndex,
           )
         }
       })()
@@ -1266,12 +1245,9 @@ export default function VideoPanel() {
       activeVideoIdentity,
       videoReadyIdentity,
       activeCamera,
-      currentFrame,
-      fps,
-      durationSec,
-      hasBall2DRangeLoaded,
+      hasBall2DCameraLoaded,
       upsertBall2DPoints,
-      markBall2DRangeLoaded,
+      markBall2DCameraLoaded,
     ],
   )
 

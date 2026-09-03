@@ -6,10 +6,18 @@ import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { useAppStore } from '../store.js'
 import { loadSmplForwardModel } from '../utils/smplForwardAssets.js'
+import { toThreeVector } from '../utils/ballPath.js'
+import { useRallyBallData } from '../utils/useRallyBallData.js'
 
 const SHUTTLECOCK_OBJ_URL = '/models/shuttlecock/shuttlecock.obj'
 const SHUTTLECOCK_MODEL_SCALE = 0.016
 const SHUTTLECOCK_HEAD_AXIS = new THREE.Vector3(0, 1, 0)
+
+// 估計球頭朝向時，鄰近取樣點超過這麼多格就不採用
+const BALL_DIRECTION_MAX_GAP = 3
+
+// 黃色追尾往回涵蓋多少秒
+const BALL_TRAIL_SECONDS = 0.8
 let shuttlecockObjectPromise = null
 
 async function loadShuttlecockObject() {
@@ -24,6 +32,8 @@ async function loadShuttlecockObject() {
         .setMaterials(materials)
         .loadAsync(SHUTTLECOCK_OBJ_URL)
 
+      // 軌跡點代表的是整支羽球的視覺中心，所以模型要以 bbox 中心對齊，
+      // 不是以軟木塞對齊
       const box = new THREE.Box3().setFromObject(object)
       const center = box.getCenter(new THREE.Vector3())
       object.traverse((child) => {
@@ -47,7 +57,7 @@ async function loadShuttlecockObject() {
 }
 
 function AnimatedTrajectory({ points }) {
-  const currentTime = useAppStore(s => s.currentTime)
+  const currentFrame = useAppStore(s => s.currentFrame)
   const fps = useAppStore(s => s.fps) || 60
   const selectedTrajFrames = useAppStore(s => s.selectedTrajFrames) || []
   const toggleTrajFrameSelection = useAppStore(s => s.toggleTrajFrameSelection)
@@ -69,70 +79,41 @@ function AnimatedTrajectory({ points }) {
     }
   }, [])
 
-  const { pathVectors, trailVectors, ballPos, ballQuat } = useMemo(() => {
-    if (!points || points.length < 2) {
-      return {
-        pathVectors: [],
-        trailVectors: [],
-        ballPos: null,
-        ballQuat: null,
-      }
-    }
+  // 全程路徑只跟軌跡資料有關，不隨播放位置重算
+  const pathVectors = useMemo(
+    () => (points || []).map(toThreeVector),
+    [points],
+  )
 
-    const pathVectors = []
-    const trailVectors = []
-    let ballPos = null
-    let ballDir = null
-    const trailSec = 0.8
-    const toThree = point => new THREE.Vector3(point.x, -point.y, -point.z)
+  const { ballPos, ballQuat } = useMemo(() => {
+    const missing = { ballPos: null, ballQuat: null }
 
-    for (let index = 0; index < points.length; index += 1) {
-      pathVectors.push(toThree(points[index]))
-    }
+    if (!points?.length) return missing
 
-    const exactFrame = currentTime * fps
-    const pointCount = points.length
-    let currentIndex = -1
+    // 軌跡資料、SMPL 姿態、影片都只存在於整數格上。
+    // 這裡若內插出小數格的位置，球就會領先人體與影片最多半格，
+    // 殺球時那是 60 公分，比任何模型對位的誤差都大。
+    const index = points.findIndex(point => point.frame === currentFrame)
 
-    for (let index = 0; index < pointCount; index += 1) {
-      if (points[index].frame <= exactFrame) currentIndex = index
-      else break
-    }
+    // 偵測中斷的那幾格本來就沒有球，寧可不畫也不要內插出一顆假的
+    if (index === -1) return missing
 
-    if (currentIndex !== -1) {
-      if (currentIndex === pointCount - 1) {
-        ballPos = toThree(points[currentIndex])
-      } else {
-        const first = points[currentIndex]
-        const second = points[currentIndex + 1]
-        const frameDifference = second.frame - first.frame
-        const ratio = frameDifference === 0
-          ? 0
-          : (exactFrame - first.frame) / frameDifference
-        const firstVector = toThree(first)
-        const secondVector = toThree(second)
-        ballPos = firstVector.clone().lerp(secondVector, ratio)
-        ballDir = secondVector.clone().sub(firstVector)
-      }
-    } else if (exactFrame < points[0].frame) {
-      ballPos = toThree(points[0])
-      ballDir = toThree(points[1]).sub(toThree(points[0]))
-    }
+    const ballPos = toThreeVector(points[index])
+    const previous = points[index - 1]
+    const next = points[index + 1]
 
-    if (currentIndex === pointCount - 1 && pointCount > 1) {
-      ballDir = toThree(points[pointCount - 1]).sub(toThree(points[pointCount - 2]))
-    }
+    // 中央差分比前向差分更接近當地切線；鄰點缺太多格就退回單側
+    const from = previous && currentFrame - previous.frame <= BALL_DIRECTION_MAX_GAP
+      ? toThreeVector(previous)
+      : ballPos
 
-    for (let index = 0; index < pointCount; index += 1) {
-      const pointTime = points[index].frame / fps
-      if (pointTime <= currentTime && pointTime >= currentTime - trailSec) {
-        trailVectors.push(toThree(points[index]))
-      }
-    }
+    const to = next && next.frame - currentFrame <= BALL_DIRECTION_MAX_GAP
+      ? toThreeVector(next)
+      : ballPos
 
-    if (ballPos) trailVectors.push(ballPos)
+    const ballDir = to.clone().sub(from)
 
-    const ballQuat = ballDir && ballDir.lengthSq() > 1e-8
+    const ballQuat = ballDir.lengthSq() > 1e-8
       ? new THREE.Quaternion().setFromUnitVectors(
           SHUTTLECOCK_HEAD_AXIS,
           ballDir.normalize(),
@@ -140,12 +121,23 @@ function AnimatedTrajectory({ points }) {
       : null
 
     return {
-      pathVectors,
-      trailVectors,
       ballPos,
       ballQuat,
     }
-  }, [points, currentTime, fps])
+  }, [points, currentFrame])
+
+  const trailVectors = useMemo(() => {
+    if (!points?.length) return []
+
+    const trailFrames = Math.round(BALL_TRAIL_SECONDS * fps)
+
+    return points
+      .filter(point => (
+        point.frame <= currentFrame
+        && point.frame >= currentFrame - trailFrames
+      ))
+      .map(toThreeVector)
+  }, [points, currentFrame, fps])
 
   if (pathVectors.length < 2) return null
 
@@ -227,14 +219,28 @@ function PlaybackController() {
 }
 
 function getLocalPoseFrame(playerReplay, frame) {
-  if (!playerReplay?.frames?.length) return null
+  const frames = playerReplay?.frames
+  if (!frames?.length) return null
+
   const localFrame = frame - (playerReplay.start_frame || 0)
-  let best = playerReplay.frames[0]
-  for (const item of playerReplay.frames) {
-    if ((item.local_frame ?? 0) <= localFrame) best = item
-    else break
+
+  // 取「不超過目前這格」的最後一個有效姿態
+  let best = null
+
+  for (const item of frames) {
+    if ((item.local_frame ?? 0) > localFrame) break
+    if (item.valid === false) continue
+    best = item
   }
-  return best
+
+  if (best) return best
+
+  // 還沒走到第一個有效姿態就先擺出它。
+  // 這有兩種情況：一是播到 rally 之間的空檔，此時 localFrame 是負的；
+  // 二是 rally 開頭本來就有一段 valid=false 的空資料（實測約 48 格、
+  // 也就是 1 秒）。兩種情況下人體都不該整個消失 —— 球的軌跡在這時候
+  // 已經切到下一個 rally 了，人也應該跟著出現。
+  return frames.find(item => item.valid !== false) || null
 }
 
 function sourceToThreePositions(source) {
@@ -254,7 +260,110 @@ const RACKET_OBJ_URL = '/models/racket/racket.obj'
 const RACKET_SCALE = 1
 const RACKET_PIVOT = new THREE.Vector3(0, 0, 0)
 const RACKET_OFFSET = new THREE.Vector3(0, 0, 0)
+
+// 拍頭沿 local -X 展開，拍面攤在 X-Z 平面上（Y 方向只有 0.014m 厚），
+// 所以拍面法線就是 local +Y
+const RACKET_FACE_NORMAL = new THREE.Vector3(0, 1, 0)
+
+// 拍面中心在 local 座標的位置，用來判斷這一拍是不是這位球員打的
+const RACKET_FACE_CENTER = new THREE.Vector3(-0.545, 0, 0)
+
+// 拍面離擊球點超過這個距離(公尺)就當作是對手那一拍，不套用
+const RACKET_AIM_MAX_DISTANCE = 0.75
+
+// 接觸只有一瞬間，硬轉一格會像跳格；前後各這麼多格做漸入漸出
+const RACKET_AIM_BLEND_FRAMES = 4
+
+// 每格都要算，共用暫存物件避免在 render loop 裡配置記憶體
+const racketAimScratch = {
+  position: new THREE.Vector3(),
+  quaternion: new THREE.Quaternion(),
+  scale: new THREE.Vector3(),
+  faceCenter: new THREE.Vector3(),
+  faceNormal: new THREE.Vector3(),
+  target: new THREE.Vector3(),
+  correction: new THREE.Quaternion(),
+  blended: new THREE.Quaternion(),
+}
+
 let racketObjectPromise = null
+
+
+// 找出離現在最近、且還在漸變窗內的那次擊球
+function findRacketAim(contacts, frame) {
+  if (!contacts?.length || !Number.isFinite(frame)) return null
+
+  let nearest = null
+  let nearestDistance = Infinity
+
+  for (const contact of contacts) {
+    const distance = Math.abs(frame - contact.frame)
+
+    if (distance > RACKET_AIM_BLEND_FRAMES) continue
+    if (distance >= nearestDistance) continue
+
+    nearest = contact
+    nearestDistance = distance
+  }
+
+  if (!nearest) return null
+
+  // smoothstep：在接觸瞬間權重為 1，窗邊界為 0，且兩端斜率為 0
+  const ratio = 1 - nearestDistance / RACKET_AIM_BLEND_FRAMES
+
+  return {
+    contact: nearest,
+    weight: ratio * ratio * (3 - 2 * ratio),
+  }
+}
+
+
+// 把拍面法線轉向出球方向。旋轉是繞 racket local 原點（握把末端，
+// 也就是手的位置）做的，所以握把不會離開手。
+function aimRacketMatrix(matrix, contact, weight) {
+  const scratch = racketAimScratch
+
+  matrix.decompose(scratch.position, scratch.quaternion, scratch.scale)
+
+  scratch.faceCenter.copy(RACKET_FACE_CENTER).applyMatrix4(matrix)
+
+  // 一個 rally 裡兩位球員輪流打，靠距離判斷這一拍屬於誰
+  if (scratch.faceCenter.distanceTo(contact.position) > RACKET_AIM_MAX_DISTANCE) {
+    return false
+  }
+
+  scratch.faceNormal
+    .copy(RACKET_FACE_NORMAL)
+    .applyQuaternion(scratch.quaternion)
+    .normalize()
+
+  scratch.target.copy(contact.direction)
+
+  // 拍面兩側都能擊球，取轉得比較少的那一面，否則正手拍會整支翻過來
+  if (scratch.faceNormal.dot(scratch.target) < 0) scratch.target.negate()
+
+  scratch.correction.setFromUnitVectors(scratch.faceNormal, scratch.target)
+  scratch.blended.identity().slerp(scratch.correction, weight)
+  scratch.quaternion.premultiply(scratch.blended)
+
+  matrix.compose(scratch.position, scratch.quaternion, scratch.scale)
+
+  return true
+}
+
+
+// 球拍姿態來自 SMPL 手腕，擊球瞬間再把拍面轉向球飛出去的方向。
+// 修正一定要從 worker 給的原始矩陣重算，累加在上一格結果上會越轉越歪。
+function applyRacketAim(racket, baseMatrix, contacts, frame) {
+  if (!racket || !baseMatrix) return
+
+  racket.matrix.copy(baseMatrix)
+
+  const aim = findRacketAim(contacts, frame)
+  if (aim) aimRacketMatrix(racket.matrix, aim.contact, aim.weight)
+
+  racket.matrixWorldNeedsUpdate = true
+}
 
 function createSmplPoseDirectionsTexture(posedirs) {
   const scalarCount = posedirs.length
@@ -376,9 +485,12 @@ function loadRacketObject() {
   return racketObjectPromise
 }
 
-function SmplForwardAvatar({ playerReplay }) {
+function SmplForwardAvatar({ playerReplay, ballContacts }) {
   const currentFrame = useAppStore(s => s.currentFrame)
   const racketRef = useRef(null)
+  const baseRacketMatrixRef = useRef(null)
+  const ballContactsRef = useRef(ballContacts)
+  const currentFrameRef = useRef(currentFrame)
   const workerRef = useRef(null)
   const requestIdRef = useRef(0)
   const lastSentFrameRef = useRef(null)
@@ -388,6 +500,10 @@ function SmplForwardAvatar({ playerReplay }) {
   const [ready, setReady] = useState(false)
   const [hasAppliedFrame, setHasAppliedFrame] = useState(false)
   const [failed, setFailed] = useState('')
+
+  // worker 的回覆是非同步的，回來時要用最新的擊球資料與播放位置
+  ballContactsRef.current = ballContacts
+  currentFrameRef.current = currentFrame
 
   useEffect(() => {
     let cancelled = false
@@ -417,6 +533,7 @@ function SmplForwardAvatar({ playerReplay }) {
     lastSentFrameRef.current = null
     requestIdRef.current += 1
     setHasAppliedFrame(false)
+    baseRacketMatrixRef.current = null
     if (racketRef.current) racketRef.current.visible = false
   }, [playerReplay?.start_frame, playerReplay?.frame_count])
 
@@ -509,8 +626,19 @@ function SmplForwardAvatar({ playerReplay }) {
 
         if (racketRef.current && Array.isArray(message.racketMatrix)) {
           racketRef.current.visible = true
-          racketRef.current.matrix.fromArray(message.racketMatrix).transpose()
-          racketRef.current.matrixWorldNeedsUpdate = true
+
+          if (!baseRacketMatrixRef.current) {
+            baseRacketMatrixRef.current = new THREE.Matrix4()
+          }
+
+          baseRacketMatrixRef.current.fromArray(message.racketMatrix).transpose()
+
+          applyRacketAim(
+            racketRef.current,
+            baseRacketMatrixRef.current,
+            ballContactsRef.current,
+            currentFrameRef.current,
+          )
         }
       }
     }
@@ -549,6 +677,16 @@ function SmplForwardAvatar({ playerReplay }) {
       if (racketRef.current) racketRef.current.visible = false
       return
     }
+
+    // 姿態資料是稀疏的，同一個 poseFrame 會跨好幾格；
+    // 但漸變權重要跟著 currentFrame 走，所以這裡每格都重算一次
+    applyRacketAim(
+      racketRef.current,
+      baseRacketMatrixRef.current,
+      ballContacts,
+      currentFrame,
+    )
+
     if (lastSentFrameRef.current === poseFrame.frame) return
 
     lastSentFrameRef.current = poseFrame.frame
@@ -585,7 +723,7 @@ function SmplForwardAvatar({ playerReplay }) {
   )
 }
 
-function SmplReplayLayer({ replayData }) {
+function SmplReplayLayer({ replayData, ballContacts }) {
   const showSmplReplay = useAppStore(s => s.showSmplReplay)
   if (!showSmplReplay || !replayData?.players?.length) return null
 
@@ -595,6 +733,7 @@ function SmplReplayLayer({ replayData }) {
         <SmplForwardAvatar
           key={`${replayData.rally_id ?? replayData.score ?? replayData.start_frame}-${playerReplay.id}`}
           playerReplay={playerReplay}
+          ballContacts={ballContacts}
         />
       ))}
     </group>
@@ -870,11 +1009,6 @@ function CursorZoomControls({
 }
 
 export default function Scene3D() {
-  const selection = useAppStore(s => s.selection)
-  const fps = useAppStore(s => s.fps) || 60
-  const trajMap = useAppStore(s => s.trajByFrame)
-  const rallies = useAppStore(s => s.rallies) || []
-  const currentTime = useAppStore(s => s.currentTime)
   const matchId = useAppStore(s => s.matchId)
   const currentFrame = useAppStore(s => s.currentFrame)
   const selectedTrajFrames = useAppStore(s => s.selectedTrajFrames)
@@ -998,50 +1132,7 @@ export default function Scene3D() {
     }
   }
 
-  const points = useMemo(() => {
-    const inTime = selection.inTime
-    const outTime = selection.outTime
-
-    if (inTime != null && outTime != null) {
-      const s = Math.max(0, Math.floor(Math.min(inTime, outTime) * fps))
-      const e = Math.max(0, Math.ceil(Math.max(inTime, outTime) * fps))
-      const arr = []
-
-      for (let f = s; f <= e; f++) {
-        const p = trajMap.get(f)
-        if (p) arr.push(p)
-      }
-
-      return arr
-    }
-
-    const curFrame = currentTime * fps
-    let targetRally = null
-
-    const sortedRallies = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
-
-    for (const rally of sortedRallies) {
-      if (curFrame <= rally.end_frame) {
-        targetRally = rally
-        break
-      }
-    }
-
-    if (targetRally) {
-      const s = targetRally.start_frame
-      const e = targetRally.end_frame
-      const arr = []
-
-      for (let f = s; f <= e; f++) {
-        const p = trajMap.get(f)
-        if (p) arr.push(p)
-      }
-
-      return arr
-    }
-
-    return []
-  }, [selection.inTime, selection.outTime, fps, trajMap, currentTime, rallies])
+  const { points, contacts: ballContacts } = useRallyBallData()
 
   return (
     <div className="w-full h-full relative bg-zinc-950 overflow-hidden">
@@ -1141,7 +1232,7 @@ export default function Scene3D() {
 
         <CourtRef />
         <RealCameraMarkers />
-        <SmplReplayLayer replayData={replayData} />
+        <SmplReplayLayer replayData={replayData} ballContacts={ballContacts} />
         <AnimatedTrajectory points={points} />
         <PlaybackController />
 

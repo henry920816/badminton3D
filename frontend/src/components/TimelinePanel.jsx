@@ -157,7 +157,6 @@ export default function TimelinePanel() {
   const scrollBarRef = useRef(null)
   const rafPanRef = useRef(null)
 
-  const matchId = useAppStore(s => s.matchId)
   const fps = useAppStore(s => s.fps) || 60
   const durationSec = useAppStore(s => s.durationSec) || 60
   const currentTime = useAppStore(s => s.currentTime)
@@ -170,7 +169,6 @@ export default function TimelinePanel() {
   const anomalies = useAppStore(s => s.anomalies) || []
   const updateHit = useAppStore(s => s.updateHit)
   const trajMap = useAppStore(s => s.trajByFrame)
-  const upsertTrajPoints = useAppStore(s => s.upsertTrajPoints)
 
   const activeItem = useAppStore(s => s.activeItem)
   const setActiveItem = useAppStore(s => s.setActiveItem)
@@ -330,38 +328,6 @@ export default function TimelinePanel() {
       scrollBarRef.current.scrollLeft = scrollLeft
     }
   }, [scrollLeft])
-
-  const fetchLockRef = useRef(false)
-
-  useEffect(() => {
-    if (dimensions.width === 0) return
-
-    const startSec = Math.max(0, scrollLeft / pxPerSec)
-    const endSec = (scrollLeft + dimensions.width - TRACK_LABELS_WIDTH) / pxPerSec
-    const sF = Math.floor(startSec * fps) - 30
-    const eF = Math.ceil(endSec * fps) + 30
-
-    let missing = 0
-
-    for (let f = sF; f <= eF; f++) {
-      if (!trajMap.has(f)) missing++
-    }
-
-    if (missing > 20 && !fetchLockRef.current) {
-      fetchLockRef.current = true
-
-      api.getTraj(matchId, Math.max(0, sF), eF)
-        .then(pts => {
-          if (pts && pts.length > 0) upsertTrajPoints(pts)
-        })
-        .catch(console.error)
-        .finally(() => {
-          setTimeout(() => {
-            fetchLockRef.current = false
-          }, 250)
-        })
-    }
-  }, [scrollLeft, pxPerSec, dimensions.width, fps, matchId, trajMap, upsertTrajPoints])
 
   useEffect(() => {
     const onKey = (e) => {

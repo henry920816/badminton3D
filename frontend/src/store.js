@@ -4,33 +4,6 @@ import {
 } from './utils/cameraScenePose.js'
 
 
-function normalizeRange(
-  start,
-  end,
-) {
-  const first = Math.max(
-    0,
-    Math.min(
-      start,
-      end,
-    ),
-  )
-
-  const second = Math.max(
-    0,
-    Math.max(
-      start,
-      end,
-    ),
-  )
-
-  return {
-    start: first,
-    end: second,
-  }
-}
-
-
 function normalizeCameras(
   cameras,
   fallbackFps = 50,
@@ -176,9 +149,8 @@ export const useAppStore = create(
     showSmplReplay: true,
 
     trajByFrame: new Map(),
-    loadedTrajRanges: [],
     ball2DByCameraFrame: new Map(),
-    loadedBall2DRanges: new Map(),
+    loadedBall2DCameras: new Set(),
 
     pxPerSec: 100,
     scrollLeft: 0,
@@ -793,88 +765,6 @@ export const useAppStore = create(
       })
     },
 
-    markTrajRangeLoaded: (
-      start,
-      end,
-    ) => {
-      const nextRange = normalizeRange(
-        start,
-        end,
-      )
-
-      const ranges = [
-        ...get().loadedTrajRanges,
-        nextRange,
-      ].sort(
-        (
-          first,
-          second,
-        ) => (
-          first.start
-          - second.start
-        ),
-      )
-
-      const merged = []
-
-      for (const range of ranges) {
-        if (merged.length === 0) {
-          merged.push({
-            ...range,
-          })
-
-          continue
-        }
-
-        const last = (
-          merged[
-            merged.length - 1
-          ]
-        )
-
-        if (
-          range.start
-          <= last.end + 1
-        ) {
-          last.end = Math.max(
-            last.end,
-            range.end,
-          )
-        } else {
-          merged.push({
-            ...range,
-          })
-        }
-      }
-
-      set({
-        loadedTrajRanges: (
-          merged
-        ),
-      })
-    },
-
-    hasTrajRangeLoaded: (
-      start,
-      end,
-    ) => {
-      const target = normalizeRange(
-        start,
-        end,
-      )
-
-      return (
-        get().loadedTrajRanges.some(
-          range => (
-            target.start
-              >= range.start
-            && target.end
-              <= range.end
-          ),
-        )
-      )
-    },
-
     upsertBall2DPoints: (
       cameraIndex,
       points,
@@ -938,83 +828,24 @@ export const useAppStore = create(
       })
     },
 
-    markBall2DRangeLoaded: (
-      cameraIndex,
-      start,
-      end,
-    ) => {
-      const loadedByCamera = new Map(
-        get().loadedBall2DRanges,
-      )
-      const ranges = [
-        ...(loadedByCamera.get(cameraIndex) || []),
-        normalizeRange(start, end),
-      ].sort(
-        (first, second) => (
-          first.start - second.start
-        ),
-      )
-      const merged = []
-
-      for (const range of ranges) {
-        const last = merged[
-          merged.length - 1
-        ]
-
-        if (
-          last
-          && range.start <= last.end + 1
-        ) {
-          last.end = Math.max(
-            last.end,
-            range.end,
-          )
-        } else {
-          merged.push({
-            ...range,
-          })
-        }
-      }
-
-      loadedByCamera.set(
-        cameraIndex,
-        merged,
-      )
-
+    // 整台相機的 2D 球點是一次載完的，所以只要記「這台載過沒有」
+    markBall2DCameraLoaded: cameraIndex => {
       set({
-        loadedBall2DRanges: loadedByCamera,
+        loadedBall2DCameras: new Set(
+          get().loadedBall2DCameras,
+        ).add(cameraIndex),
       })
     },
 
-    hasBall2DRangeLoaded: (
-      cameraIndex,
-      start,
-      end,
-    ) => {
-      const target = normalizeRange(
-        start,
-        end,
-      )
-
-      return (
-        get().loadedBall2DRanges
-          .get(cameraIndex)
-          ?.some(
-            range => (
-              target.start >= range.start
-              && target.end <= range.end
-            ),
-          )
-        || false
-      )
-    },
+    hasBall2DCameraLoaded: cameraIndex => (
+      get().loadedBall2DCameras.has(cameraIndex)
+    ),
 
     resetTrajCache: () => {
       set({
         trajByFrame: new Map(),
-        loadedTrajRanges: [],
         ball2DByCameraFrame: new Map(),
-        loadedBall2DRanges: new Map(),
+        loadedBall2DCameras: new Set(),
         smplReplayBySegmentId: new Map(),
       })
     },

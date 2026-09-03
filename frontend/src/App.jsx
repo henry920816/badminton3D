@@ -15,7 +15,6 @@ import Projection2DPanel from './components/Projection2DPanel.jsx'
 import Quality2DPanel from './components/Quality2DPanel.jsx'
 import RightDock from './components/RightDock.jsx'
 
-const PRELOAD_RADIUS_FRAMES = 300
 
 function clamp(
   value,
@@ -52,28 +51,8 @@ export default function App() {
     state => state.upsertTrajPoints,
   )
 
-  const markTrajRangeLoaded = useAppStore(
-    state => state.markTrajRangeLoaded,
-  )
-
-  const hasTrajRangeLoaded = useAppStore(
-    state => state.hasTrajRangeLoaded,
-  )
-
   const resetTrajCache = useAppStore(
     state => state.resetTrajCache,
-  )
-
-  const currentFrame = useAppStore(
-    state => state.currentFrame,
-  )
-
-  const fps = useAppStore(
-    state => state.fps,
-  )
-
-  const durationSec = useAppStore(
-    state => state.durationSec,
   )
 
   const activeItem = useAppStore(
@@ -86,10 +65,6 @@ export default function App() {
 
   const bootstrapDoneRef = useRef(
     false,
-  )
-
-  const inflightRef = useRef(
-    new Set(),
   )
 
   const mainWrapRef = useRef(
@@ -126,7 +101,6 @@ export default function App() {
   useEffect(
     () => {
       bootstrapDoneRef.current = false
-      inflightRef.current = new Set()
       resetTrajCache()
 
       if (matchId == null) {
@@ -208,11 +182,6 @@ export default function App() {
           points,
         )
 
-        markTrajRangeLoaded(
-          preloadStart,
-          preloadEnd,
-        )
-
         bootstrapDoneRef.current = true
       })().catch(
         error => {
@@ -235,115 +204,6 @@ export default function App() {
       setTimelineData,
       setReplaySegments,
       upsertTrajPoints,
-      markTrajRangeLoaded,
-    ],
-  )
-
-  useEffect(
-    () => {
-      if (matchId == null) {
-        return
-      }
-
-      if (
-        !bootstrapDoneRef.current
-      ) {
-        return
-      }
-
-      const durationFrame = (
-        Math.max(
-          0,
-          Math.round(
-            (durationSec || 0)
-            * (fps || 0),
-          ),
-        )
-      )
-
-      const start = Math.max(
-        0,
-        currentFrame
-        - PRELOAD_RADIUS_FRAMES,
-      )
-
-      const end = (
-        durationFrame > 0
-          ? Math.min(
-              durationFrame,
-              currentFrame
-              + PRELOAD_RADIUS_FRAMES,
-            )
-          : (
-              currentFrame
-              + PRELOAD_RADIUS_FRAMES
-            )
-      )
-
-      if (
-        hasTrajRangeLoaded(
-          start,
-          end,
-        )
-      ) {
-        return
-      }
-
-      const key = (
-        `${start}-${end}`
-      )
-
-      if (
-        inflightRef.current.has(
-          key,
-        )
-      ) {
-        return
-      }
-
-      inflightRef.current.add(
-        key,
-      )
-
-      ;(async () => {
-        try {
-          const points = (
-            await api.getTraj(
-              matchId,
-              start,
-              end,
-            )
-          )
-
-          upsertTrajPoints(
-            points,
-          )
-
-          markTrajRangeLoaded(
-            start,
-            end,
-          )
-
-        } catch (error) {
-          console.error(
-            error,
-          )
-
-        } finally {
-          inflightRef.current.delete(
-            key,
-          )
-        }
-      })()
-    },
-    [
-      matchId,
-      currentFrame,
-      fps,
-      durationSec,
-      hasTrajRangeLoaded,
-      upsertTrajPoints,
-      markTrajRangeLoaded,
     ],
   )
 
