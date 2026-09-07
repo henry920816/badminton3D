@@ -804,6 +804,27 @@ DEFAULT_BAD_CAMERA_THRESHOLD_METERS = 0.3
 MIN_AVAILABLE_CAMERAS = 3
 
 
+QUALITY_REPROJECTION_THRESHOLD_PX = 12.0
+QUALITY_MIN_RAY_ANGLE_DEGREES = 1.0
+
+
+def _quality_pair_stable(cameras, pair):
+    rays = []
+    centers = []
+    for observation in pair:
+        projection = _projection_from_camera(cameras[observation["camera_index"]])
+        x, y = _normalized_observation(observation, projection)
+        matrix = projection["raw_extrinsic"]
+        ray = np.linalg.solve(matrix[:, :3], np.asarray([x, y, 1.0]))
+        ray /= np.linalg.norm(ray)
+        rays.append(ray)
+        centers.append(np.linalg.solve(matrix[:, :3], -matrix[:, 3]))
+    if np.linalg.norm(centers[0] - centers[1]) < 1e-8:
+        return False
+    angle = math.degrees(math.acos(float(np.clip(abs(np.dot(*rays)), 0.0, 1.0))))
+    return angle >= QUALITY_MIN_RAY_ANGLE_DEGREES
+
+
 def scan_2d_camera_grid(
     cameras_by_index: dict[int, dict],
     observations_by_frame: dict[int, list[dict]],
@@ -811,72 +832,108 @@ def scan_2d_camera_grid(
     end_frame: int,
     bad_threshold_meters: float = DEFAULT_BAD_CAMERA_THRESHOLD_METERS,
     min_available_cameras: int = MIN_AVAILABLE_CAMERAS,
+    reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
 ) -> list[dict]:
-    """Classify every camera at every frame in a range as ok / bad / no_data.
+    """Score pixel agreement against stable multiview hypotheses.
 
-    A camera is ``no_data`` at a frame when it has no 2D observation there
-    (occluded or never annotated). Otherwise, when at least three cameras
-    have observations that frame, each camera's two-view reconstructions are
-    compared via ``pairwise_triangulation_diagnostics``; a camera whose
-    median disagreement with the others exceeds ``bad_threshold_meters`` is
-    ``bad``. A camera with an observation that can't be cross-checked
-    (fewer than three visible views, or a degenerate camera pair) defaults
-    to ``ok`` - there's no evidence against it.
-
-    Each frame also reports ``ok_camera_count`` (how many cameras are ``ok``
-    that frame) and ``low_coverage`` (whether that count is below
-    ``min_available_cameras``), so callers don't need to re-derive coverage
-    from the per-camera statuses themselves.
+    Keep the legacy distance argument for caller compatibility; it is no
+    longer the classification threshold. No evidence is never a pass.
+    Ambiguous hypotheses flag the frame without inventing an outlier identity.
     """
-    camera_indices = sorted(cameras_by_index)
+    threshold = _finite_float(reprojection_threshold_px, "reprojection_threshold_px")
+    if threshold <= 0:
+        raise ValueError("reprojection_threshold_px 必須大於 0")
     results = []
-
     for frame in range(start_frame, end_frame + 1):
-        observations = observations_by_frame.get(frame, [])
-        observed_indices = {
-            observation["camera_index"] for observation in observations
+        entries = {
+            index: {"camera_index": index, "status": "no_data", "reason": "沒有標註資料"}
+            for index in sorted(cameras_by_index)
         }
-
-        camera_score_by_index: dict[int, float] = {}
-
-        if len(observations) >= 3:
+        valid = {}
+        for observation in observations_by_frame.get(frame, []):
+            index = observation.get("camera_index")
+            if index not in entries:
+                continue
+            entry = entries[index]
             try:
-                diagnostics = pairwise_triangulation_diagnostics(
-                    cameras_by_index,
-                    observations,
-                )
-                camera_score_by_index = {
-                    item["camera_index"]: item["median_3d_difference"]
-                    for item in diagnostics["camera_scores"]
-                }
+                x = _finite_float(observation.get("x"), "2D x")
+                y = _finite_float(observation.get("y"), "2D y")
             except ValueError:
-                pass
+                entry.update(status="bad", reason="球點不是有效數字")
+                continue
+            projection = cameras_by_index[index].get("projection") or {}
+            outside = x < 0 or y < 0
+            for value, key, alternate in ((x, "imageWidth", "image_width"), (y, "imageHeight", "image_height")):
+                try:
+                    bound = float(projection.get(key, projection.get(alternate)))
+                    outside = outside or (math.isfinite(bound) and bound > 0 and value >= bound)
+                except (TypeError, ValueError):
+                    pass
+            if outside:
+                entry.update(status="bad", reason="球點超出影像範圍")
+                continue
+            try:
+                _projection_from_camera(cameras_by_index[index])
+            except ValueError:
+                entry.update(status="unknown", reason="相機參數無法使用")
+                continue
+            valid[index] = {"camera_index": index, "x": x, "y": y}
+            entry.update(status="unknown", reason="有效視角不足或重建幾何不穩定")
 
-        cameras_status = []
-        ok_camera_count = 0
+        hypotheses = []
+        stable_pairs = 0
+        failed_pairs = 0
+        for pair in combinations(valid.values(), 2):
+            try:
+                if not _quality_pair_stable(cameras_by_index, pair):
+                    continue
+                stable_pairs += 1
+                reconstruction = triangulate_observations(cameras_by_index, list(pair))
+                if reconstruction["max_error"] > threshold:
+                    failed_pairs += 1
+                    continue
+                errors = {}
+                for index, observation in valid.items():
+                    projected = project_raw_point(reconstruction["point"], cameras_by_index[index])
+                    errors[index] = (
+                        math.hypot(projected["x"] - observation["x"], projected["y"] - observation["y"])
+                        if projected is not None else math.inf
+                    )
+                supporters = frozenset(index for index, error in errors.items() if error <= threshold)
+                if len(supporters) >= 3:
+                    hypotheses.append((supporters, errors))
+            except (ValueError, np.linalg.LinAlgError, OverflowError, FloatingPointError):
+                failed_pairs += 1
 
-        for camera_index in camera_indices:
-            if camera_index not in observed_indices:
-                status = "no_data"
-            elif (
-                camera_score_by_index.get(camera_index, 0.0)
-                > bad_threshold_meters
-            ):
-                status = "bad"
+        if hypotheses:
+            largest = max(len(item[0]) for item in hypotheses)
+            best = [item for item in hypotheses if len(item[0]) == largest]
+            groups = {item[0] for item in best}
+            if len(groups) == 1:
+                supporters, errors = min(best, key=lambda item: sum(item[1][index] for index in item[0]))
+                for index in valid:
+                    error = errors[index]
+                    entries[index].update(
+                        status="ok" if index in supporters else "bad",
+                        reason="多視角投影一致" if index in supporters else "偏離其他視角的重建投影",
+                        reprojection_error_px=float(error) if math.isfinite(error) else None,
+                        support_count=len(supporters),
+                        threshold_px=threshold,
+                    )
             else:
-                status = "ok"
-                ok_camera_count += 1
-
-            cameras_status.append({
-                "camera_index": camera_index,
-                "status": status,
-            })
-
+                for index in valid:
+                    entries[index].update(status="suspect", reason="多組重建互相衝突，無法唯一定位錯誤視角")
+        elif stable_pairs or failed_pairs:
+            if len(valid) >= 3 or failed_pairs:
+                for index in valid:
+                    entries[index].update(status="suspect", reason="視角重建衝突或重投影誤差過大")
+        cameras = list(entries.values())
+        ok_count = sum(item["status"] == "ok" for item in cameras)
         results.append({
             "frame": frame,
-            "cameras": cameras_status,
-            "ok_camera_count": ok_camera_count,
-            "low_coverage": ok_camera_count < min_available_cameras,
+            "cameras": cameras,
+            "ok_camera_count": ok_count,
+            "low_coverage": ok_count < min_available_cameras,
+            "needs_review": any(item["status"] in ("bad", "suspect", "unknown") for item in cameras),
         })
-
     return results

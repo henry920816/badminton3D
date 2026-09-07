@@ -302,6 +302,15 @@ export const api = {
     )
   ),
 
+  undoAutoRepair: (matchId, repairIds) => request(
+    `/matches/${matchId}/traj2d/auto-repair/undo`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repair_ids: repairIds }),
+    },
+  ),
+
   patchHit: (
     hitId,
     updates,

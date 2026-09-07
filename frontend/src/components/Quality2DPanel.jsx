@@ -32,6 +32,8 @@ const MAX_CAMERA_GRID_FRAMES = 6000
 
 
 const STATUS_COLOR = {
+  suspect: 'rgba(249,115,22,0.95)',
+  unknown: 'rgba(168,85,247,0.9)',
   ok:
     'rgba(34,197,94,0.85)',
 
@@ -263,14 +265,6 @@ export default function Quality2DPanel() {
     )
   )
 
-  const upsertTrajPoints = (
-    useAppStore(
-      state => (
-        state.upsertTrajPoints
-      ),
-    )
-  )
-
   const upsertBall2DPoints = (
     useAppStore(
       state => (
@@ -361,6 +355,29 @@ export default function Quality2DPanel() {
   )
 
 
+  const [onlyRed, setOnlyRed] = useState(false)
+  const [lastRepair, setLastRepair] = useState(null)
+  const [undoing, setUndoing] = useState(false)
+  const [undoMessage, setUndoMessage] = useState('')
+
+  useEffect(() => {
+    try {
+      setLastRepair(JSON.parse(sessionStorage.getItem(`quality-repair-2d-only-${matchId}`) || 'null'))
+    } catch {
+      setLastRepair(null)
+    }
+    setUndoMessage('')
+  }, [matchId])
+
+  const rememberRepair = batch => {
+    if (useAppStore.getState().matchId === batch.matchId) setLastRepair(batch)
+    try {
+      sessionStorage.setItem(`quality-repair-2d-only-${batch.matchId}`, JSON.stringify(batch))
+    } catch {
+      // The current mounted panel still retains the undo data.
+    }
+  }
+
   const currentRally = (
     useMemo(
       () => (
@@ -378,6 +395,9 @@ export default function Quality2DPanel() {
     )
   )
 
+
+  const currentRallyRef = useRef(null)
+  currentRallyRef.current = currentRally
 
   const sortedCameras = (
     useMemo(
@@ -800,6 +820,7 @@ export default function Quality2DPanel() {
     if (
       !dataReady
       || autoRepairing
+      || undoing
       || matchId == null
       || !currentRally
     ) {
@@ -847,20 +868,7 @@ export default function Quality2DPanel() {
 
           onConfirmed:
             confirmed => {
-              /*
-               * 修正後立即更新
-               * 前端的 3D cache。
-               */
-              if (
-                confirmed
-                  ?.trajectory_point
-              ) {
-                upsertTrajPoints([
-                  confirmed
-                    .trajectory_point,
-                ])
-              }
-
+              if (useAppStore.getState().matchId !== matchId) return
               /*
                * 修正後立即更新
                * 2D cache。
@@ -919,6 +927,13 @@ export default function Quality2DPanel() {
         })
       )
 
+      if (result.repairIds?.length) {
+        rememberRepair({ matchId, repairIds: result.repairIds,
+          startFrame: currentRally.start_frame, endFrame: currentRally.end_frame })
+        setUndoMessage('')
+      }
+      if (useAppStore.getState().matchId !== matchId) return
+
       /*
        * 全部修完後，
        * 重新跑一次原本的偵測。
@@ -931,6 +946,7 @@ export default function Quality2DPanel() {
         )
       )
 
+      if (useAppStore.getState().matchId !== matchId || currentRallyRef.current?.id !== currentRally.id) return
       setGrid(
         refreshed,
       )
@@ -968,6 +984,42 @@ export default function Quality2DPanel() {
     }
   }
 
+
+  const undoLastRepair = async () => {
+    if (!lastRepair || lastRepair.matchId !== matchId || undoing || autoRepairing) return
+    const batch = lastRepair
+    setPlaying(false)
+    setUndoing(true)
+    setUndoMessage('')
+    let reverted = false
+    try {
+      const result = await api.undoAutoRepair(batch.matchId, batch.repairIds)
+      reverted = true
+      try { sessionStorage.removeItem(`quality-repair-2d-only-${batch.matchId}`) } catch {}
+      if (useAppStore.getState().matchId !== batch.matchId) return
+      setLastRepair(null)
+      const state = useAppStore.getState()
+      const grouped = new Map()
+      for (const point of result.ball_2d_points || []) {
+        if (!grouped.has(point.camera_index)) grouped.set(point.camera_index, [])
+        grouped.get(point.camera_index).push(point)
+      }
+      for (const [camera, points] of grouped) state.upsertBall2DPoints(camera, points)
+      setAutoRepairResult(null)
+      setUndoMessage(`已復原 ${result.reverted_frames} 個 frame 的 2D 標註`)
+      if (currentRally) {
+        const refreshed = await api.getTraj2DCameraGrid(matchId, currentRally.start_frame, currentRally.end_frame)
+        if (useAppStore.getState().matchId === batch.matchId && currentRallyRef.current?.id === currentRally.id) {
+          setGrid(refreshed)
+          setLoadedRallyId(currentRally.id)
+        }
+      }
+    } catch (error) {
+      setUndoMessage(`${reverted ? '資料已復原，但品質格更新失敗，請重新開啟品質檢查' : '復原失敗'}：${error.message || error}`)
+    } finally {
+      setUndoing(false)
+    }
+  }
 
   /*
    * 畫品質 Grid。
@@ -1093,8 +1145,10 @@ export default function Quality2DPanel() {
           || 'no_data'
         )
 
+        if (onlyRed && status !== 'bad') return 'rgba(24,24,27,0.35)'
+
         if (
-          status !== 'no_data'
+          status === 'ok'
           && lowCoverageByFrame
             .get(
               frame,
@@ -1290,6 +1344,7 @@ export default function Quality2DPanel() {
       rowHeight,
       totalRows,
       sortedCameras,
+      onlyRed,
       statusByFrame,
       lowCoverageByFrame,
       dataReady,
@@ -1413,6 +1468,18 @@ export default function Quality2DPanel() {
   const handlePointerMove = (
     event,
   ) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const frame = viewStartFrame + Math.min(viewFrameCount - 1, Math.max(0,
+      Math.floor((event.clientX - rect.left) / Math.max(1, rect.width) * viewFrameCount)))
+    const camera = sortedCameras[Math.floor((event.clientY - rect.top) / rowHeight)]
+    const entry = dataReady
+      ? grid.find(item => item.frame === frame)?.cameras?.find(item => item.camera_index === Number(camera?.index))
+      : null
+    event.currentTarget.title = entry
+      ? `Cam ${entry.camera_index} / frame ${frame}：${entry.reason || entry.status}${
+          Number.isFinite(entry.reprojection_error_px)
+            ? `（重投影誤差 ${entry.reprojection_error_px.toFixed(1)} px）` : ''}`
+      : ''
     if (
       draggingRef.current
     ) {
@@ -1824,7 +1891,9 @@ export default function Quality2DPanel() {
     >
       <div
         className="
-          h-[42px]
+          min-h-[42px]
+          py-2
+          flex-wrap
           shrink-0
           px-4
           flex
@@ -1974,13 +2043,14 @@ export default function Quality2DPanel() {
             disabled={
               !dataReady
               || autoRepairing
+      || undoing
               || scanning
               || badFrameCount === 0
             }
             title="
               使用目前 bad 判定，
               排除錯誤視角後重新 triangulation，
-              自動修正 2D + 3D
+              只修正錯誤視角的 2D 標註
             "
             className="
               shrink-0
@@ -2004,14 +2074,25 @@ export default function Quality2DPanel() {
                 )
               : badFrameCount > 0
                 ? (
-                    `自動修正 (${badFrameCount})`
+                    `修正 2D (${badFrameCount})`
                   )
                 : (
-                    '沒有錯誤'
+                    '無可自動修正項目'
                   )}
           </button>
         )}
 
+
+        <button type="button" onClick={undoLastRepair}
+          disabled={!lastRepair || lastRepair.matchId !== matchId || undoing || autoRepairing || scanning}
+          className="shrink-0 px-2 py-1 text-xs rounded border border-zinc-700 text-zinc-200 disabled:opacity-40"
+          title="復原上次自動修復的整批 2D 標註">
+          {undoing ? '復原中…' : '復原上次 2D 修復'}
+        </button>
+        <label className="shrink-0 flex items-center gap-1 text-xs text-red-300">
+          <input type="checkbox" checked={onlyRed} onChange={event => setOnlyRed(event.target.checked)} />
+          只顯示紅色
+        </label>
 
         {isZoomed && (
           <button
@@ -2231,7 +2312,7 @@ export default function Quality2DPanel() {
                       }}
                     />
 
-                    pass
+                    pass（多視角一致）
                   </span>
 
 
@@ -2255,7 +2336,7 @@ export default function Quality2DPanel() {
                       }}
                     />
 
-                    fail（與其他視角不一致）
+                    fail（錯誤或重投影偏差過大）
                   </span>
 
 
@@ -2310,6 +2391,11 @@ export default function Quality2DPanel() {
                     支
                   </span>
 
+
+                  <span className="text-orange-400">■ 可疑：視角衝突</span>
+                  <span className="text-purple-400">■ 無法驗證：視角不足／參數或幾何問題</span>
+
+                  {undoMessage && <span className="text-zinc-200">{undoMessage}</span>}
 
                   {autoRepairResult && (
                     <span

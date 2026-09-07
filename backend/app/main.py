@@ -1107,6 +1107,9 @@ def undo_traj_2d_repair(
             detail="找不到指定的 2D 修復紀錄",
         )
 
+    if history.source == "auto_2d_only":
+        raise HTTPException(status_code=409, detail="此紀錄為純 2D 修復，請使用品質檢查的復原按鈕")
+
     if (
         history.reverted_at
         is not None

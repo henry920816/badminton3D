@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .db import get_db
-from .models import BallPosition2D, BallTraj, Match, TrajectoryRepairHistory
+from .models import BallPosition2D, Match, TrajectoryRepairHistory
 from .triangulation import project_raw_point, scan_2d_camera_grid, triangulate_observations
 
 
@@ -17,9 +17,6 @@ router = APIRouter()
 MAX_AUTO_REPAIR_FRAMES = 6000
 PAIR_INLIER_THRESHOLD_PX = 30.0
 LOO_BASE_THRESHOLD_PX = 45.0
-TEMPORAL_SEARCH_RADIUS_FRAMES = 6
-TEMPORAL_MIN_TOLERANCE_METERS = 0.45
-MULTIVIEW_CATASTROPHIC_TEMPORAL_MULTIPLIER = 4.0
 
 
 class AutoRepair2DPayload(BaseModel):
@@ -48,21 +45,6 @@ def observation_dict(row: BallPosition2D) -> dict:
         "camera_index": int(row.camera_index),
         "x": float(row.x),
         "y": float(row.y),
-    }
-
-
-def trajectory_dict(row: BallTraj | None) -> dict | None:
-    if row is None:
-        return None
-
-    return {
-        "frame": int(row.frame),
-        "t_sec": float(row.t_sec),
-        "x": float(row.x),
-        "y": float(row.y),
-        "z": float(row.z),
-        "speed": float(row.speed) if row.speed is not None else None,
-        "confidence": float(row.confidence),
     }
 
 
@@ -373,235 +355,6 @@ def robust_multiview_candidate(
     }
 
 
-def temporal_reference_points(
-    trajectory_by_frame: dict[int, BallTraj],
-    clean_frames: set[int],
-    frame: int,
-) -> tuple[BallTraj | None, BallTraj | None]:
-    previous = None
-    following = None
-
-    for offset in range(1, TEMPORAL_SEARCH_RADIUS_FRAMES + 1):
-        previous_frame = frame - offset
-        following_frame = frame + offset
-
-        if (
-            previous is None
-            and previous_frame in clean_frames
-            and previous_frame in trajectory_by_frame
-        ):
-            previous = trajectory_by_frame[previous_frame]
-
-        if (
-            following is None
-            and following_frame in clean_frames
-            and following_frame in trajectory_by_frame
-        ):
-            following = trajectory_by_frame[following_frame]
-
-        if previous is not None and following is not None:
-            break
-
-    return previous, following
-
-
-def temporal_validation(
-    point: dict,
-    previous: BallTraj | None,
-    following: BallTraj | None,
-    frame: int,
-    multiplier: float = 1.0,
-) -> dict:
-    if (
-        previous is None
-        or following is None
-        or following.frame <= previous.frame
-    ):
-        return {
-            "available": False,
-            "ok": False,
-            "reason": "缺少前後可信 3D frame",
-        }
-
-    p0 = np.asarray(
-        [float(previous.x), float(previous.y), float(previous.z)],
-        dtype=np.float64,
-    )
-    p1 = np.asarray(
-        [float(following.x), float(following.y), float(following.z)],
-        dtype=np.float64,
-    )
-    candidate = np.asarray(
-        [float(point["x"]), float(point["y"]), float(point["z"])],
-        dtype=np.float64,
-    )
-
-    ratio = (
-        (frame - previous.frame)
-        / (following.frame - previous.frame)
-    )
-    expected = p0 + ratio * (p1 - p0)
-    error = float(np.linalg.norm(candidate - expected))
-
-    span_frames = max(1, int(following.frame - previous.frame))
-    average_step = float(np.linalg.norm(p1 - p0) / span_frames)
-
-    base_tolerance = max(
-        TEMPORAL_MIN_TOLERANCE_METERS,
-        0.20 + 2.5 * average_step,
-    )
-    tolerance = float(base_tolerance * multiplier)
-
-    return {
-        "available": True,
-        "ok": error <= tolerance,
-        "error_m": error,
-        "tolerance_m": tolerance,
-        "base_tolerance_m": float(base_tolerance),
-        "previous_frame": int(previous.frame),
-        "following_frame": int(following.frame),
-    }
-
-
-def best_two_view_temporal_candidate(
-    cameras_by_index: dict[int, dict],
-    observations: list[dict],
-    trajectory_by_frame: dict[int, BallTraj],
-    clean_frames: set[int],
-    frame: int,
-) -> dict | None:
-    if len(observations) < 2:
-        return None
-
-    previous, following = temporal_reference_points(
-        trajectory_by_frame,
-        clean_frames,
-        frame,
-    )
-
-    if previous is None or following is None:
-        return None
-
-    best = None
-
-    for first, second in combinations(observations, 2):
-        pair = [first, second]
-
-        try:
-            reconstruction = triangulate_observations(
-                cameras_by_index,
-                pair,
-            )
-        except ValueError:
-            continue
-
-        validation = temporal_validation(
-            reconstruction["point"],
-            previous,
-            following,
-            frame,
-        )
-
-        if not validation["ok"]:
-            continue
-
-        candidate = {
-            "mode": "two_view_temporal",
-            "point": reconstruction["point"],
-            "reliable_camera_indices": [
-                int(first["camera_index"]),
-                int(second["camera_index"]),
-            ],
-            "rms_error": float(reconstruction["rms_error"]),
-            "max_error": float(reconstruction["max_error"]),
-            "condition_ratio": float(reconstruction["condition_ratio"]),
-            "temporal": validation,
-            "loo": [],
-            "ransac": None,
-            "removed_cameras": [],
-        }
-
-        if (
-            best is None
-            or validation["error_m"] < best["temporal"]["error_m"]
-        ):
-            best = candidate
-
-    return best
-
-
-def reconstruction_candidate(
-    cameras_by_index: dict[int, dict],
-    good_observations: list[dict],
-    trajectory_by_frame: dict[int, BallTraj],
-    clean_frames: set[int],
-    frame: int,
-) -> dict | None:
-    if len(good_observations) >= 3:
-        multiview = robust_multiview_candidate(
-            cameras_by_index,
-            good_observations,
-        )
-
-        if multiview is not None:
-            previous, following = temporal_reference_points(
-                trajectory_by_frame,
-                clean_frames,
-                frame,
-            )
-
-            guard = temporal_validation(
-                multiview["point"],
-                previous,
-                following,
-                frame,
-                multiplier=MULTIVIEW_CATASTROPHIC_TEMPORAL_MULTIPLIER,
-            )
-
-            # 3+ 視角時 temporal 只擋災難性跳點；沒有前後資料不拒絕。
-            if guard["available"] and not guard["ok"]:
-                return None
-
-            multiview["temporal"] = guard
-            return multiview
-
-    # 多視角無法形成可靠共識時，仍允許退回 2-view + temporal。
-    return best_two_view_temporal_candidate(
-        cameras_by_index,
-        good_observations,
-        trajectory_by_frame,
-        clean_frames,
-        frame,
-    )
-
-
-def repaired_point_dict(
-    match: Match,
-    existing: BallTraj | None,
-    frame: int,
-    point: dict,
-) -> dict:
-    fps = float(match.fps) if match.fps else 50.0
-
-    return {
-        "frame": frame,
-        "t_sec": float(existing.t_sec) if existing is not None else frame / fps,
-        "x": float(point["x"]),
-        "y": float(point["y"]),
-        "z": float(point["z"]),
-        "speed": (
-            float(existing.speed)
-            if existing is not None and existing.speed is not None
-            else None
-        ),
-        "confidence": (
-            float(existing.confidence)
-            if existing is not None
-            else 1.0
-        ),
-    }
-
-
 def best_safe_replacement_subset(
     cameras_by_index: dict[int, dict],
     frame: int,
@@ -648,12 +401,12 @@ def best_safe_replacement_subset(
             new_bad_on_original_ok = [
                 camera_index
                 for camera_index in original_ok_indices
-                if trial_statuses.get(camera_index) == "bad"
+                if trial_statuses.get(camera_index) != "ok"
             ]
             repaired_still_bad = [
                 camera_index
                 for camera_index in subset
-                if trial_statuses.get(camera_index) == "bad"
+                if trial_statuses.get(camera_index) != "ok"
             ]
 
             if new_bad_on_original_ok or repaired_still_bad:
@@ -746,7 +499,7 @@ def auto_repair_traj_2d(
             observation_dict(row)
         )
 
-    # 原 detector 完全不改。
+    # Use the same detector as the quality grid.
     original_grid = scan_2d_camera_grid(
         cameras_by_index,
         observations_by_frame,
@@ -758,40 +511,6 @@ def auto_repair_traj_2d(
         for item in original_grid
     }
 
-    clean_frames = {
-        frame
-        for frame, statuses in original_status_by_frame.items()
-        if (
-            bad_count(statuses) == 0
-            and sum(
-                1
-                for status in statuses.values()
-                if status == "ok"
-            )
-            >= 3
-        )
-    }
-
-    trajectory_rows = (
-        db.query(BallTraj)
-        .filter(
-            BallTraj.match_id == match_id,
-            BallTraj.frame
-            >= max(
-                0,
-                start_frame - TEMPORAL_SEARCH_RADIUS_FRAMES,
-            ),
-            BallTraj.frame
-            <= end_frame + TEMPORAL_SEARCH_RADIUS_FRAMES,
-        )
-        .order_by(BallTraj.frame)
-        .all()
-    )
-    trajectory_by_frame = {
-        int(row.frame): row
-        for row in trajectory_rows
-    }
-
     bad_frames = [
         frame
         for frame, statuses in original_status_by_frame.items()
@@ -799,7 +518,6 @@ def auto_repair_traj_2d(
     ]
 
     results = []
-    repaired_trajectory_points = []
     repaired_2d_points = []
     history_ids = []
 
@@ -827,12 +545,10 @@ def auto_repair_traj_2d(
                 if camera_index in frame_observations
             ]
 
-            candidate = reconstruction_candidate(
+            # Geometry is temporary: this route never reads or writes BallTraj.
+            candidate = robust_multiview_candidate(
                 cameras_by_index,
                 good_observations,
-                trajectory_by_frame,
-                clean_frames,
-                frame,
             )
 
             if candidate is None:
@@ -893,25 +609,16 @@ def auto_repair_traj_2d(
             final_statuses = safe_replacement["statuses"]
 
             if any(
-                final_statuses.get(camera_index) == "bad"
+                final_statuses.get(camera_index) != "ok"
                 for camera_index in original_ok_indices
             ):
                 continue
 
             if any(
-                final_statuses.get(camera_index) == "bad"
+                final_statuses.get(camera_index) != "ok"
                 for camera_index in accepted_indices
             ):
                 continue
-
-            existing_point = trajectory_by_frame.get(frame)
-            original_point = trajectory_dict(existing_point)
-            repaired_point = repaired_point_dict(
-                match,
-                existing_point,
-                frame,
-                candidate["point"],
-            )
 
             original_2d = []
             new_2d = []
@@ -957,24 +664,6 @@ def auto_repair_traj_2d(
             repair_id = None
 
             if not payload.dry_run:
-                if existing_point is None:
-                    existing_point = BallTraj(
-                        match_id=match_id,
-                        frame=frame,
-                        t_sec=repaired_point["t_sec"],
-                        x=repaired_point["x"],
-                        y=repaired_point["y"],
-                        z=repaired_point["z"],
-                        speed=repaired_point["speed"],
-                        confidence=repaired_point["confidence"],
-                    )
-                    db.add(existing_point)
-                    trajectory_by_frame[frame] = existing_point
-                else:
-                    existing_point.x = repaired_point["x"]
-                    existing_point.y = repaired_point["y"]
-                    existing_point.z = repaired_point["z"]
-
                 for item in new_2d:
                     row = rows_by_frame_camera[
                         (frame, int(item["camera_index"]))
@@ -986,9 +675,9 @@ def auto_repair_traj_2d(
                 history = TrajectoryRepairHistory(
                     match_id=match_id,
                     frame=frame,
-                    source="auto_2d_safe",
-                    original_point=original_point,
-                    repaired_point=repaired_point,
+                    source="auto_2d_only",
+                    original_point=None,
+                    repaired_point={},
                     original_2d=original_2d,
                     repaired_2d=new_2d,
                     reprojection={
@@ -1029,7 +718,6 @@ def auto_repair_traj_2d(
                     }
                 )
 
-            repaired_trajectory_points.append(repaired_point)
             repaired_2d_points.extend(new_2d)
 
             results.append(
@@ -1042,7 +730,6 @@ def auto_repair_traj_2d(
                         candidate["reliable_camera_indices"],
                     "original_bad_camera_indices": original_bad_indices,
                     "repaired_camera_indices": accepted_indices,
-                    "trajectory_point": repaired_point,
                     "rms_error": candidate["rms_error"],
                     "max_error": candidate["max_error"],
                     "condition_ratio": candidate["condition_ratio"],
@@ -1050,7 +737,7 @@ def auto_repair_traj_2d(
                 }
             )
 
-        # 最終整個 Rally 再跑一次原 detector。
+        # Recheck the complete range with the current detector.
         final_grid = scan_2d_camera_grid(
             cameras_by_index,
             observations_by_frame,
@@ -1071,7 +758,7 @@ def auto_repair_traj_2d(
                 for camera_index, status in original_statuses.items()
                 if (
                     status == "ok"
-                    and final_statuses.get(camera_index) == "bad"
+                    and final_statuses.get(camera_index) != "ok"
                 )
             ]
 
@@ -1134,8 +821,78 @@ def auto_repair_traj_2d(
         "repaired_2d_points": len(repaired_2d_points),
         "skipped_frames": len(skipped_frames),
         "repair_ids": history_ids,
-        "trajectory_points": repaired_trajectory_points,
+        "trajectory_points": [],
+        "scope": "2d_only",
         "ball_2d_points": repaired_2d_points,
         "frames": results,
         "grid": final_grid,
     }
+
+
+class UndoAutoRepairPayload(BaseModel):
+    repair_ids: list[int]
+
+
+@router.post('/matches/{match_id}/traj2d/auto-repair/undo')
+def undo_auto_repair_traj_2d(
+    match_id: int,
+    payload: UndoAutoRepairPayload,
+    db: Session = Depends(get_db),
+):
+    ids = sorted(set(payload.repair_ids), reverse=True)
+    if not ids or len(ids) > MAX_AUTO_REPAIR_FRAMES + 1:
+        raise HTTPException(status_code=400, detail='修復紀錄數量無效')
+    try:
+        match = db.query(Match).filter(Match.id == match_id).with_for_update().first()
+        if match is None:
+            raise HTTPException(status_code=404, detail='找不到資料集')
+        histories = (
+            db.query(TrajectoryRepairHistory)
+            .filter(TrajectoryRepairHistory.match_id == match_id, TrajectoryRepairHistory.id.in_(ids))
+            .order_by(TrajectoryRepairHistory.id.desc()).with_for_update().all()
+        )
+        if len(histories) != len(ids):
+            raise HTTPException(status_code=404, detail='找不到完整修復紀錄')
+        if len({item.frame for item in histories}) != len(histories):
+            raise HTTPException(status_code=400, detail='同一次復原不可包含重複 frame')
+        points2d = []
+        for history in histories:
+            if history.source != 'auto_2d_only' or history.reverted_at is not None:
+                raise HTTPException(status_code=409, detail='只可復原新版純 2D 修復；此紀錄屬於其他修復類型或已復原')
+            indices = {int(item['camera_index']) for item in history.repaired_2d or []}
+            later = db.query(TrajectoryRepairHistory).filter(
+                TrajectoryRepairHistory.match_id == match_id,
+                TrajectoryRepairHistory.frame == history.frame,
+                TrajectoryRepairHistory.id > history.id,
+                TrajectoryRepairHistory.reverted_at.is_(None),
+            ).all()
+            if any(indices.intersection(int(point['camera_index']) for point in item.repaired_2d or []) for item in later):
+                raise HTTPException(status_code=409, detail=f'frame {history.frame} 的 2D 標註已有後續修復，整批未復原')
+            current2d = {}
+            for repaired in history.repaired_2d or []:
+                index = int(repaired['camera_index'])
+                point = db.query(BallPosition2D).filter_by(
+                    match_id=match_id, frame=history.frame, camera_index=index,
+                ).with_for_update().first()
+                if point is None or point.visibility != repaired['visibility'] or any(
+                    not math.isclose(float(getattr(point, axis)), float(repaired[axis]), rel_tol=0, abs_tol=1e-7)
+                    for axis in ('x', 'y')
+                ):
+                    raise HTTPException(status_code=409, detail=f'frame {history.frame} 的 Cam {index} 已有後續修改，整批未復原')
+                current2d[index] = point
+            for original in history.original_2d or []:
+                index = int(original['camera_index'])
+                point = current2d.get(index)
+                if not original.get('existed') or point is None:
+                    raise HTTPException(status_code=409, detail='自動修復紀錄不完整，整批未復原')
+                point.x = float(original['x'])
+                point.y = float(original['y'])
+                point.visibility = int(original['visibility'])
+                points2d.append(dict(camera_index=index, frame=history.frame, x=point.x, y=point.y, visibility=point.visibility))
+            history.reverted_at = datetime.utcnow()
+        db.commit()
+        return {'ok': True, 'reverted_frames': len(histories), 'scope': '2d_only', 'trajectory_points': [],
+                'deleted_frames': [], 'ball_2d_points': points2d}
+    except Exception:
+        db.rollback()
+        raise

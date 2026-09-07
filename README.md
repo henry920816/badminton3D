@@ -1,5 +1,7 @@
 # Badminton 3D Debugger
 
+> 品質檢查新版的自動修復與復原僅修改 2D 標註；更新方式與限制請見 [QUALITY_UPDATE.md](QUALITY_UPDATE.md)。
+
 Badminton 3D Debugger 是一套用來檢視、同步與修正羽球比賽資料的網頁工具。系統會把多視角比賽影片、3D 羽球軌跡、Rally／擊球標註，以及人體與球拍重建結果放在同一個操作介面中，方便逐幀比對資料、找出異常並將修正結果保存到資料庫。
 
 ## 主要功能

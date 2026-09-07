@@ -10,6 +10,8 @@ from sqlalchemy.ext.compiler import (
 )
 from sqlalchemy.orm import sessionmaker
 
+from app.auto_repair import AutoRepair2DPayload, auto_repair_traj_2d, UndoAutoRepairPayload, undo_auto_repair_traj_2d
+
 from app.main import (
     repair_traj_from_2d,
     undo_traj_2d_repair,
@@ -322,6 +324,120 @@ class Repair2DApiTest(unittest.TestCase):
             409,
         )
 
+    def make_auto_batch(self):
+        ids = []
+        for frame in (101, 102):
+            original = dict(frame=frame, t_sec=frame/50, x=1.0, y=2.0, z=3.0, speed=None, confidence=1.0)
+            repaired = dict(original, x=1.5)
+            self.db.add(BallTraj(match_id=self.match_id, **repaired))
+            self.db.add(BallPosition2D(match_id=self.match_id, frame=frame, camera_index=0, x=120, y=200, visibility=1))
+            history = TrajectoryRepairHistory(match_id=self.match_id, frame=frame, source='auto_2d_only',
+                original_point=None, repaired_point={},
+                original_2d=[dict(camera_index=0, existed=True, x=100, y=200, visibility=1)],
+                repaired_2d=[dict(camera_index=0, frame=frame, x=120, y=200, visibility=1)])
+            self.db.add(history)
+            self.db.flush()
+            ids.append(history.id)
+        self.db.commit()
+        return ids
+
+    def test_batch_undo_restores_both_frames_and_rejects_repeat(self):
+        ids = self.make_auto_batch()
+        result = undo_auto_repair_traj_2d(self.match_id, UndoAutoRepairPayload(repair_ids=ids), self.db)
+        self.assertEqual(result['reverted_frames'], 2)
+        for frame in (101, 102):
+            self.assertEqual(self.db.query(BallTraj).filter_by(match_id=self.match_id, frame=frame).one().x, 1.5)
+            self.assertEqual(self.db.query(BallPosition2D).filter_by(match_id=self.match_id, frame=frame).one().x, 100)
+        with self.assertRaises(HTTPException):
+            undo_auto_repair_traj_2d(self.match_id, UndoAutoRepairPayload(repair_ids=ids), self.db)
+
+    def test_batch_undo_rolls_back_entire_batch_on_2d_conflict(self):
+        ids = self.make_auto_batch()
+        point = self.db.query(BallPosition2D).filter_by(match_id=self.match_id, frame=101).one()
+        point.x = 130
+        self.db.commit()
+        with self.assertRaises(HTTPException):
+            undo_auto_repair_traj_2d(self.match_id, UndoAutoRepairPayload(repair_ids=ids), self.db)
+        for frame in (101, 102):
+            self.assertEqual(self.db.query(BallTraj).filter_by(match_id=self.match_id, frame=frame).one().x, 1.5)
+        self.assertEqual(self.db.query(BallPosition2D).filter_by(match_id=self.match_id, frame=102).one().x, 120)
+        self.assertTrue(all(self.db.get(TrajectoryRepairHistory, i).reverted_at is None for i in ids))
+
+    def test_batch_undo_never_deletes_3d_point(self):
+        ids = self.make_auto_batch()
+        history = self.db.get(TrajectoryRepairHistory, ids[0])
+        history.original_point = None
+        self.db.commit()
+        result = undo_auto_repair_traj_2d(self.match_id, UndoAutoRepairPayload(repair_ids=ids), self.db)
+        self.assertEqual(result['deleted_frames'], [])
+        self.assertIsNotNone(self.db.query(BallTraj).filter_by(match_id=self.match_id, frame=101).first())
+
+    def trajectory_snapshot(self):
+        return [tuple(getattr(row, c.name) for c in BallTraj.__table__.columns)
+                for row in self.db.query(BallTraj).order_by(BallTraj.id).all()]
+
+    def test_auto_repair_with_new_detector_preview_apply_and_undo(self):
+        self.run_2d_roundtrip()
+
+    def test_auto_repair_without_any_3d_data(self):
+        self.db.query(BallTraj).delete()
+        self.db.commit()
+        self.run_2d_roundtrip()
+        self.assertEqual(self.db.query(BallTraj).count(), 0)
+
+    def test_batch_undo_rejects_legacy_3d_repair(self):
+        ids = self.make_auto_batch()
+        self.db.get(TrajectoryRepairHistory, ids[0]).source = 'auto_2d_safe'
+        self.db.commit()
+        before = self.trajectory_snapshot()
+        with self.assertRaises(HTTPException):
+            undo_auto_repair_traj_2d(self.match_id, UndoAutoRepairPayload(repair_ids=ids), self.db)
+        self.assertEqual(self.trajectory_snapshot(), before)
+        self.assertTrue(all(self.db.get(TrajectoryRepairHistory, i).reverted_at is None for i in ids))
+
+    def test_single_3d_undo_rejects_2d_only_history(self):
+        ids = self.make_auto_batch()
+        before = self.trajectory_snapshot()
+        with self.assertRaises(HTTPException):
+            undo_traj_2d_repair(self.match_id, ids[0], self.db)
+        self.assertEqual(self.trajectory_snapshot(), before)
+
+    def run_2d_roundtrip(self):
+        cameras = [camera(i, -(i % 2)) for i in range(4)]
+        for i in (2, 3):
+            cameras[i]["projection"]["extrinsic"][1][3] = -1.0
+        match = self.db.get(Match, self.match_id)
+        match.cameras = cameras
+        target = {"x": 0.5, "y": 0.2, "z": 5.0}
+        for item in cameras:
+            point = project_raw_point(target, item)
+            self.db.add(BallPosition2D(
+                match_id=self.match_id, camera_index=item["index"], frame=100,
+                visibility=1, x=point["x"] + (120 if item["index"] == 2 else 0), y=point["y"],
+            ))
+        self.db.commit()
+        row = self.db.query(BallPosition2D).filter_by(match_id=self.match_id, camera_index=2, frame=100).one()
+        original_x = row.x
+        before3d = self.trajectory_snapshot()
+        before2d = {p.camera_index: (p.x, p.y, p.visibility) for p in self.db.query(BallPosition2D).all()}
+        preview = auto_repair_traj_2d(self.match_id, AutoRepair2DPayload(start_frame=100, end_frame=100, dry_run=True), self.db)
+        self.assertEqual(preview["repaired_frames"], 1)
+        self.assertEqual(row.x, original_x)
+        self.assertEqual(self.trajectory_snapshot(), before3d)
+        applied = auto_repair_traj_2d(self.match_id, AutoRepair2DPayload(start_frame=100, end_frame=100), self.db)
+        self.assertEqual(applied["repaired_frames"], 1)
+        self.assertAlmostEqual(row.x, original_x - 120, places=5)
+        self.assertTrue(all(c["status"] == "ok" for c in applied["grid"][0]["cameras"]))
+        self.assertEqual(self.trajectory_snapshot(), before3d)
+        self.assertEqual(applied['trajectory_points'], [])
+        for point in self.db.query(BallPosition2D).all():
+            if point.camera_index != 2:
+                self.assertEqual((point.x, point.y, point.visibility), before2d[point.camera_index])
+        undo_auto_repair_traj_2d(self.match_id, UndoAutoRepairPayload(repair_ids=applied['repair_ids']), self.db)
+        self.assertAlmostEqual(row.x, original_x)
+        self.assertEqual(self.trajectory_snapshot(), before3d)
+        self.assertEqual({p.camera_index: (p.x, p.y, p.visibility) for p in self.db.query(BallPosition2D).all()}, before2d)
+
     def test_pairwise_diagnostics_ranks_shifted_camera_first(self):
         cameras = [
             camera(0, 0.0),
@@ -411,8 +527,8 @@ class Repair2DApiTest(unittest.TestCase):
 
         # Frame 10 only has cameras 0 and 1 -> the other two are no_data,
         # and with fewer than three views nothing can be cross-checked.
-        self.assertEqual(status_of(10, 0), "ok")
-        self.assertEqual(status_of(10, 1), "ok")
+        self.assertEqual(status_of(10, 0), "unknown")
+        self.assertEqual(status_of(10, 1), "unknown")
         self.assertEqual(status_of(10, 2), "no_data")
         self.assertEqual(status_of(10, 3), "no_data")
 

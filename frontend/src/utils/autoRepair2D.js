@@ -185,9 +185,6 @@ export async function autoRepairBad2DFrames({
           repair_id:
             item.repair_id,
 
-          trajectory_point:
-            item.trajectory_point,
-
           ball_2d_points: (
             pointsByFrame.get(
               Number(
