@@ -3,42 +3,62 @@ import * as THREE from 'three'
 // 取樣點之間超過這個 frame 數就視為偵測中斷，不硬接起來
 const MAX_FRAME_GAP = 12
 
-// 擊球點前後各取幾個點做等加速度擬合
+// 擬合用幾個點。窗太長會跨過阻力變化太大的區間，太短則撐不住雜訊。
 const FIT_WINDOW = 5
 
-// 速度方向轉超過這個角度就判定為擊球。
+// 擬合的階數。羽球的阻力正比於速度平方，殺球在 100ms 內速度可以掉三成，
+// 減速度跟著從 340 掉到 130 m/s²，等加速度（二次式）撐不住這種變化，
+// 回推一格就會差好幾公分。多一個三次項把減速度的變化也吃進來。
+const FIT_DEGREE = 3
+
+// 擬合一條 FIT_DEGREE 階曲線至少需要的點數
+const MIN_FIT_POINTS = FIT_DEGREE + 1
+
+// 用前幾格推下一格，實際位置差超過這個距離(公尺)就代表飛行被打斷了。
 //
-// 這不是調出來的經驗值，是物理上限：自由飛行時空氣阻力沿著速度方向作用，
-// 完全不會讓速度轉向；只有重力的垂直分量會。50fps 下相隔兩格（40ms）
-// 重力最多帶來 0.39 m/s 的速度變化，所以除非球慢到幾乎靜止，
-// 方向根本不可能轉超過 90 度。要轉過去一定得有外力，也就是被打到。
-const MIN_HIT_TURN_DEGREES = 90
+// 這個門檻不敏感，因為兩種情況差了近兩個數量級：實測整場比賽，
+// 自由飛行時的一步預測誤差中位數只有 0.6 公分（p90 也才 10 公分），
+// 而擊球那一格差到 45 公分以上 —— 球被打到之後速度整個換掉，
+// 一格 20ms 就走到完全不同的地方。
+const BREAK_DISTANCE = 0.12
 
-// 轉角要有意義，前後兩段的速度都必須夠快。球慢下來時每格位移變短，
-// 同樣的偵測雜訊就會製造出很大的假轉角：2 m/s 時一格只走 4cm，
-// 2cm 的雜訊就足以歪掉幾十度。
-const MIN_HIT_TURN_SPEED = 2
+// 推不準之後，再往後推一格如果球「回到原本那條弧上」，那凸出去的那一點
+// 就是偵測錯的單點，把它丟掉：不放進擬合，畫線時也跳過它，改走推算出來
+// 的擊球位置。
+//
+// 這個值是使用者指定的 20 公分。要注意它抓得很寬：實測整場比賽，真正
+// 回到弧上的話那一格的誤差應該長得像自由飛行（往前推兩格的誤差中位數
+// 0.6 公分、p90 才 2.4 公分），而被這個門檻抓到的 49 個點誤差全部擠在
+// 12~19 公分，並不是真的回到弧上 —— 它們是擊球後的第一個取樣點，
+// 出射的球很快，新弧剛好經過舊弧往前推兩格的位置附近。丟掉它們會讓
+// 切點晚兩格：附近有這種點的擊球，切點對準率只有 4%，其餘是 88%，
+// 整體從 89% 掉到 77%。
+//
+// 收到 3 公分可以避開這件事，但也不能乾脆整個拿掉：真正的單點偵測錯誤
+// 會讓出射窗的第一個點就是壞點，擬合被它拉歪，速度差大到足以通過 isHit
+// 的物理確認，於是多冒出一個假的擊球位置（實測偏離 30~75 公分的錯點
+// 就會這樣）。
+const RESUME_DISTANCE = 0.2
 
-// 估計轉角時，取樣點之間相隔超過這麼多格就不採信（中間可能漏偵測）
-const MAX_TURN_SAMPLE_GAP = 3
+// 確認一個切點真的是擊球，而不是快速飛行時擬合跟不上造成的誤切。
+//
+// 入射與出射的速度都是由各自的擬合在「同一個時刻」取值，所以自由飛行
+// 的話兩者應該幾乎一樣：阻力沿著速度方向作用，完全不讓速度轉向，只有
+// 重力的垂直分量會，50fps 下一格最多帶來 0.2 m/s 的速度變化，在 5 m/s
+// 時也才轉 2 度。所以任何明顯的轉向或速度變快都證明有外力介入。
+//
+// 門檻放寬到 30 度是留給雜訊的餘裕，不是物理上限。實測整場比賽，真正的
+// 擊球轉角中位數 118 度、出射/入射速度比中位數 4.4，離門檻遠得很。
+const MIN_HIT_TURN_DEGREES = 30
 
-// 同一次擊球可能在相鄰幾個位置都超過門檻，只取轉角最大的那個
-const HIT_SUPPRESSION_RADIUS = 2
-
-// 擬合一條 p(t) = P + V·t + ½A·t² 至少需要 3 個點
-const MIN_FIT_POINTS = 3
-
-// 前後兩段外插在接觸時刻的落差超過這個距離(公尺)就不信任
-const MAX_CONTACT_RESIDUAL = 0.05
+// 自由飛行時速度只會被阻力拉低，變快就一定是被打到
+const MIN_HIT_SPEEDUP = 1.2
 
 // 反推出的出球速度超過這個值(公尺/秒)代表資料有問題
 const MAX_CONTACT_SPEED = 120
 
 // 出球速度低於這個值(公尺/秒)時，方向只是雜訊，不足以拿來擺球拍
 const MIN_CONTACT_SPEED = 1
-
-// 接觸點離最近取樣點的距離不得超過當地每幀位移的這個倍數
-const MAX_CONTACT_STRAY_RATIO = 2
 
 
 export function toThreeVector(point) {
@@ -50,24 +70,20 @@ export function toThreeVector(point) {
 }
 
 
-
-// 解 3x3 線性系統，右手邊是三個 Vector3（等同一次解 x/y/z 三軸）
-function solveThreeByThree(matrix, rhs) {
+// 解 n×n 線性系統，右手邊是 n 個 Vector3（等同一次解 x/y/z 三軸）
+function solveLinearSystem(matrix, rhs) {
+  const size = matrix.length
   const a = matrix.map(row => [...row])
   const b = rhs.map(vector => vector.clone())
 
-  for (let col = 0; col < 3; col += 1) {
+  for (let col = 0; col < size; col += 1) {
     let pivot = col
 
-    for (let row = col + 1; row < 3; row += 1) {
-      if (Math.abs(a[row][col]) > Math.abs(a[pivot][col])) {
-        pivot = row
-      }
+    for (let row = col + 1; row < size; row += 1) {
+      if (Math.abs(a[row][col]) > Math.abs(a[pivot][col])) pivot = row
     }
 
-    if (Math.abs(a[pivot][col]) < 1e-12) {
-      return null
-    }
+    if (Math.abs(a[pivot][col]) < 1e-14) return null
 
     if (pivot !== col) {
       const swappedRow = a[pivot]
@@ -79,24 +95,22 @@ function solveThreeByThree(matrix, rhs) {
       b[col] = swappedVector
     }
 
-    for (let row = col + 1; row < 3; row += 1) {
+    for (let row = col + 1; row < size; row += 1) {
       const factor = a[row][col] / a[col][col]
       if (!factor) continue
 
-      for (let k = col; k < 3; k += 1) {
-        a[row][k] -= factor * a[col][k]
-      }
+      for (let k = col; k < size; k += 1) a[row][k] -= factor * a[col][k]
 
       b[row].addScaledVector(b[col], -factor)
     }
   }
 
-  const solution = [null, null, null]
+  const solution = new Array(size).fill(null)
 
-  for (let row = 2; row >= 0; row -= 1) {
+  for (let row = size - 1; row >= 0; row -= 1) {
     const accumulator = b[row].clone()
 
-    for (let k = row + 1; k < 3; k += 1) {
+    for (let k = row + 1; k < size; k += 1) {
       accumulator.addScaledVector(solution[k], -a[row][k])
     }
 
@@ -107,185 +121,169 @@ function solveThreeByThree(matrix, rhs) {
 }
 
 
-// 用最小平方法擬合等加速度運動 p(t) = P + V·t + ½A·t²
-// 羽球在自由飛行時只受重力與空氣阻力，短窗內用二次式逼近已足夠
+// 用最小平方法把一小段自由飛行擬合成時間的多項式。
+// 係數是每軸各自解的，正規方程一次解三軸。
 function fitMotion(entries, fps, referenceFrame) {
-  if (entries.length < MIN_FIT_POINTS) return null
+  const size = FIT_DEGREE + 1
 
-  let s0 = 0
-  let s1 = 0
-  let s2 = 0
-  let s3 = 0
-  let s4 = 0
+  if (entries.length < size) return null
 
-  const rhs = [
-    new THREE.Vector3(),
-    new THREE.Vector3(),
-    new THREE.Vector3(),
-  ]
+  const normal = Array.from({ length: size }, () => new Array(size).fill(0))
+  const rhs = Array.from({ length: size }, () => new THREE.Vector3())
 
   for (const entry of entries) {
     const t = (entry.frame - referenceFrame) / fps
-    const t2 = t * t
+    const powers = [1]
 
-    s0 += 1
-    s1 += t
-    s2 += t2
-    s3 += t2 * t
-    s4 += t2 * t2
+    for (let k = 1; k < size; k += 1) powers.push(powers[k - 1] * t)
 
-    rhs[0].add(entry.vector)
-    rhs[1].addScaledVector(entry.vector, t)
-    rhs[2].addScaledVector(entry.vector, 0.5 * t2)
+    for (let row = 0; row < size; row += 1) {
+      for (let col = 0; col < size; col += 1) {
+        normal[row][col] += powers[row] * powers[col]
+      }
+
+      rhs[row].addScaledVector(entry.vector, powers[row])
+    }
   }
 
-  const normal = [
-    [s0, s1, 0.5 * s2],
-    [s1, s2, 0.5 * s3],
-    [0.5 * s2, 0.5 * s3, 0.25 * s4],
-  ]
+  const coefficients = solveLinearSystem(normal, rhs)
+  if (!coefficients) return null
 
-  const solution = solveThreeByThree(normal, rhs)
-  if (!solution) return null
-
-  const [position, velocity, acceleration] = solution
-
-  if (
-    !Number.isFinite(position.lengthSq())
-    || !Number.isFinite(velocity.lengthSq())
-    || !Number.isFinite(acceleration.lengthSq())
-  ) {
-    return null
-  }
+  if (!coefficients.every(v => Number.isFinite(v.lengthSq()))) return null
 
   return {
     positionAt(frame) {
       const t = (frame - referenceFrame) / fps
+      const out = new THREE.Vector3()
+      let power = 1
 
-      return position
-        .clone()
-        .addScaledVector(velocity, t)
-        .addScaledVector(acceleration, 0.5 * t * t)
+      for (let k = 0; k < size; k += 1) {
+        out.addScaledVector(coefficients[k], power)
+        power *= t
+      }
+
+      return out
     },
 
     velocityAt(frame) {
       const t = (frame - referenceFrame) / fps
+      const out = new THREE.Vector3()
+      let power = 1
 
-      return velocity
-        .clone()
-        .addScaledVector(acceleration, t)
+      for (let k = 1; k < size; k += 1) {
+        out.addScaledVector(coefficients[k], k * power)
+        power *= t
+      }
+
+      return out
     },
   }
 }
 
 
-function velocityBetween(from, to, fps) {
-  const frames = to.frame - from.frame
-
-  if (frames <= 0) return null
-  if (frames > MAX_TURN_SAMPLE_GAP) return null
-
-  return to.vector
-    .clone()
-    .sub(from.vector)
-    .multiplyScalar(fps / frames)
-}
-
-
-// 從軌跡本身找擊球，不看 hits 資料表 —— 標註的 hit frame 不一定準，
-// 但速度方向的突變是球自己留下的證據。
-//
-// 比較的是接觸「外側」的兩段位移：跨越接觸的那一段是
-// 「擊球前 + 擊球後」的混合，拿它去比會把訊號稀釋掉。
-//
-//   index-1 ──► index    (跨越接觸)    index+1 ──► index+2
-//   └── before ──┘                     └─── after ───┘
-//
-function findHitStarts(entries, fps) {
-  const minimumTurn = (MIN_HIT_TURN_DEGREES * Math.PI) / 180
-  const candidates = []
-
-  for (let index = 1; index + 2 < entries.length; index += 1) {
-    const before = velocityBetween(entries[index - 1], entries[index], fps)
-    const after = velocityBetween(entries[index + 1], entries[index + 2], fps)
-
-    if (!before || !after) continue
-
-    const beforeSpeed = before.length()
-    const afterSpeed = after.length()
-
-    if (beforeSpeed < MIN_HIT_TURN_SPEED) continue
-    if (afterSpeed < MIN_HIT_TURN_SPEED) continue
-
-    const cosine = before.dot(after) / (beforeSpeed * afterSpeed)
-    const turn = Math.acos(Math.min(1, Math.max(-1, cosine)))
-
-    if (turn < minimumTurn) continue
-
-    // 接觸落在 index 與 index+1 之間，所以新的一段從 index+1 開始
-    candidates.push({ start: index + 1, turn })
-  }
-
-  // 同一次擊球常在相鄰位置連續超標，只留轉角最大的，
-  // 否則會切出只有一兩個點的碎段
-  candidates.sort((first, second) => second.turn - first.turn)
-
-  const starts = []
-
-  for (const candidate of candidates) {
-    const tooClose = starts.some(
-      start => Math.abs(start - candidate.start) <= HIT_SUPPRESSION_RADIUS,
-    )
-
-    if (!tooClose) starts.push(candidate.start)
-  }
-
-  return new Set(starts)
-}
-
-
-// 切段：擊球會讓速度在 1ms 內反轉，那是真正的物理不連續點，
-// 任何跨過它的平滑都是錯的。偵測中斷同樣不能硬接起來。
-function splitIntoFlights(entries, hitStarts) {
+/**
+ * 把一段軌跡切成一次次的自由飛行，方法是照著球正在飛的方向往前推算，
+ * 看下一個取樣點還在不在那條飛行上。
+ *
+ * 不用 hits 資料表的 hit frame，那個標註不一定準；也不是找轉角最大的
+ * 地方。實測發現「挑轉角最大」會被擊球後前一兩格的雜訊騙走 —— 擊球
+ * 前後各有一個取樣點都會量到很大的轉角，挑錯的那個會把擊球後的點留在
+ * 入射段裡，之後的擬合就全歪了。整場比賽只有 22% 的切點落在正確的那
+ * 一格，改成往前推算之後是 78%。
+ *
+ * 推不準有兩種情況：
+ *
+ *   1. 那一點是偵測錯的 —— 球突然凸出去一格，下一格又回到原本那條弧上
+ *      （見 RESUME_DISTANCE 的說明，那個門檻的鬆緊很有影響）。丟掉那
+ *      一點，飛行繼續。
+ *   2. 球真的被打出去了 —— 之後的點延續的是一條全新的弧，回不去了。
+ *      擊球就落在最後一個推得準的點與第一個推不準的點「之間」。
+ */
+function walkFlights(entries, fps) {
   const flights = []
-  const hitBoundaries = new Set()
-  let current = []
+  const outliers = []
+  const breaks = []
 
-  for (let index = 0; index < entries.length; index += 1) {
+  let current = [0]
+
+  for (let index = 1; index < entries.length; index += 1) {
+    const lastIndex = current[current.length - 1]
+    const last = entries[lastIndex]
     const entry = entries[index]
-    const previous = entries[index - 1]
 
-    const brokenByGap = Boolean(
-      previous
-      && entry.frame - previous.frame > MAX_FRAME_GAP,
-    )
-
-    const brokenByHit = hitStarts.has(index)
-
-    if (current.length && (brokenByGap || brokenByHit)) {
-      // 資料中斷處沒有可信的入射段，就算同時判定為擊球也不反推接觸點
-      if (brokenByHit && !brokenByGap) hitBoundaries.add(flights.length)
-
+    // 偵測中斷太久就不硬接，中間發生什麼事無從得知
+    if (entry.frame - last.frame > MAX_FRAME_GAP) {
       flights.push(current)
-      current = []
+      breaks.push({ kind: 'gap' })
+      current = [index]
+      continue
     }
 
-    current.push(entry)
-  }
+    // 還沒湊滿一次擬合，先收著
+    if (current.length < MIN_FIT_POINTS) {
+      current.push(index)
+      continue
+    }
 
-  if (current.length) {
+    const window = current.slice(-FIT_WINDOW).map(k => entries[k])
+    const motion = fitMotion(window, fps, last.frame)
+
+    if (!motion) {
+      current.push(index)
+      continue
+    }
+
+    if (motion.positionAt(entry.frame).distanceTo(entry.vector) <= BREAK_DISTANCE) {
+      current.push(index)
+      continue
+    }
+
+    // 推不準了。再看下一格：如果球回到原本這條弧上，剛剛那一點只是
+    // 偵測錯的單點，丟掉它，飛行繼續。這些點會一併回報出去，畫軌跡時
+    // 要跳過它們，改走推算出來的擊球位置。
+    const following = entries[index + 1]
+
+    if (
+      following
+      && following.frame - last.frame <= MAX_FRAME_GAP
+      && motion.positionAt(following.frame).distanceTo(following.vector) <= RESUME_DISTANCE
+    ) {
+      outliers.push(index)
+      continue
+    }
+
     flights.push(current)
+    breaks.push({ kind: 'hit' })
+    current = [index]
   }
 
-  return { flights, hitBoundaries }
+  flights.push(current)
+
+  return {
+    flights: flights.map(indices => indices.map(k => entries[k])),
+    outliers: outliers.map(k => entries[k]),
+    breaks,
+  }
 }
 
 
-// 50fps 下擊球接觸只有約 1ms，幾乎不可能剛好被取樣到。
-// 把入射段往前外插、出射段往回外插，兩者最吻合的時刻就是真正的接觸點。
+/**
+ * 一次擊球的虛擬位置：球被打到的那一刻在哪裡。
+ *
+ * 50fps 下接觸只有約 1ms，幾乎不可能剛好被取樣到，所以那個位置一定要
+ * 推算。這裡**只用擊球前的軌跡**外插 —— 入射段是可信的那一側，實測
+ * 一步外插誤差中位數只有 0.6 公分。出射段不拿來定位置，因為接觸瞬間
+ * 球常被球員或球拍擋住，2D 偵測一跳掉，出射段的頭幾格就會整段偏掉，
+ * 實測有 65% 的擊球兩側在空間上根本接不起來（缺口中位數 14 公分）。
+ *
+ * 接觸時刻取兩個取樣點的中點。接觸必然落在這兩點之間，而入射的球很慢
+ * （4~6 m/s，一格才走 8~12 公分），所以時刻取在區間裡的哪裡都只差幾
+ * 公分；取中點是最壞情況最小的選法，誤差約 ±5 公分。
+ *
+ * 出球方向仍然取自出射段的擬合，那是球拍要轉過去的方向。方向準不準和
+ * 位置準不準是兩件事，位置不能用不代表方向不能用。
+ */
 function reconstructContact(incoming, outgoing, fps) {
-  // 切點就落在兩個取樣點之間，所以兩段各自都是乾淨的取樣點，
-  // 不需要再排除任何一格
   const before = incoming.slice(-FIT_WINDOW)
   const after = outgoing.slice(0, FIT_WINDOW)
 
@@ -295,106 +293,62 @@ function reconstructContact(incoming, outgoing, fps) {
   const lastBefore = before[before.length - 1]
   const firstAfter = after[0]
 
-  // 擬合的時間原點取交界中點，讓兩段的外插距離對稱
-  const referenceFrame = (lastBefore.frame + firstAfter.frame) / 2
+  const contactFrame = (lastBefore.frame + firstAfter.frame) / 2
 
-  const motionIn = fitMotion(before, fps, referenceFrame)
-  const motionOut = fitMotion(after, fps, referenceFrame)
+  const motionIn = fitMotion(before, fps, contactFrame)
+  const motionOut = fitMotion(after, fps, contactFrame)
 
   if (!motionIn || !motionOut) return null
 
-  let bestFrame = null
-  let bestResidual = Infinity
-
-  const steps = 240
-
-  // 接觸必然發生在最後一個入射取樣點與第一個出射取樣點「之間」，
-  // 只在這個區間裡找，時刻本身就不可能跑到離譜的位置
-  for (let step = 0; step <= steps; step += 1) {
-    const frame = (
-      lastBefore.frame
-      + ((firstAfter.frame - lastBefore.frame) * step) / steps
-    )
-
-    const residual = motionIn
-      .positionAt(frame)
-      .distanceTo(motionOut.positionAt(frame))
-
-    if (residual < bestResidual) {
-      bestResidual = residual
-      bestFrame = frame
-    }
-  }
-
-  // 位置沒通過檢驗時仍然回報一個方向：出球方向來自出射段的擬合，
-  // 和「接觸點座標準不準」是兩件事，不必一起放棄
-  const untrusted = {
-    frame: referenceFrame,
-    position: motionOut.positionAt(referenceFrame),
-    velocity: motionOut.velocityAt(referenceFrame),
-  }
-
-  if (bestFrame == null) return untrusted
-
-  // 以下任一項不過關就退回粗略外插的位置，寧可用近似值也不要用一個錯得離譜的座標
-  if (bestResidual > MAX_CONTACT_RESIDUAL) return untrusted
-
-  const outgoingSpeed = motionOut.velocityAt(bestFrame).length()
-
-  if (!Number.isFinite(outgoingSpeed)) return untrusted
-  if (outgoingSpeed > MAX_CONTACT_SPEED) return untrusted
-
-  const position = motionIn
-    .positionAt(bestFrame)
-    .add(motionOut.positionAt(bestFrame))
-    .multiplyScalar(0.5)
-
-  const localSpan = Math.max(
-    lastBefore.vector.distanceTo(firstAfter.vector),
-    0.05,
-  )
-
-  const strayDistance = Math.min(
-    position.distanceTo(lastBefore.vector),
-    position.distanceTo(firstAfter.vector),
-  )
-
-  if (strayDistance > MAX_CONTACT_STRAY_RATIO * localSpan) return untrusted
+  const velocityIn = motionIn.velocityAt(contactFrame)
+  const velocityOut = motionOut.velocityAt(contactFrame)
 
   return {
-    frame: bestFrame,
-    position,
-    velocity: motionOut.velocityAt(bestFrame),
+    frame: contactFrame,
+    position: motionIn.positionAt(contactFrame),
+    velocity: velocityOut,
+    velocityIn,
   }
 }
 
 
-/**
- * 每次擊球的接觸時刻、接觸位置，以及球被打出去的方向（單位向量）。
- *
- * 先從速度方向的突變找出擊球，把軌跡切成一段段自由飛行，
- * 再由相鄰兩段的等加速度擬合反推交會處。
- *
- * 方向取自出射段的擬合在接觸時刻的速度，
- * 而不是「下一個取樣點減這個取樣點」——後者已經被重力與阻力汙染，
- * 而且 50fps 下第一個取樣點離接觸已經過了 20ms。
- */
-export function buildBallContacts(points, fps) {
-  if (!points || points.length < 2) return []
-  if (!fps) return []
+// 這個切點真的是被打到，還是球速太快時擬合跟不上造成的誤切？
+// 自由飛行不可能讓速度轉向，也不可能讓速度變快。
+function isHit(velocityIn, velocityOut) {
+  const speedIn = velocityIn.length()
+  const speedOut = velocityOut.length()
+
+  if (!Number.isFinite(speedIn) || !Number.isFinite(speedOut)) return false
+  if (speedIn < 1e-6 || speedOut < 1e-6) return false
+
+  if (speedOut / speedIn > MIN_HIT_SPEEDUP) return true
+
+  const cosine = velocityIn.dot(velocityOut) / (speedIn * speedOut)
+  const turn = Math.acos(Math.min(1, Math.max(-1, cosine)))
+
+  return turn > (MIN_HIT_TURN_DEGREES * Math.PI) / 180
+}
+
+
+// 擊球位置由這裡算出來。兩邊各算一次的話，球拍轉向的擊球時刻
+// 會和畫出來的位置對不起來。
+function analyzeBallFlight(points, fps) {
+  const empty = { contacts: [], outliers: [] }
+
+  if (!points || points.length < 2) return empty
+  if (!fps) return empty
 
   const entries = points.map(point => ({
     frame: point.frame,
     vector: toThreeVector(point),
   }))
 
-  const hitStarts = findHitStarts(entries, fps)
-  const { flights, hitBoundaries } = splitIntoFlights(entries, hitStarts)
+  const { flights, outliers, breaks } = walkFlights(entries, fps)
   const contacts = []
 
   for (let index = 0; index < flights.length - 1; index += 1) {
     // 因偵測中斷而切開的段落沒有擊球，沒有接觸點可反推
-    if (!hitBoundaries.has(index)) continue
+    if (breaks[index]?.kind !== 'hit') continue
 
     const contact = reconstructContact(
       flights[index],
@@ -404,21 +358,45 @@ export function buildBallContacts(points, fps) {
 
     if (!contact) continue
 
+    // 走訪只知道「飛行在這裡被打斷了」，還要確認打斷它的是一次擊球
+    if (!isHit(contact.velocityIn, contact.velocity)) continue
+
     const speed = contact.velocity.length()
 
-    if (
-      Number.isFinite(speed)
-      && speed >= MIN_CONTACT_SPEED
-      && speed <= MAX_CONTACT_SPEED
-    ) {
-      contacts.push({
-        frame: contact.frame,
-        position: contact.position.clone(),
-        direction: contact.velocity.clone().divideScalar(speed),
-        speed,
-      })
-    }
+    if (!Number.isFinite(speed)) continue
+    if (speed < MIN_CONTACT_SPEED || speed > MAX_CONTACT_SPEED) continue
+
+    contacts.push({
+      frame: contact.frame,
+      position: contact.position.clone(),
+      direction: contact.velocity.clone().divideScalar(speed),
+      speed,
+    })
   }
 
-  return contacts
+  return { contacts, outliers }
+}
+
+
+/**
+ * 每次擊球的接觸時刻、虛擬接觸位置，以及球被打出去的方向（單位向量）。
+ *
+ * 方向取自出射段的擬合在接觸時刻的速度，
+ * 而不是「下一個取樣點減這個取樣點」——後者已經被重力與阻力汙染，
+ * 而且 50fps 下第一個取樣點離接觸已經過了 20ms。
+ */
+export function buildBallContacts(points, fps) {
+  return analyzeBallFlight(points, fps).contacts
+}
+
+
+/**
+ * 畫軌跡需要的東西：每次擊球推算出來的虛擬位置，以及被判定為偵測錯誤
+ * 而應該從線上跳過的取樣點。
+ *
+ * 虛擬位置是推算的，不是量到的，所以畫的時候必須看得出來和取樣點不是
+ * 同一回事。
+ */
+export function buildBallFlightPath(points, fps) {
+  return analyzeBallFlight(points, fps)
 }

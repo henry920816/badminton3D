@@ -18,6 +18,7 @@ const BALL_DIRECTION_MAX_GAP = 3
 
 // 黃色追尾往回涵蓋多少秒
 const BALL_TRAIL_SECONDS = 0.8
+
 let shuttlecockObjectPromise = null
 
 async function loadShuttlecockObject() {
@@ -131,11 +132,14 @@ function AnimatedTrajectory({ points }) {
 
     const trailFrames = Math.round(BALL_TRAIL_SECONDS * fps)
 
+    const inWindow = frame => (
+      frame <= currentFrame
+      && frame >= currentFrame - trailFrames
+    )
+
+    // 追尾走的是灰線的同一條路
     return points
-      .filter(point => (
-        point.frame <= currentFrame
-        && point.frame >= currentFrame - trailFrames
-      ))
+      .filter(point => inWindow(point.frame))
       .map(toThreeVector)
   }, [points, currentFrame, fps])
 
@@ -354,13 +358,18 @@ function aimRacketMatrix(matrix, contact, weight) {
 
 // 球拍姿態來自 SMPL 手腕，擊球瞬間再把拍面轉向球飛出去的方向。
 // 修正一定要從 worker 給的原始矩陣重算，累加在上一格結果上會越轉越歪。
-function applyRacketAim(racket, baseMatrix, contacts, frame) {
+//
+// enabled 為 false 時就只還原 worker 給的原始姿態，球拍完全跟著手腕走 ——
+// 開關兩邊比對，才看得出這個修正到底改了什麼。
+function applyRacketAim(racket, baseMatrix, contacts, frame, enabled) {
   if (!racket || !baseMatrix) return
 
   racket.matrix.copy(baseMatrix)
 
-  const aim = findRacketAim(contacts, frame)
-  if (aim) aimRacketMatrix(racket.matrix, aim.contact, aim.weight)
+  if (enabled) {
+    const aim = findRacketAim(contacts, frame)
+    if (aim) aimRacketMatrix(racket.matrix, aim.contact, aim.weight)
+  }
 
   racket.matrixWorldNeedsUpdate = true
 }
@@ -487,9 +496,11 @@ function loadRacketObject() {
 
 function SmplForwardAvatar({ playerReplay, ballContacts }) {
   const currentFrame = useAppStore(s => s.currentFrame)
+  const racketAimEnabled = useAppStore(s => s.racketAimEnabled)
   const racketRef = useRef(null)
   const baseRacketMatrixRef = useRef(null)
   const ballContactsRef = useRef(ballContacts)
+  const racketAimEnabledRef = useRef(racketAimEnabled)
   const currentFrameRef = useRef(currentFrame)
   const workerRef = useRef(null)
   const requestIdRef = useRef(0)
@@ -501,8 +512,9 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
   const [hasAppliedFrame, setHasAppliedFrame] = useState(false)
   const [failed, setFailed] = useState('')
 
-  // worker 的回覆是非同步的，回來時要用最新的擊球資料與播放位置
+  // worker 的回覆是非同步的，回來時要用最新的擊球資料、開關與播放位置
   ballContactsRef.current = ballContacts
+  racketAimEnabledRef.current = racketAimEnabled
   currentFrameRef.current = currentFrame
 
   useEffect(() => {
@@ -638,6 +650,7 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
             baseRacketMatrixRef.current,
             ballContactsRef.current,
             currentFrameRef.current,
+            racketAimEnabledRef.current,
           )
         }
       }
@@ -685,6 +698,7 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
       baseRacketMatrixRef.current,
       ballContacts,
       currentFrame,
+      racketAimEnabled,
     )
 
     if (lastSentFrameRef.current === poseFrame.frame) return
@@ -850,7 +864,16 @@ function CameraMarker({ cameraConfig }) {
         ]}
       />
 
-      <Html center distanceFactor={12} position={[0, 0.22, 0]}>
+      {/* drei defaults Html to a z-index near 2^24, which would paint the
+          camera icons over the scene toolbar (z-20) and the dataset dialogs
+          (z-100 and up). Keep the whole range under those while still letting
+          drei sort the markers among themselves by depth. */}
+      <Html
+        center
+        distanceFactor={12}
+        position={[0, 0.22, 0]}
+        zIndexRange={[10, 0]}
+      >
         <button
           type="button"
           onClick={(e) => {
@@ -1025,20 +1048,24 @@ export default function Scene3D() {
   const toggleSmplReplay = useAppStore(s => s.toggleSmplReplay)
   const smplReplayBySegmentId = useAppStore(s => s.smplReplayBySegmentId)
   const setSmplReplayData = useAppStore(s => s.setSmplReplayData)
-  const [repairing, setRepairing] = useState(false)
-  const [smplReplayStatus, setSmplReplayStatus] = useState('idle')
+  const racketAimEnabled = useAppStore(s => s.racketAimEnabled)
+  const toggleRacketAim = useAppStore(s => s.toggleRacketAim)
 
   const activeCamera = cameras.find(camera => camera.id === activeCameraId)
   const activeReplayIndex = replaySegments.findIndex(item => item.id === activeReplaySegmentId)
+
+  const [repairing, setRepairing] = useState(false)
+  const [smplReplayStatus, setSmplReplayStatus] = useState('idle')
+
+  const {
+    points,
+    contacts: ballContacts,
+    startFrame: rangeStartFrame,
+    endFrame: rangeEndFrame,
+  } = useRallyBallData()
+
   const activeReplaySegment = activeReplayIndex >= 0 ? replaySegments[activeReplayIndex] : null
   const replayData = activeReplaySegmentId ? smplReplayBySegmentId.get(activeReplaySegmentId) : null
-
-  const goToReplaySegment = (index) => {
-    if (!replaySegments.length) return
-    const clamped = Math.max(0, Math.min(replaySegments.length - 1, index))
-    setActiveReplaySegment(replaySegments[clamped].id)
-  }
-
 
   useEffect(() => {
     if (!replaySegments.length) return
@@ -1103,6 +1130,7 @@ export default function Scene3D() {
     setSmplReplayData,
   ])
 
+  // 每段（通常是一個 rally）只跟後端要一次，切段或關掉重開都直接吃快取
   const handleRepair = async () => {
     if (selectedTrajFrames.length !== 2) return
 
@@ -1132,99 +1160,117 @@ export default function Scene3D() {
     }
   }
 
-  const { points, contacts: ballContacts } = useRallyBallData()
+  // Only surface the replay state while it is not simply working, so the
+  // toolbar stays quiet in the normal case.
+  const smplReplayNote = {
+    loading: '載入中',
+    empty: '無資料',
+    error: '載入失敗',
+  }[smplReplayStatus] || ''
 
   return (
     <div className="w-full h-full relative bg-zinc-950 overflow-hidden">
-      <div className="absolute top-2 left-2 z-20 bg-zinc-900/80 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-200 shadow backdrop-blur-md">
-        3D Camera：<span className="text-yellow-300 font-semibold">{activeCamera?.label || activeCameraId}</span>
-        {activeCamera?.description && (
-          <span className="text-zinc-400 ml-2">{activeCamera.description}</span>
-        )}
-        <span className="text-zinc-500 ml-2">滾輪依滑鼠位置縮放｜右鍵平移｜點 📷 切換影片</span>
-      </div>
+      {/* One row across the top: the wrapper itself must not eat pointer events,
+          otherwise it would swallow the orbit drag over its empty middle. */}
+      <div className="absolute top-2 left-2 right-2 z-20 flex items-start justify-between gap-2 pointer-events-none">
+        <div
+          className="pointer-events-auto shrink-0 bg-zinc-900/80 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-200 shadow backdrop-blur-md"
+          title="滾輪依滑鼠位置縮放｜右鍵平移｜點場上的 📷 切換影片"
+        >
+          3D Camera：<span className="text-yellow-300 font-semibold">{activeCamera?.label || activeCameraId}</span>
+          {activeCamera?.description && (
+            <span className="text-zinc-400 ml-2">{activeCamera.description}</span>
+          )}
+        </div>
 
-      <div className="absolute top-2 right-2 z-20">
-        <div className="flex items-center gap-2">
-          {activeReplaySegment && (
+        <div className="pointer-events-auto flex flex-col items-end gap-1.5">
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
+            {/* Every toggle lives in one pill; first:border-l-0 keeps the
+                divider correct no matter which of them actually render. */}
             <div className="flex items-center bg-zinc-900/80 border border-zinc-800 rounded shadow backdrop-blur-md overflow-hidden text-xs">
+              {activeReplaySegment && (
+                <button
+                  type="button"
+                  onClick={toggleSmplReplay}
+                  className={`px-3 py-1.5 font-semibold border-l border-zinc-800 first:border-l-0 ${
+                    showSmplReplay
+                      ? 'bg-emerald-900/40 text-emerald-200'
+                      : 'text-zinc-300'
+                  }`}
+                  title="顯示或隱藏人物與球拍"
+                >
+                  人物球拍 {showSmplReplay ? '開' : '關'}
+                  {smplReplayNote && ` · ${smplReplayNote}`}
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => goToReplaySegment(activeReplayIndex - 1)}
-                disabled={activeReplayIndex <= 0}
-                className="px-2 py-1.5 text-zinc-300 disabled:opacity-30"
-                title="上一個 Rally 人體重播"
-              >
-                ◀
-              </button>
-              <button
-                type="button"
-                onClick={toggleSmplReplay}
-                className={`px-3 py-1.5 font-semibold border-x border-zinc-800 ${
-                  showSmplReplay
-                    ? 'text-emerald-200 bg-emerald-900/40'
+                onClick={toggleRacketAim}
+                disabled={!showSmplReplay}
+                className={`px-3 py-1.5 font-semibold border-l border-zinc-800 first:border-l-0 disabled:opacity-40 ${
+                  racketAimEnabled
+                    ? 'bg-violet-900/40 text-violet-200'
                     : 'text-zinc-300'
                 }`}
-                title="顯示或隱藏人物與球拍"
+                title={
+                  '擊球瞬間把拍面轉向球飛出去的方向，接觸前後各 4 格漸入漸出。'
+                  + '方向來自擊球後那一段的擬合。'
+                  + '關掉的話球拍完全跟著 SMPL 手腕的姿態走，'
+                  + '開關兩邊比對就看得出這個修正改了什麼。'
+                }
               >
-                人物球拍 {showSmplReplay ? '開' : '關'} · {smplReplayStatus}
+                球拍轉向 {racketAimEnabled ? '開' : '關'}
               </button>
+
               <button
                 type="button"
-                onClick={() => goToReplaySegment(activeReplayIndex + 1)}
-                disabled={activeReplayIndex < 0 || activeReplayIndex >= replaySegments.length - 1}
-                className="px-2 py-1.5 text-zinc-300 disabled:opacity-30"
-                title="下一個 Rally 人體重播"
+                onClick={() => {
+                  if (repairMode) clearTrajSelection()
+                  setRepairMode(!repairMode)
+                }}
+                className={`px-3 py-1.5 font-semibold border-l border-zinc-800 ${
+                  repairMode
+                    ? 'bg-sky-900/40 text-sky-200'
+                    : 'text-zinc-300'
+                }`}
+                title="點兩個異常軌跡點，然後重算中間那一段"
               >
-                ▶
+                修復模式 {repairMode ? '開' : '關'}
               </button>
             </div>
-          )}
+          </div>
 
-          <button
-            onClick={() => {
-              if (repairMode) clearTrajSelection()
-              setRepairMode(!repairMode)
-            }}
-            className={`px-3 py-1 rounded border text-xs font-semibold shadow ${
-              repairMode
-                ? 'bg-sky-800 border-sky-700 text-sky-100'
-                : 'bg-zinc-900/80 border-zinc-800 text-zinc-200'
-            }`}
-          >
-            {repairMode ? 'Repair mode on' : 'Repair mode off'}
-          </button>
+          {repairMode && selectedTrajFrames.length > 0 && (
+            <div className="bg-zinc-900/80 border border-zinc-800 rounded p-3 text-sm shadow-xl flex flex-col gap-2 w-64 backdrop-blur-md">
+              <div className="text-zinc-200 font-semibold mb-1">修復軌跡資料</div>
+              <div className="text-zinc-400 text-xs">
+                已選取點：{selectedTrajFrames.join(' 和 ')}
+                <br />
+                請點兩個異常頭尾的軌跡點
+              </div>
+
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={handleRepair}
+                  disabled={selectedTrajFrames.length !== 2 || repairing}
+                  className="flex-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white rounded px-3 py-1 font-medium transition-colors"
+                >
+                  {repairing ? '修復中...' : '執行修復'}
+                </button>
+
+                <button
+                  onClick={clearTrajSelection}
+                  disabled={repairing}
+                  className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-zinc-300 transition-colors"
+                >
+                  清除
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {repairMode && selectedTrajFrames.length > 0 && (
-        <div className="absolute top-12 right-2 z-20 bg-zinc-900/80 border border-zinc-800 rounded p-3 text-sm shadow-xl flex flex-col gap-2 w-64 backdrop-blur-md">
-          <div className="text-zinc-200 font-semibold mb-1">修復軌跡資料</div>
-          <div className="text-zinc-400 text-xs">
-            已選取點：{selectedTrajFrames.join(' 和 ')}
-            <br />
-            請點兩個異常頭尾的軌跡點
-          </div>
-
-          <div className="flex gap-2 mt-2">
-            <button
-              onClick={handleRepair}
-              disabled={selectedTrajFrames.length !== 2 || repairing}
-              className="flex-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white rounded px-3 py-1 font-medium transition-colors"
-            >
-              {repairing ? '修復中...' : '執行修復'}
-            </button>
-
-            <button
-              onClick={clearTrajSelection}
-              disabled={repairing}
-              className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-zinc-300 transition-colors"
-            >
-              清除
-            </button>
-          </div>
-        </div>
-      )}
 
       <Canvas camera={{ position: [8, 5, 8], fov: 55 }}>
         <ambientLight intensity={0.5} />

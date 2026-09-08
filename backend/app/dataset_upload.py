@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from .db import get_db
 from .models import Anomaly, BallPosition2D, BallTraj, Hit, Match, Rally
 from .reconstruction_assets import (
+    dataset_catalog_entry,
     import_reconstruction_assets,
     inspect_reconstruction_records,
     reconstruction_router,
@@ -3482,7 +3483,8 @@ def list_datasets(
             )
             else []
         )
-        reconstruction = reconstruction_summary(match.id)
+        catalog = dataset_catalog_entry(match.id)
+        reconstruction = catalog["reconstruction"]
 
         datasets.append(
             {
@@ -3556,6 +3558,8 @@ def list_datasets(
                     "score_count",
                     0,
                 ),
+                "players": catalog["players"],
+                "discipline": catalog["discipline"],
             }
         )
 

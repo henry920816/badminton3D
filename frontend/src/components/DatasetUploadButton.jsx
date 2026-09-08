@@ -1467,14 +1467,15 @@ export default function DatasetUploadButton() {
         type="button"
         onClick={openDialog}
         className="
-          rounded
-          border
-          border-indigo-500
-          bg-indigo-600
           px-2
           py-1
+          rounded
+          bg-zinc-900
+          hover:bg-zinc-800
+          border
+          border-zinc-700
           text-xs
-          hover:bg-indigo-500
+          text-zinc-200
         "
       >
         新增資料集

@@ -121,6 +121,9 @@ export const useAppStore = create(
   ) => ({
     matchId: null,
 
+    // 顯示用的資料集名稱，跟著 setMatchMeta 一起更新
+    matchTitle: '',
+
     fps: 50,
     durationSec: 0,
 
@@ -151,6 +154,10 @@ export const useAppStore = create(
     trajByFrame: new Map(),
     ball2DByCameraFrame: new Map(),
     loadedBall2DCameras: new Set(),
+
+    // 擊球瞬間把拍面轉向球飛出去的方向。關掉的話球拍就完全跟著 SMPL
+    // 手腕的姿態走，方便比對這個修正到底改了什麼。預設開著，維持原本行為。
+    racketAimEnabled: true,
 
     pxPerSec: 100,
     scrollLeft: 0,
@@ -204,6 +211,8 @@ export const useAppStore = create(
 
       set({
         fps,
+
+        matchTitle: match?.title || '',
 
         durationSec: (
           match?.duration_sec
@@ -840,6 +849,14 @@ export const useAppStore = create(
     hasBall2DCameraLoaded: cameraIndex => (
       get().loadedBall2DCameras.has(cameraIndex)
     ),
+
+    toggleRacketAim: () => {
+      set(
+        state => ({
+          racketAimEnabled: !state.racketAimEnabled,
+        }),
+      )
+    },
 
     resetTrajCache: () => {
       set({

@@ -873,6 +873,133 @@ def reconstruction_summary(match_id: int) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _manifest_players(manifest: dict | None) -> list[dict]:
+    """Aggregate the player names that show up in a match manifest.
+
+    Player names only live in the rally metadata (UpCourt / DownCourt of the
+    rally CSV), so the dataset catalog has to fold them up per match before the
+    UI can offer a "browse by player" view.
+    """
+
+    accumulator: dict[str, dict] = {}
+
+    for item in _manifest_rallies(manifest).values():
+        if not isinstance(item, dict):
+            continue
+
+        for court, key in (
+            ("up", "up_court"),
+            ("down", "down_court"),
+        ):
+            name = str(item.get(key) or "").strip()
+
+            if not name:
+                continue
+
+            entry = accumulator.setdefault(
+                name,
+                {
+                    "name": name,
+                    "courts": set(),
+                    "rally_count": 0,
+                },
+            )
+            entry["courts"].add(court)
+            entry["rally_count"] += 1
+
+    players = [
+        {
+            "name": entry["name"],
+            "courts": sorted(entry["courts"]),
+            "rally_count": entry["rally_count"],
+        }
+        for entry in accumulator.values()
+    ]
+
+    players.sort(
+        key=lambda player: (
+            -player["rally_count"],
+            player["name"],
+        )
+    )
+
+    return players
+
+
+_DOUBLES_SEPARATOR = re.compile(r"[/／&＆,，、+＋]")
+
+
+def _manifest_discipline(
+    manifest: dict | None,
+    reconstruction: dict,
+) -> str | None:
+    """Derive the badminton discipline (e.g. women's singles) of a match.
+
+    Nothing in the upload declares the discipline directly, so it is folded out
+    of what the manifest does carry: the SMPL gender picked for the match, plus
+    whether a court holds one player name or several.
+    """
+
+    rallies = _manifest_rallies(manifest)
+
+    if not rallies:
+        return None
+
+    doubles = False
+    seen_court = False
+
+    for item in rallies.values():
+        if not isinstance(item, dict):
+            continue
+
+        for key in ("up_court", "down_court"):
+            name = str(item.get(key) or "").strip()
+
+            if not name:
+                continue
+
+            seen_court = True
+
+            if _DOUBLES_SEPARATOR.search(name):
+                doubles = True
+
+    if not seen_court:
+        return None
+
+    gender = _safe_gender(reconstruction.get("gender"))
+
+    if gender not in ("male", "female"):
+        gender = "unknown"
+
+    return f"{gender}_{'doubles' if doubles else 'singles'}"
+
+
+def dataset_catalog_entry(match_id: int) -> dict:
+    """Manifest-derived fields the dataset browser needs, read in one pass."""
+
+    manifest = read_match_asset_manifest(match_id)
+
+    reconstruction = (
+        manifest.get("reconstruction")
+        if isinstance(manifest, dict)
+        else None
+    )
+
+    if not isinstance(reconstruction, dict):
+        reconstruction = {
+            "competition": None,
+            "gender": None,
+            "motion_file_count": 0,
+            "score_count": 0,
+        }
+
+    return {
+        "reconstruction": reconstruction,
+        "players": _manifest_players(manifest),
+        "discipline": _manifest_discipline(manifest, reconstruction),
+    }
+
+
 def _smpl_forward_model(gender: str) -> dict:
     gender = _safe_gender(gender)
     prefix = f"SMPL_FORWARD_{gender.upper()}"

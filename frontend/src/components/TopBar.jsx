@@ -1,15 +1,18 @@
-import React from 'react'
+import React, { useState } from 'react'
 
 import { useAppStore } from '../store.js'
 import { API_BASE } from '../config.js'
 
+import DatasetBrowser from './DatasetBrowser.jsx'
 import DatasetUploadButton from './DatasetUploadButton.jsx'
-import DatasetSwitchButton from './DatasetSwitchButton.jsx'
-import DatasetDeleteButton from './DatasetDeleteButton.jsx'
 
 export default function TopBar() {
   const matchId = useAppStore(
     state => state.matchId,
+  )
+
+  const matchTitle = useAppStore(
+    state => state.matchTitle,
   )
 
   const currentTime = useAppStore(
@@ -27,6 +30,11 @@ export default function TopBar() {
   const selection = useAppStore(
     state => state.selection,
   )
+
+  const [
+    browserOpen,
+    setBrowserOpen,
+  ] = useState(false)
 
   const exportCsv = () => {
     if (matchId == null) {
@@ -61,21 +69,39 @@ export default function TopBar() {
         Badminton 3D Debugger MVP
       </div>
 
-      <div
+      <button
+        type="button"
+        onClick={() => {
+          setBrowserOpen(true)
+        }}
+        title="切換或刪除資料集"
         className="
+          max-w-[380px]
+          truncate
+          px-2
+          py-1
+          rounded
+          bg-zinc-900
+          hover:bg-zinc-800
+          border
+          border-zinc-700
           text-xs
-          text-zinc-400
+          text-zinc-200
         "
       >
-        match #
-        {matchId ?? '-'}
-      </div>
+        {matchId == null
+          ? '尚未選擇資料集'
+          : matchTitle || `資料集 ${matchId}`}
+      </button>
 
       <DatasetUploadButton />
 
-      <DatasetSwitchButton />
-
-      <DatasetDeleteButton />
+      <DatasetBrowser
+        open={browserOpen}
+        onClose={() => {
+          setBrowserOpen(false)
+        }}
+      />
 
       <div
         className="
