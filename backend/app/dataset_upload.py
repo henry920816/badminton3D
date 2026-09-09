@@ -18,7 +18,13 @@ from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from .db import get_db
-from .models import Anomaly, BallPosition2D, BallTraj, Hit, Match, Rally
+from .models import Anomaly, BallPosition2D, BallTraj, Hit, Match, MatchPlayer, Rally
+from .players import (
+    apply_match_gender,
+    build_match_roster,
+    parse_score_label,
+    resolve_up_team,
+)
 from .reconstruction_assets import (
     dataset_catalog_entry,
     import_reconstruction_assets,
@@ -3006,6 +3012,29 @@ def import_dataset_from_session(
     rally_index = 0
     rally_asset_rows: list[dict] = []
 
+    # 名單要在建立 rally 之前就決定，因為每一球都要標記哪一隊在上半場。
+    roster_rows = [
+        {
+            "up_court": safe_str(row.get("UpCourt")),
+            "down_court": safe_str(row.get("DownCourt")),
+        }
+        for _, rally_frame in parsed_rallies
+        for _, row in rally_frame.iterrows()
+    ]
+
+    roster = build_match_roster(
+        db,
+        match_id=match.id,
+        rally_rows=roster_rows,
+        gender="unknown",
+    )
+    warnings.extend(roster["warnings"])
+
+    team_of = roster["team_of"]
+
+    # 每一局各隊目前的分數，用來確認比分連續並算出這一球的勝方
+    game_scores: dict[int, list[int]] = {}
+
     for rally_record, rally_frame in parsed_rallies:
         score_to_rally_id: dict[str, int] = {}
 
@@ -3035,12 +3064,77 @@ def import_dataset_from_session(
             if end_frame is None:
                 end_frame = start_frame
 
+            court_row = {
+                "up_court": safe_str(row.get("UpCourt")),
+                "down_court": safe_str(row.get("DownCourt")),
+            }
+
+            up_team = resolve_up_team(court_row, team_of)
+
+            if up_team is None:
+                warnings.append(
+                    f"{score}：無法判斷哪一隊在上半場，先當成 team 0"
+                )
+                up_team = 0
+
+            parsed_score = parse_score_label(score)
+
+            if parsed_score is None:
+                game_index, up_score, down_score = 1, 0, 0
+
+                warnings.append(
+                    f"{score}：Score 不是 局_上半場_下半場 的格式，無法讀出比分"
+                )
+
+            else:
+                game_index, up_score, down_score = parsed_score
+
+            # Score 記的是這一球打完之後的分數，所以拿它跟同一局上一球比，
+            # 分數多 1 的那一隊就是這一球的勝方。
+            winner_team = None
+
+            if parsed_score is not None:
+                previous = game_scores.setdefault(game_index, [0, 0])
+
+                current = [0, 0]
+                current[up_team] = up_score
+                current[1 - up_team] = down_score
+
+                gained = [
+                    team
+                    for team in (0, 1)
+                    if current[team] - previous[team] == 1
+                ]
+
+                held = [
+                    team
+                    for team in (0, 1)
+                    if current[team] == previous[team]
+                ]
+
+                if len(gained) == 1 and len(held) == 1:
+                    winner_team = gained[0]
+
+                else:
+                    warnings.append(
+                        f"{score}：比分和上一球接不起來"
+                        f"（{previous[0]}:{previous[1]} -> {current[0]}:{current[1]}）"
+                    )
+
+                game_scores[game_index] = current
+
             rally = Rally(
                 match_id=match.id,
                 rally_index=rally_index,
                 start_frame=start_frame,
                 end_frame=end_frame,
                 status="unchecked",
+                game_index=game_index,
+                score_label=score[:20],
+                up_team=up_team,
+                up_score=up_score,
+                down_score=down_score,
+                winner_team=winner_team,
             )
 
             db.add(rally)
@@ -3056,8 +3150,6 @@ def import_dataset_from_session(
                     "score": score,
                     "start_frame": start_frame,
                     "end_frame": end_frame,
-                    "up_court": safe_str(row.get("UpCourt")),
-                    "down_court": safe_str(row.get("DownCourt")),
                 }
             )
 
@@ -3181,6 +3273,18 @@ def import_dataset_from_session(
     )
     warnings.extend(reconstruction.get("warnings", []))
 
+    apply_match_gender(
+        db,
+        match.id,
+        reconstruction.get("gender") or "unknown",
+    )
+
+    if rally_count and not roster["player_count"]:
+        warnings.append(
+            "RallySeg.csv 沒有讀到任何選手名字，"
+            "請確認欄位名稱是 UpCourt 與 DownCourt"
+        )
+
     db.flush()
 
     return {
@@ -3200,6 +3304,7 @@ def import_dataset_from_session(
         "reconstruction_gender": reconstruction.get("gender"),
         "reconstruction_motion_count": reconstruction.get("motion_file_count", 0),
         "reconstruction_score_count": reconstruction.get("score_count", 0),
+        "player_count": roster["player_count"],
         "warnings": warnings,
     }
 
@@ -3483,7 +3588,7 @@ def list_datasets(
             )
             else []
         )
-        catalog = dataset_catalog_entry(match.id)
+        catalog = dataset_catalog_entry(db, match.id)
         reconstruction = catalog["reconstruction"]
 
         datasets.append(
@@ -3560,6 +3665,7 @@ def list_datasets(
                 ),
                 "players": catalog["players"],
                 "discipline": catalog["discipline"],
+                "games": catalog["games"],
             }
         )
 
@@ -3655,6 +3761,15 @@ def delete_dataset(
 
         db.query(BallPosition2D).filter(
             BallPosition2D.match_id
+            == match_id
+        ).delete(
+            synchronize_session=False
+        )
+
+        # 選手本身留著（同一人可能還有別場比賽，也可能已經被改過顯示名稱），
+        # 只清掉這場比賽的出賽名單。
+        db.query(MatchPlayer).filter(
+            MatchPlayer.match_id
             == match_id
         ).delete(
             synchronize_session=False

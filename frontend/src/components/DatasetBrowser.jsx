@@ -24,6 +24,7 @@ const DISCIPLINE_LABELS = {
   male_singles: '男子單打',
   female_doubles: '女子雙打',
   male_doubles: '男子雙打',
+  mixed_doubles: '混合雙打',
   unknown_singles: '單打',
   unknown_doubles: '雙打',
 }

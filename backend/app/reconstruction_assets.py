@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_db
 from .models import Anomaly, Hit, Match, Rally
+from .players import match_discipline, match_game_results, match_players, match_roster
 
 
 reconstruction_router = APIRouter()
@@ -818,8 +819,6 @@ def import_reconstruction_assets(
                 "score": score,
                 "start_frame": int(rally["start_frame"]),
                 "end_frame": int(rally["end_frame"]),
-                "up_court": str(rally.get("up_court", "") or ""),
-                "down_court": str(rally.get("down_court", "") or ""),
                 "players": players,
             }
 
@@ -873,130 +872,18 @@ def reconstruction_summary(match_id: int) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _manifest_players(manifest: dict | None) -> list[dict]:
-    """Aggregate the player names that show up in a match manifest.
+def dataset_catalog_entry(db, match_id: int) -> dict:
+    """The fields the dataset browser needs for one match.
 
-    Player names only live in the rally metadata (UpCourt / DownCourt of the
-    rally CSV), so the dataset catalog has to fold them up per match before the
-    UI can offer a "browse by player" view.
+    Players and discipline come from the database. The manifest is only a file
+    index for the motion .npz files now, so nothing here reads names from it.
     """
-
-    accumulator: dict[str, dict] = {}
-
-    for item in _manifest_rallies(manifest).values():
-        if not isinstance(item, dict):
-            continue
-
-        for court, key in (
-            ("up", "up_court"),
-            ("down", "down_court"),
-        ):
-            name = str(item.get(key) or "").strip()
-
-            if not name:
-                continue
-
-            entry = accumulator.setdefault(
-                name,
-                {
-                    "name": name,
-                    "courts": set(),
-                    "rally_count": 0,
-                },
-            )
-            entry["courts"].add(court)
-            entry["rally_count"] += 1
-
-    players = [
-        {
-            "name": entry["name"],
-            "courts": sorted(entry["courts"]),
-            "rally_count": entry["rally_count"],
-        }
-        for entry in accumulator.values()
-    ]
-
-    players.sort(
-        key=lambda player: (
-            -player["rally_count"],
-            player["name"],
-        )
-    )
-
-    return players
-
-
-_DOUBLES_SEPARATOR = re.compile(r"[/／&＆,，、+＋]")
-
-
-def _manifest_discipline(
-    manifest: dict | None,
-    reconstruction: dict,
-) -> str | None:
-    """Derive the badminton discipline (e.g. women's singles) of a match.
-
-    Nothing in the upload declares the discipline directly, so it is folded out
-    of what the manifest does carry: the SMPL gender picked for the match, plus
-    whether a court holds one player name or several.
-    """
-
-    rallies = _manifest_rallies(manifest)
-
-    if not rallies:
-        return None
-
-    doubles = False
-    seen_court = False
-
-    for item in rallies.values():
-        if not isinstance(item, dict):
-            continue
-
-        for key in ("up_court", "down_court"):
-            name = str(item.get(key) or "").strip()
-
-            if not name:
-                continue
-
-            seen_court = True
-
-            if _DOUBLES_SEPARATOR.search(name):
-                doubles = True
-
-    if not seen_court:
-        return None
-
-    gender = _safe_gender(reconstruction.get("gender"))
-
-    if gender not in ("male", "female"):
-        gender = "unknown"
-
-    return f"{gender}_{'doubles' if doubles else 'singles'}"
-
-
-def dataset_catalog_entry(match_id: int) -> dict:
-    """Manifest-derived fields the dataset browser needs, read in one pass."""
-
-    manifest = read_match_asset_manifest(match_id)
-
-    reconstruction = (
-        manifest.get("reconstruction")
-        if isinstance(manifest, dict)
-        else None
-    )
-
-    if not isinstance(reconstruction, dict):
-        reconstruction = {
-            "competition": None,
-            "gender": None,
-            "motion_file_count": 0,
-            "score_count": 0,
-        }
 
     return {
-        "reconstruction": reconstruction,
-        "players": _manifest_players(manifest),
-        "discipline": _manifest_discipline(manifest, reconstruction),
+        "reconstruction": reconstruction_summary(match_id),
+        "players": match_players(db, match_id),
+        "discipline": match_discipline(db, match_id),
+        "games": match_game_results(db, match_id),
     }
 
 
@@ -1295,11 +1182,23 @@ def get_dataset_timeline(
         .all()
     )
 
+    # 名單來自資料庫，manifest 只用來回答「這一球的動作檔案存在嗎」
+    roster = match_roster(db, match_id)
+
+    def court_names(team: int) -> str:
+        return "／".join(
+            member["name"]
+            for member in roster.get(team, [])
+        )
+
     rally_values = []
 
     for rally in rallies:
         item = metadata.get(str(rally.id), {})
         players = item.get("players") if isinstance(item.get("players"), dict) else {}
+        up_team = int(rally.up_team or 0)
+        down_team = 1 - up_team
+
         rally_values.append(
             {
                 "id": rally.id,
@@ -1307,21 +1206,28 @@ def get_dataset_timeline(
                 "start_frame": rally.start_frame,
                 "end_frame": rally.end_frame,
                 "status": rally.status,
-                "score": item.get("score"),
-                "up_court": item.get("up_court"),
-                "down_court": item.get("down_court"),
+                "score": rally.score_label,
+                "game_index": rally.game_index,
+                "up_score": rally.up_score,
+                "down_score": rally.down_score,
+                "up_team": up_team,
+                "winner_team": rally.winner_team,
+                "up_court": court_names(up_team),
+                "down_court": court_names(down_team),
                 "players": [
                     {
                         "court": "up",
                         "player_index": 0,
-                        "name": item.get("up_court"),
+                        "team": up_team,
+                        "name": court_names(up_team),
                         "available": "0" in players,
                         "smpl_forward_model": _smpl_forward_model(gender),
                     },
                     {
                         "court": "down",
                         "player_index": 1,
-                        "name": item.get("down_court"),
+                        "team": down_team,
+                        "name": court_names(down_team),
                         "available": "1" in players,
                         "smpl_forward_model": _smpl_forward_model(gender),
                     },
@@ -1403,9 +1309,20 @@ def get_dataset_smpl_replay(
     players = []
     checked_paths = []
 
+    # 名字一樣從資料庫的名單來，靠這一球的 up_team 決定哪一隊在上半場
+    roster = match_roster(db, match_id)
+    rally_row = db.get(Rally, int(rally.get("rally_id") or 0))
+    up_team = int(getattr(rally_row, "up_team", 0) or 0)
+
+    def court_names(team: int) -> str:
+        return "／".join(
+            member["name"]
+            for member in roster.get(team, [])
+        )
+
     player_specs = [
-        (0, "up", rally.get("up_court")),
-        (1, "down", rally.get("down_court")),
+        (0, "up", court_names(up_team)),
+        (1, "down", court_names(1 - up_team)),
     ]
 
     for player_index, court, player_name in player_specs:
