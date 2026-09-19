@@ -31,6 +31,7 @@ from .schemas import (
     TrajRepairPayload,
 )
 from .triangulation import (
+    pairwise_consensus_point,
     pairwise_triangulation_diagnostics,
     scan_2d_camera_grid,
     triangulate_observations,
@@ -499,6 +500,122 @@ def get_traj_2d_camera_grid(
         start_frame,
         end_frame,
     )
+
+
+MAX_PAIRWISE_FRAMES = 6000
+
+
+@app.get(
+    "/matches/{match_id}/traj2d/pairwise"
+)
+def get_traj_2d_pairwise(
+    match_id: int,
+    start_frame: int,
+    end_frame: int,
+    db: Session = Depends(get_db),
+):
+    """每個 frame 用 2D 羽球位置兩兩重建，回傳各組 3D 點的中位數。
+
+    前端拿這串點來偵測擊球，擊球前最後一格的點也是球拍拍面中心要對準的
+    位置。沒有可用相機組合的 frame 不會出現在結果裡。
+    """
+    match = db.get(
+        Match,
+        match_id,
+    )
+
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail="match not found",
+        )
+
+    if end_frame < start_frame:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "end_frame must be greater "
+                "than or equal to start_frame"
+            ),
+        )
+
+    if (
+        end_frame
+        - start_frame
+        > MAX_PAIRWISE_FRAMES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"range too large "
+                f"(max {MAX_PAIRWISE_FRAMES} frames)"
+            ),
+        )
+
+    cameras_by_index = (
+        cameras_by_index_for_match(
+            match
+        )
+    )
+
+    rows = (
+        db.query(BallPosition2D)
+        .filter(
+            BallPosition2D.match_id
+            == match_id,
+            BallPosition2D.frame
+            >= start_frame,
+            BallPosition2D.frame
+            <= end_frame,
+            BallPosition2D.visibility
+            > 0,
+        )
+        .all()
+    )
+
+    observations_by_frame = {}
+
+    for row in rows:
+        observations_by_frame.setdefault(
+            row.frame,
+            [],
+        ).append(
+            {
+                "camera_index":
+                    row.camera_index,
+
+                "x":
+                    row.x,
+
+                "y":
+                    row.y,
+            }
+        )
+
+    results = []
+
+    for frame in sorted(observations_by_frame):
+        consensus = pairwise_consensus_point(
+            cameras_by_index,
+            observations_by_frame.get(
+                frame,
+                [],
+            ),
+        )
+
+        if consensus is None:
+            continue
+
+        results.append(
+            {
+                "frame": frame,
+                **consensus["point"],
+                "pair_count":
+                    consensus["pair_count"],
+            }
+        )
+
+    return results
 
 
 def trajectory_point_dict(

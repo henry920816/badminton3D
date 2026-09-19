@@ -825,6 +825,64 @@ def _quality_pair_stable(cameras, pair):
     return angle >= QUALITY_MIN_RAY_ANGLE_DEGREES
 
 
+def pairwise_consensus_point(
+    cameras_by_index: dict[int, dict],
+    observations: list[dict],
+    reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
+) -> dict | None:
+    """Median of every stable two-camera reconstruction of one frame.
+
+    Each pair gives its own 3D point; a wrong 2D label in one view only
+    corrupts the pairs containing it, and the median ignores them as long
+    as they are the minority. Returns None when no pair is usable.
+    """
+    observations_by_camera: dict[int, dict] = {}
+
+    for observation in observations:
+        camera_index = int(observation.get("camera_index"))
+        if camera_index not in cameras_by_index:
+            continue
+        try:
+            observations_by_camera[camera_index] = {
+                "camera_index": camera_index,
+                "x": _finite_float(observation.get("x"), "2D x"),
+                "y": _finite_float(observation.get("y"), "2D y"),
+            }
+        except ValueError:
+            continue
+
+    points = []
+
+    for pair in combinations(
+        [observations_by_camera[index] for index in sorted(observations_by_camera)],
+        2,
+    ):
+        try:
+            # 兩條視線幾乎平行時，深度方向會被雜訊放大到幾公尺
+            if not _quality_pair_stable(cameras_by_index, pair):
+                continue
+            result = triangulate_observations(cameras_by_index, list(pair))
+        except (ValueError, np.linalg.LinAlgError, OverflowError, FloatingPointError):
+            continue
+        if result["max_error"] > reprojection_threshold_px:
+            continue
+        points.append([result["point"][axis] for axis in ("x", "y", "z")])
+
+    if not points:
+        return None
+
+    consensus = np.median(np.asarray(points, dtype=np.float64), axis=0)
+
+    return {
+        "point": {
+            "x": float(consensus[0]),
+            "y": float(consensus[1]),
+            "z": float(consensus[2]),
+        },
+        "pair_count": len(points),
+    }
+
+
 def scan_2d_camera_grid(
     cameras_by_index: dict[int, dict],
     observations_by_frame: dict[int, list[dict]],

@@ -1,5 +1,8 @@
 let model = null
 
+// SMPL 的 L_Hand、R_Hand 關節，位置大約在掌心
+const HAND_JOINTS = [22, 23]
+
 function rodrigues(v) {
   const x0 = Number(v?.[0] || 0)
   const y0 = Number(v?.[1] || 0)
@@ -257,9 +260,25 @@ function computeFrame(message) {
     message.racket_transform,
     message.racket_frame_offset
   )
+  // 蒙皮矩陣作用在靜止關節上就是擺好姿勢的關節，再加 trans（與 shader 相同），
+  // 結果是軌跡點用的 raw 座標
+  const handPoints = HAND_JOINTS.map((joint) => {
+    const [x, y, z] = transformPoint(
+      transforms[joint],
+      model.joints[joint * 3],
+      model.joints[joint * 3 + 1],
+      model.joints[joint * 3 + 2],
+    )
+    return {
+      x: x + Number(message.trans?.[0] || 0),
+      y: y + Number(message.trans?.[1] || 0),
+      z: z + Number(message.trans?.[2] || 0),
+    }
+  })
   return {
     jointMatrices,
     poseFeature,
+    handPoints,
     racketMatrix: precomputedRacketMatrix || computeRacketMatrix(
       message.racket_pose, rotMats, model.joints, model.shared.parents, message.trans
     ),
@@ -267,7 +286,7 @@ function computeFrame(message) {
 }
 
 function processFrameMessage(message) {
-  const { jointMatrices, poseFeature, racketMatrix } = computeFrame(message)
+  const { jointMatrices, poseFeature, handPoints, racketMatrix } = computeFrame(message)
   self.postMessage({
     type: 'frame',
     requestId: message.requestId,
@@ -275,6 +294,7 @@ function processFrameMessage(message) {
     frame: message.frame,
     jointMatrices,
     poseFeature,
+    handPoints,
     trans: message.trans,
     racketMatrix,
   }, [jointMatrices.buffer, poseFeature.buffer])

@@ -9,3 +9,4 @@ __pycache__/
 .DS_Store
 backend/app/datasets/
 body_models/
+docs/

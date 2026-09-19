@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from app.auto_repair import AutoRepair2DPayload, auto_repair_traj_2d, UndoAutoRepairPayload, undo_auto_repair_traj_2d
 
 from app.main import (
+    get_traj_2d_pairwise,
     repair_traj_from_2d,
     undo_traj_2d_repair,
 )
@@ -167,6 +168,36 @@ class Repair2DApiTest(unittest.TestCase):
             observations=observations,
             confirm=confirm,
         )
+
+    def test_pairwise_points_for_frame_range(self):
+        target = {"x": 0.5, "y": 0.2, "z": 5.0}
+        for frame in (100, 101):
+            for item in self.cameras:
+                projected = project_raw_point(target, item)
+                self.db.add(BallPosition2D(
+                    match_id=self.match_id, camera_index=item["index"], frame=frame,
+                    x=projected["x"], y=projected["y"], visibility=1,
+                ))
+        # 只有一台相機看得到的格子沒辦法重建，不該出現在結果裡
+        self.db.add(BallPosition2D(
+            match_id=self.match_id, camera_index=0, frame=102, x=300, y=200, visibility=1,
+        ))
+        # 範圍外的格子不回傳
+        self.db.add(BallPosition2D(
+            match_id=self.match_id, camera_index=0, frame=200, x=300, y=200, visibility=1,
+        ))
+        self.db.commit()
+
+        rows = get_traj_2d_pairwise(self.match_id, 100, 150, self.db)
+
+        self.assertEqual([row["frame"] for row in rows], [100, 101])
+        for row in rows:
+            self.assertEqual(row["pair_count"], 1)
+            for axis in ("x", "y", "z"):
+                self.assertAlmostEqual(row[axis], target[axis], places=6)
+
+        with self.assertRaises(HTTPException):
+            get_traj_2d_pairwise(self.match_id, 150, 100, self.db)
 
     def test_preview_does_not_write(self):
         result = repair_traj_from_2d(

@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 
 // 取樣點之間超過這個 frame 數就視為偵測中斷，不硬接起來
-const MAX_FRAME_GAP = 12
+export const MAX_FRAME_GAP = 12
 
 // 擬合用幾個點。窗太長會跨過阻力變化太大的區間，太短則撐不住雜訊。
 const FIT_WINDOW = 5
@@ -10,9 +10,6 @@ const FIT_WINDOW = 5
 // 減速度跟著從 340 掉到 130 m/s²，等加速度（二次式）撐不住這種變化，
 // 回推一格就會差好幾公分。多一個三次項把減速度的變化也吃進來。
 const FIT_DEGREE = 3
-
-// 擬合一條 FIT_DEGREE 階曲線至少需要的點數
-const MIN_FIT_POINTS = FIT_DEGREE + 1
 
 // 用前幾格推下一格，實際位置差超過這個距離(公尺)就代表飛行被打斷了。
 //
@@ -59,6 +56,44 @@ const MAX_CONTACT_SPEED = 120
 
 // 出球速度低於這個值(公尺/秒)時，方向只是雜訊，不足以拿來擺球拍
 const MIN_CONTACT_SPEED = 1
+
+
+// 上面的門檻都是照 ball_traj 調出來的。ball_traj 很平滑，相鄰格的
+// 二階差分中位數只有 0.4 公分。
+const TRAJ_FLIGHT_OPTIONS = {
+  fitWindow: FIT_WINDOW,
+  fitDegree: FIT_DEGREE,
+  breakDistance: BREAK_DISTANCE,
+  resumeDistance: RESUME_DISTANCE,
+  minHitTurnDegrees: MIN_HIT_TURN_DEGREES,
+  minHitSpacingFrames: 0,
+}
+
+
+/**
+ * 給 2D 標註兩兩重建的 3D 點用的門檻。
+ *
+ * 擊球前球最慢，2D 標註在那裡相對準，但球飛得快的中段比 ball_traj
+ * 抖約 10 倍（二階差分中位數 3.9 公分），用 ball_traj 的門檻會在中段
+ * 切出一大堆假擊球（match 1 整場 1546 次，實際約 250 次）。
+ *
+ * 在 match 1 有完整 hits 標註的 30 個 rally 上掃過參數後選這組：
+ * - 二次式、8 點：三次式在這種雜訊下外推一格就飄走
+ * - 推不準的門檻放寬到 20 公分，回到弧上的門檻跟著放到 30 公分
+ * - 轉角至少 60 度：真正的擊球轉角中位數 118 度，雜訊造成的假切點轉角小
+ * - 12 格內只留一次：實際相鄰兩拍最少也隔 19 格
+ *
+ * 前後 3 格內對上 hits 的比例 70%，偵測到的擊球 60% 對得上 hits。
+ * hits 本身不一定準，這兩個數字只能當相對比較。
+ */
+export const PAIRWISE_FLIGHT_OPTIONS = {
+  fitWindow: 8,
+  fitDegree: 2,
+  breakDistance: 0.2,
+  resumeDistance: 0.3,
+  minHitTurnDegrees: 60,
+  minHitSpacingFrames: 12,
+}
 
 
 export function toThreeVector(point) {
@@ -123,8 +158,8 @@ function solveLinearSystem(matrix, rhs) {
 
 // 用最小平方法把一小段自由飛行擬合成時間的多項式。
 // 係數是每軸各自解的，正規方程一次解三軸。
-function fitMotion(entries, fps, referenceFrame) {
-  const size = FIT_DEGREE + 1
+function fitMotion(entries, fps, referenceFrame, degree) {
+  const size = degree + 1
 
   if (entries.length < size) return null
 
@@ -199,7 +234,8 @@ function fitMotion(entries, fps, referenceFrame) {
  *   2. 球真的被打出去了 —— 之後的點延續的是一條全新的弧，回不去了。
  *      擊球就落在最後一個推得準的點與第一個推不準的點「之間」。
  */
-function walkFlights(entries, fps) {
+function walkFlights(entries, fps, options) {
+  const minFitPoints = options.fitDegree + 1
   const flights = []
   const outliers = []
   const breaks = []
@@ -220,20 +256,20 @@ function walkFlights(entries, fps) {
     }
 
     // 還沒湊滿一次擬合，先收著
-    if (current.length < MIN_FIT_POINTS) {
+    if (current.length < minFitPoints) {
       current.push(index)
       continue
     }
 
-    const window = current.slice(-FIT_WINDOW).map(k => entries[k])
-    const motion = fitMotion(window, fps, last.frame)
+    const window = current.slice(-options.fitWindow).map(k => entries[k])
+    const motion = fitMotion(window, fps, last.frame, options.fitDegree)
 
     if (!motion) {
       current.push(index)
       continue
     }
 
-    if (motion.positionAt(entry.frame).distanceTo(entry.vector) <= BREAK_DISTANCE) {
+    if (motion.positionAt(entry.frame).distanceTo(entry.vector) <= options.breakDistance) {
       current.push(index)
       continue
     }
@@ -246,7 +282,7 @@ function walkFlights(entries, fps) {
     if (
       following
       && following.frame - last.frame <= MAX_FRAME_GAP
-      && motion.positionAt(following.frame).distanceTo(following.vector) <= RESUME_DISTANCE
+      && motion.positionAt(following.frame).distanceTo(following.vector) <= options.resumeDistance
     ) {
       outliers.push(index)
       continue
@@ -283,20 +319,21 @@ function walkFlights(entries, fps) {
  * 出球方向仍然取自出射段的擬合，那是球拍要轉過去的方向。方向準不準和
  * 位置準不準是兩件事，位置不能用不代表方向不能用。
  */
-function reconstructContact(incoming, outgoing, fps) {
-  const before = incoming.slice(-FIT_WINDOW)
-  const after = outgoing.slice(0, FIT_WINDOW)
+function reconstructContact(incoming, outgoing, fps, options) {
+  const minFitPoints = options.fitDegree + 1
+  const before = incoming.slice(-options.fitWindow)
+  const after = outgoing.slice(0, options.fitWindow)
 
-  if (before.length < MIN_FIT_POINTS) return null
-  if (after.length < MIN_FIT_POINTS) return null
+  if (before.length < minFitPoints) return null
+  if (after.length < minFitPoints) return null
 
   const lastBefore = before[before.length - 1]
   const firstAfter = after[0]
 
   const contactFrame = (lastBefore.frame + firstAfter.frame) / 2
 
-  const motionIn = fitMotion(before, fps, contactFrame)
-  const motionOut = fitMotion(after, fps, contactFrame)
+  const motionIn = fitMotion(before, fps, contactFrame, options.fitDegree)
+  const motionOut = fitMotion(after, fps, contactFrame, options.fitDegree)
 
   if (!motionIn || !motionOut) return null
 
@@ -305,6 +342,9 @@ function reconstructContact(incoming, outgoing, fps) {
 
   return {
     frame: contactFrame,
+    // 球在被打之前最慢，這一格是離接觸點最近的真實取樣
+    lastFrameBefore: lastBefore.frame,
+    lastPositionBefore: lastBefore.vector,
     position: motionIn.positionAt(contactFrame),
     velocity: velocityOut,
     velocityIn,
@@ -314,7 +354,7 @@ function reconstructContact(incoming, outgoing, fps) {
 
 // 這個切點真的是被打到，還是球速太快時擬合跟不上造成的誤切？
 // 自由飛行不可能讓速度轉向，也不可能讓速度變快。
-function isHit(velocityIn, velocityOut) {
+function isHit(velocityIn, velocityOut, minTurnDegrees) {
   const speedIn = velocityIn.length()
   const speedOut = velocityOut.length()
 
@@ -326,13 +366,13 @@ function isHit(velocityIn, velocityOut) {
   const cosine = velocityIn.dot(velocityOut) / (speedIn * speedOut)
   const turn = Math.acos(Math.min(1, Math.max(-1, cosine)))
 
-  return turn > (MIN_HIT_TURN_DEGREES * Math.PI) / 180
+  return turn > (minTurnDegrees * Math.PI) / 180
 }
 
 
 // 擊球位置由這裡算出來。兩邊各算一次的話，球拍轉向的擊球時刻
 // 會和畫出來的位置對不起來。
-function analyzeBallFlight(points, fps) {
+function analyzeBallFlight(points, fps, options = TRAJ_FLIGHT_OPTIONS) {
   const empty = { contacts: [], outliers: [] }
 
   if (!points || points.length < 2) return empty
@@ -343,7 +383,7 @@ function analyzeBallFlight(points, fps) {
     vector: toThreeVector(point),
   }))
 
-  const { flights, outliers, breaks } = walkFlights(entries, fps)
+  const { flights, outliers, breaks } = walkFlights(entries, fps, options)
   const contacts = []
 
   for (let index = 0; index < flights.length - 1; index += 1) {
@@ -354,12 +394,13 @@ function analyzeBallFlight(points, fps) {
       flights[index],
       flights[index + 1],
       fps,
+      options,
     )
 
     if (!contact) continue
 
     // 走訪只知道「飛行在這裡被打斷了」，還要確認打斷它的是一次擊球
-    if (!isHit(contact.velocityIn, contact.velocity)) continue
+    if (!isHit(contact.velocityIn, contact.velocity, options.minHitTurnDegrees)) continue
 
     const speed = contact.velocity.length()
 
@@ -368,13 +409,41 @@ function analyzeBallFlight(points, fps) {
 
     contacts.push({
       frame: contact.frame,
+      lastFrameBefore: contact.lastFrameBefore,
+      lastPositionBefore: contact.lastPositionBefore.clone(),
       position: contact.position.clone(),
       direction: contact.velocity.clone().divideScalar(speed),
       speed,
+      impulse: contact.velocity.distanceTo(contact.velocityIn),
     })
   }
 
-  return { contacts, outliers }
+  return {
+    contacts: mergeNearbyContacts(contacts, options.minHitSpacingFrames),
+    outliers,
+  }
+}
+
+
+// 相鄰兩拍之間球至少要飛過網再飛回來，太近的切點一定有雜訊造成的。
+// 留速度變化最大的那一個，也就是最像被球拍打到的那一個。
+function mergeNearbyContacts(contacts, minSpacingFrames) {
+  if (!minSpacingFrames) return contacts
+
+  const merged = []
+
+  for (const contact of contacts) {
+    const last = merged[merged.length - 1]
+
+    if (!last || contact.frame - last.frame >= minSpacingFrames) {
+      merged.push(contact)
+      continue
+    }
+
+    if (contact.impulse > last.impulse) merged[merged.length - 1] = contact
+  }
+
+  return merged
 }
 
 
@@ -385,8 +454,8 @@ function analyzeBallFlight(points, fps) {
  * 而不是「下一個取樣點減這個取樣點」——後者已經被重力與阻力汙染，
  * 而且 50fps 下第一個取樣點離接觸已經過了 20ms。
  */
-export function buildBallContacts(points, fps) {
-  return analyzeBallFlight(points, fps).contacts
+export function buildBallContacts(points, fps, options) {
+  return analyzeBallFlight(points, fps, options).contacts
 }
 
 
@@ -397,6 +466,6 @@ export function buildBallContacts(points, fps) {
  * 虛擬位置是推算的，不是量到的，所以畫的時候必須看得出來和取樣點不是
  * 同一回事。
  */
-export function buildBallFlightPath(points, fps) {
-  return analyzeBallFlight(points, fps)
+export function buildBallFlightPath(points, fps, options) {
+  return analyzeBallFlight(points, fps, options)
 }

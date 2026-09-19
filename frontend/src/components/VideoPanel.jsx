@@ -21,6 +21,10 @@ import {
   api,
 } from '../api.js'
 
+import {
+  useRallyBallData,
+} from '../utils/useRallyBallData.js'
+
 
 // 後端 get_traj2d 的 end 預設值，代表「這台相機全部」
 const ALL_FRAMES = 999999999
@@ -355,6 +359,10 @@ function drawProjectionOverlay({
   repair2DMode,
   repairObservation,
   repairPreviewPoint,
+  racketTips,
+  showRacketTip,
+  handPoints,
+  showHands,
 }) {
   if (
     !canvas
@@ -522,6 +530,64 @@ function drawProjectionOverlay({
     }
   }
 
+  const drawProjectedPoints = (
+    points,
+    fillStyle,
+  ) => {
+    for (
+      const point
+      of points
+    ) {
+      const projection = (
+        project3DToImage(
+          point,
+          cameraParams,
+        )
+      )
+
+      if (!projection) {
+        continue
+      }
+
+      drawPoint({
+        u: projection.u,
+        v: projection.v,
+        imageWidth: (
+          cameraParams.imageWidth
+          || video.videoWidth
+          || 1920
+        ),
+        imageHeight: (
+          cameraParams.imageHeight
+          || video.videoHeight
+          || 1200
+        ),
+        fillStyle,
+        radius: 4,
+      })
+    }
+  }
+
+  if (
+    showHands
+    && cameraParams
+  ) {
+    drawProjectedPoints(
+      handPoints,
+      '#facc15',
+    )
+  }
+
+  if (
+    showRacketTip
+    && cameraParams
+  ) {
+    drawProjectedPoints(
+      racketTips,
+      '#f97316',
+    )
+  }
+
   const ball2DPoint = (
     ball2DMap?.get(currentFrame)
   )
@@ -656,6 +722,20 @@ export default function VideoPanel() {
     state => state.currentFrame
   )
 
+  // 和 3D 場景同一份擊球結果（兩兩重建點有快取，不會多打一次後端）
+  const {
+    contacts: ballContacts,
+  } = useRallyBallData()
+
+  // 這一格是不是某次擊球「球速或方向改變前的最後一個點」，
+  // 也就是球拍拍面中心要對準的那一格
+  const isLastFrameBeforeHit = useMemo(
+    () => ballContacts.some(
+      contact => contact.lastFrameBefore === currentFrame,
+    ),
+    [ballContacts, currentFrame],
+  )
+
   const setCurrentFrame = useAppStore(
     state => state.setCurrentFrame
   )
@@ -678,6 +758,10 @@ export default function VideoPanel() {
 
   const ball2DByCameraFrame = useAppStore(
     state => state.ball2DByCameraFrame
+  )
+
+  const playerKeypointsByPlayer = useAppStore(
+    state => state.playerKeypointsByPlayer
   )
 
   const upsertBall2DPoints = useAppStore(
@@ -746,6 +830,16 @@ export default function VideoPanel() {
   const [
     showBall2D,
     setShowBall2D,
+  ] = useState(true)
+
+  const [
+    showRacketTip,
+    setShowRacketTip,
+  ] = useState(true)
+
+  const [
+    showHands,
+    setShowHands,
   ] = useState(true)
 
   const [
@@ -892,6 +986,30 @@ export default function VideoPanel() {
       : null
   )
 
+  const {
+    racketTips,
+    handPoints,
+  } = useMemo(
+    () => {
+      const keypoints = Object.values(
+        playerKeypointsByPlayer
+        || {},
+      )
+
+      return {
+        racketTips: keypoints
+          .map(item => item.racketTip)
+          .filter(Boolean),
+
+        handPoints: keypoints
+          .flatMap(item => item.hands || []),
+      }
+    },
+    [
+      playerKeypointsByPlayer,
+    ],
+  )
+
   const activeBall2DMap = useMemo(
     () => (
       ball2DByCameraFrame.get(
@@ -963,6 +1081,10 @@ export default function VideoPanel() {
       repairPreviewPoint: (
         repair2DPreviewPoint
       ),
+      racketTips,
+      showRacketTip,
+      handPoints,
+      showHands,
     })
   }
 
@@ -1018,6 +1140,10 @@ export default function VideoPanel() {
       repair2DMode,
       activeRepair2DObservation,
       repair2DPreviewPoint,
+      racketTips,
+      showRacketTip,
+      handPoints,
+      showHands,
     ],
   )
 
@@ -1050,6 +1176,10 @@ export default function VideoPanel() {
       repair2DMode,
       activeRepair2DObservation,
       repair2DPreviewPoint,
+      racketTips,
+      showRacketTip,
+      handPoints,
+      showHands,
     ],
   )
 
@@ -1091,6 +1221,10 @@ export default function VideoPanel() {
       repair2DMode,
       activeRepair2DObservation,
       repair2DPreviewPoint,
+      racketTips,
+      showRacketTip,
+      handPoints,
+      showHands,
     ],
   )
 
@@ -2422,11 +2556,27 @@ export default function VideoPanel() {
             ? ' / 2D 標註 ON'
             : ''}
 
+          {projectionAvailable
+            && showRacketTip
+            ? ' / 拍頂 ON'
+            : ''}
+
+          {projectionAvailable
+            && showHands
+            ? ' / 手掌 ON'
+            : ''}
+
           {repair2DMode
             ? ' / 2D 修復 ON'
             : ''}
 
           {` / ${safePlaybackRate}x`}
+
+          {isLastFrameBeforeHit && (
+            <span className="text-amber-300 font-semibold">
+              {` / lastFrameBefore = ${currentFrame}`}
+            </span>
+          )}
         </div>
 
         {activeSource && (
@@ -2473,6 +2623,72 @@ export default function VideoPanel() {
                 ●
               </span>
               {' 3D→2D'}
+            </button>
+
+            <button
+              type="button"
+              disabled={
+                !projectionAvailable
+              }
+              onClick={() => {
+                setShowRacketTip(
+                  value => !value
+                )
+              }}
+              className={[
+                'px-2 py-1 rounded border text-xs',
+
+                projectionAvailable
+                  ? (
+                      showRacketTip
+                        ? 'bg-orange-900/80 border-orange-500 text-orange-50 hover:bg-orange-800/80'
+                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
+                    )
+                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
+              ].join(' ')}
+              title={
+                projectionAvailable
+                  ? '顯示或隱藏 3D 球拍拍頂的投影'
+                  : '此視角沒有 camera params'
+              }
+            >
+              <span className="text-orange-400">
+                ●
+              </span>
+              {' 拍頂'}
+            </button>
+
+            <button
+              type="button"
+              disabled={
+                !projectionAvailable
+              }
+              onClick={() => {
+                setShowHands(
+                  value => !value
+                )
+              }}
+              className={[
+                'px-2 py-1 rounded border text-xs',
+
+                projectionAvailable
+                  ? (
+                      showHands
+                        ? 'bg-yellow-900/80 border-yellow-500 text-yellow-50 hover:bg-yellow-800/80'
+                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
+                    )
+                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
+              ].join(' ')}
+              title={
+                projectionAvailable
+                  ? '顯示或隱藏 SMPL 雙手掌心的投影'
+                  : '此視角沒有 camera params'
+              }
+            >
+              <span className="text-yellow-400">
+                ●
+              </span>
+              {' 手掌'}
             </button>
 
             <button

@@ -267,6 +267,20 @@ export const api = {
     )
   ),
 
+  getPairwiseBallPoints: (
+    matchId,
+    startFrame,
+    endFrame,
+  ) => (
+    request(
+      `/matches/${matchId}/traj2d/pairwise?start_frame=${encodeURIComponent(
+        startFrame,
+      )}&end_frame=${encodeURIComponent(
+        endFrame,
+      )}`,
+    )
+  ),
+
   repairTraj2D: (
     matchId,
     payload,

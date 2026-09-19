@@ -159,6 +159,14 @@ export const useAppStore = create(
     // 手腕的姿態走，方便比對這個修正到底改了什麼。預設開著，維持原本行為。
     racketAimEnabled: true,
 
+    // 另外畫一條 2D 標註兩兩重建的 3D 軌跡，和 ball_traj 的灰線比對用
+    showPairwiseTrajectory: false,
+
+    // 每位球員目前畫面上的關鍵點世界座標（與軌跡點同一套 raw 座標），
+    // 由 3D 場景寫入、影片面板拿去投影。key 是 playerReplay.id，
+    // 值是 { racketTip, hands }
+    playerKeypointsByPlayer: {},
+
     pxPerSec: 100,
     scrollLeft: 0,
     bottomView: 'timeline',
@@ -850,11 +858,35 @@ export const useAppStore = create(
       get().loadedBall2DCameras.has(cameraIndex)
     ),
 
+    toggleShowPairwiseTrajectory: () => {
+      set(
+        state => ({
+          showPairwiseTrajectory: !state.showPairwiseTrajectory,
+        }),
+      )
+    },
+
     toggleRacketAim: () => {
       set(
         state => ({
           racketAimEnabled: !state.racketAimEnabled,
         }),
+      )
+    },
+
+    setPlayerKeypoints: (playerKey, keypoints) => {
+      set(
+        state => {
+          if (!keypoints && !(playerKey in state.playerKeypointsByPlayer)) return {}
+
+          const next = { ...state.playerKeypointsByPlayer }
+          if (keypoints) next[playerKey] = keypoints
+          else delete next[playerKey]
+
+          return {
+            playerKeypointsByPlayer: next,
+          }
+        },
       )
     },
 

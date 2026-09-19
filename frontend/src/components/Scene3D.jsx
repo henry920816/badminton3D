@@ -6,7 +6,7 @@ import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { useAppStore } from '../store.js'
 import { loadSmplForwardModel } from '../utils/smplForwardAssets.js'
-import { toThreeVector } from '../utils/ballPath.js'
+import { MAX_FRAME_GAP, toThreeVector } from '../utils/ballPath.js'
 import { useRallyBallData } from '../utils/useRallyBallData.js'
 
 const SHUTTLECOCK_OBJ_URL = '/models/shuttlecock/shuttlecock.obj'
@@ -194,6 +194,55 @@ function AnimatedTrajectory({ points }) {
   )
 }
 
+// 2D 標註兩兩重建的軌跡。斷超過 MAX_FRAME_GAP 格就不連，和擊球偵測
+// 認定「偵測中斷」的標準一樣
+function PairwiseTrajectory({ points }) {
+  const currentFrame = useAppStore(s => s.currentFrame)
+
+  // 和 ball_traj 的球一樣只在整數格上畫，這一格沒有重建點就不畫，
+  // 不內插出一個假的位置
+  const currentPosition = useMemo(() => {
+    const point = (points || []).find(item => item.frame === currentFrame)
+
+    return point ? toThreeVector(point) : null
+  }, [points, currentFrame])
+
+  const segments = useMemo(() => {
+    const result = []
+    let current = []
+
+    for (const point of points || []) {
+      const last = current[current.length - 1]
+
+      if (last && point.frame - last.frame > MAX_FRAME_GAP) {
+        if (current.length > 1) result.push(current.map(toThreeVector))
+        current = []
+      }
+
+      current.push(point)
+    }
+
+    if (current.length > 1) result.push(current.map(toThreeVector))
+
+    return result
+  }, [points])
+
+  return (
+    <group>
+      {segments.map((segment, index) => (
+        <Line key={index} points={segment} lineWidth={1.5} color="#fb7185" opacity={0.8} transparent />
+      ))}
+
+      {currentPosition && (
+        <mesh position={currentPosition}>
+          <sphereGeometry args={[0.03, 16, 16]} />
+          <meshBasicMaterial color="#fb7185" />
+        </mesh>
+      )}
+    </group>
+  )
+}
+
 function PlaybackController() {
   const playing = useAppStore(s => s.playing)
   const setPlaying = useAppStore(s => s.setPlaying)
@@ -272,11 +321,21 @@ const RACKET_FACE_NORMAL = new THREE.Vector3(0, 1, 0)
 // 拍面中心在 local 座標的位置，用來判斷這一拍是不是這位球員打的
 const RACKET_FACE_CENTER = new THREE.Vector3(-0.545, 0, 0)
 
+// 拍頂（拍框最遠端）在 local 座標的位置，racket.obj 的 x 最小值
+const RACKET_TIP = new THREE.Vector3(-0.674, 0, 0)
+
+// 拍頂移動小於這個距離(公尺)就不寫回 store，避免每個 render frame 都觸發更新
+const RACKET_TIP_EPSILON = 1e-4
+
 // 拍面離擊球點超過這個距離(公尺)就當作是對手那一拍，不套用
 const RACKET_AIM_MAX_DISTANCE = 0.75
 
+// 手不動、只轉手腕時，拍面中心離兩兩重建點最近也有 |手到點 − 手到拍面中心|。
+// 這個差距超過門檻(公尺)代表手不在球旁邊，是對手或雙打搭檔那一拍
+const RACKET_ANCHOR_MAX_GAP = 0.3
+
 // 接觸只有一瞬間，硬轉一格會像跳格；前後各這麼多格做漸入漸出
-const RACKET_AIM_BLEND_FRAMES = 4
+const RACKET_AIM_BLEND_FRAMES = 6
 
 // 每格都要算，共用暫存物件避免在 render loop 裡配置記憶體
 const racketAimScratch = {
@@ -286,8 +345,11 @@ const racketAimScratch = {
   faceCenter: new THREE.Vector3(),
   faceNormal: new THREE.Vector3(),
   target: new THREE.Vector3(),
+  shaft: new THREE.Vector3(),
   correction: new THREE.Quaternion(),
+  roll: new THREE.Quaternion(),
   blended: new THREE.Quaternion(),
+  tip: new THREE.Vector3(),
 }
 
 let racketObjectPromise = null
@@ -322,15 +384,52 @@ function findRacketAim(contacts, frame) {
 }
 
 
-// 把拍面法線轉向出球方向。旋轉是繞 racket local 原點（握把末端，
-// 也就是手的位置）做的，所以握把不會離開手。
-function aimRacketMatrix(matrix, contact, weight) {
-  const scratch = racketAimScratch
+// 手的位置幾乎是準的，錯的是手腕轉向：把「手 → 拍面中心」轉成
+// 「手 → 兩兩重建點」，拍面中心就落到球上（或手到球距離允許的最近處）。
+// 位置決定之後還剩繞拍桿的滾轉，拿來讓拍面盡量朝出球方向。
+function buildAnchorCorrection(scratch, contact) {
+  scratch.shaft.copy(scratch.faceCenter).sub(scratch.position)
+  scratch.target.copy(contact.anchor).sub(scratch.position)
 
-  matrix.decompose(scratch.position, scratch.quaternion, scratch.scale)
+  const faceReach = scratch.shaft.length()
+  const anchorReach = scratch.target.length()
 
-  scratch.faceCenter.copy(RACKET_FACE_CENTER).applyMatrix4(matrix)
+  if (faceReach < 1e-6 || anchorReach < 1e-6) return false
+  if (Math.abs(anchorReach - faceReach) > RACKET_ANCHOR_MAX_GAP) return false
 
+  scratch.shaft.divideScalar(faceReach)
+  scratch.target.divideScalar(anchorReach)
+  scratch.correction.setFromUnitVectors(scratch.shaft, scratch.target)
+
+  // 法線本來就垂直拍桿，轉完拍桿後仍垂直 target；出球方向投影到同一個
+  // 平面上，兩者之間的最小旋轉就剛好是繞拍桿的滾轉
+  scratch.faceNormal
+    .copy(RACKET_FACE_NORMAL)
+    .applyQuaternion(scratch.quaternion)
+    .applyQuaternion(scratch.correction)
+    .normalize()
+
+  const along = contact.direction.dot(scratch.target)
+
+  scratch.shaft.copy(contact.direction).addScaledVector(scratch.target, -along)
+
+  // 球沿拍桿方向飛出去時，滾轉怎麼轉都一樣，就不轉
+  if (scratch.shaft.lengthSq() > 1e-6) {
+    scratch.shaft.normalize()
+
+    // 拍面兩側都能擊球，取轉得比較少的那一面
+    if (scratch.faceNormal.dot(scratch.shaft) < 0) scratch.shaft.negate()
+
+    scratch.roll.setFromUnitVectors(scratch.faceNormal, scratch.shaft)
+    scratch.correction.premultiply(scratch.roll)
+  }
+
+  return true
+}
+
+
+// 沒有兩兩重建點時只轉拍面法線，讓它朝出球方向
+function buildNormalCorrection(scratch, contact) {
   // 一個 rally 裡兩位球員輪流打，靠距離判斷這一拍屬於誰
   if (scratch.faceCenter.distanceTo(contact.position) > RACKET_AIM_MAX_DISTANCE) {
     return false
@@ -347,6 +446,26 @@ function aimRacketMatrix(matrix, contact, weight) {
   if (scratch.faceNormal.dot(scratch.target) < 0) scratch.target.negate()
 
   scratch.correction.setFromUnitVectors(scratch.faceNormal, scratch.target)
+
+  return true
+}
+
+
+// 旋轉是繞 racket local 原點（握把末端，也就是手的位置）做的，
+// 所以握把不會離開手。
+function aimRacketMatrix(matrix, contact, weight) {
+  const scratch = racketAimScratch
+
+  matrix.decompose(scratch.position, scratch.quaternion, scratch.scale)
+
+  scratch.faceCenter.copy(RACKET_FACE_CENTER).applyMatrix4(matrix)
+
+  const aimed = contact.anchor
+    ? buildAnchorCorrection(scratch, contact)
+    : buildNormalCorrection(scratch, contact)
+
+  if (!aimed) return false
+
   scratch.blended.identity().slerp(scratch.correction, weight)
   scratch.quaternion.premultiply(scratch.blended)
 
@@ -372,6 +491,27 @@ function applyRacketAim(racket, baseMatrix, contacts, frame, enabled) {
   }
 
   racket.matrixWorldNeedsUpdate = true
+}
+
+
+// 取目前顯示中球拍的拍頂，轉回軌跡點用的 raw 座標（three 座標的 y、z 反號）
+function getRacketTipPoint(racket) {
+  if (!racket?.visible) return null
+
+  const tip = racketAimScratch.tip.copy(RACKET_TIP).applyMatrix4(racket.matrix)
+
+  return { x: tip.x, y: -tip.y, z: -tip.z }
+}
+
+
+function isSameRacketTip(first, second) {
+  if (!first || !second) return first === second
+
+  return (
+    Math.abs(first.x - second.x) < RACKET_TIP_EPSILON
+    && Math.abs(first.y - second.y) < RACKET_TIP_EPSILON
+    && Math.abs(first.z - second.z) < RACKET_TIP_EPSILON
+  )
 }
 
 function createSmplPoseDirectionsTexture(posedirs) {
@@ -497,6 +637,10 @@ function loadRacketObject() {
 function SmplForwardAvatar({ playerReplay, ballContacts }) {
   const currentFrame = useAppStore(s => s.currentFrame)
   const racketAimEnabled = useAppStore(s => s.racketAimEnabled)
+  const setPlayerKeypoints = useAppStore(s => s.setPlayerKeypoints)
+  const keypointsKey = playerReplay.id
+  const publishedKeypointsRef = useRef(null)
+  const handPointsRef = useRef(null)
   const racketRef = useRef(null)
   const baseRacketMatrixRef = useRef(null)
   const ballContactsRef = useRef(ballContacts)
@@ -546,6 +690,7 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
     requestIdRef.current += 1
     setHasAppliedFrame(false)
     baseRacketMatrixRef.current = null
+    handPointsRef.current = null
     if (racketRef.current) racketRef.current.visible = false
   }, [playerReplay?.start_frame, playerReplay?.frame_count])
 
@@ -634,6 +779,7 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
         }
         uniforms.smplPoseFeatures.value.set(message.poseFeature)
         uniforms.smplTranslation.value.fromArray(message.trans || [0, 0, 0])
+        handPointsRef.current = message.handPoints || null
         setHasAppliedFrame(true)
 
         if (racketRef.current && Array.isArray(message.racketMatrix)) {
@@ -683,11 +829,37 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
     }
   }, [model, material, playerReplay.beta])
 
+  // 影片面板投影的拍頂、手掌要和 3D 畫面上的一致，只在位置變了才寫回 store。
+  // 手掌只在 worker 回覆時換成新陣列，所以比對參照就夠了
+  const publishKeypoints = (posed) => {
+    const racketTip = getRacketTipPoint(racketRef.current)
+    const hands = posed ? handPointsRef.current : null
+    const published = publishedKeypointsRef.current
+
+    if (
+      published
+      && isSameRacketTip(racketTip, published.racketTip)
+      && hands === published.hands
+    ) return
+
+    publishedKeypointsRef.current = { racketTip, hands }
+    setPlayerKeypoints(
+      keypointsKey,
+      racketTip || hands ? { racketTip, hands } : null,
+    )
+  }
+
+  useEffect(() => () => {
+    publishedKeypointsRef.current = null
+    setPlayerKeypoints(keypointsKey, null)
+  }, [keypointsKey, setPlayerKeypoints])
+
   useFrame((state) => {
     if (!ready || !workerRef.current || !geometry) return
     const poseFrame = getLocalPoseFrame(playerReplay, currentFrame)
     if (!poseFrame || poseFrame.valid === false) {
       if (racketRef.current) racketRef.current.visible = false
+      publishKeypoints(false)
       return
     }
 
@@ -700,6 +872,8 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
       currentFrame,
       racketAimEnabled,
     )
+
+    publishKeypoints(true)
 
     if (lastSentFrameRef.current === poseFrame.frame) return
 
@@ -1050,6 +1224,8 @@ export default function Scene3D() {
   const setSmplReplayData = useAppStore(s => s.setSmplReplayData)
   const racketAimEnabled = useAppStore(s => s.racketAimEnabled)
   const toggleRacketAim = useAppStore(s => s.toggleRacketAim)
+  const showPairwiseTrajectory = useAppStore(s => s.showPairwiseTrajectory)
+  const toggleShowPairwiseTrajectory = useAppStore(s => s.toggleShowPairwiseTrajectory)
 
   const activeCamera = cameras.find(camera => camera.id === activeCameraId)
   const activeReplayIndex = replaySegments.findIndex(item => item.id === activeReplaySegmentId)
@@ -1059,6 +1235,8 @@ export default function Scene3D() {
 
   const {
     points,
+    pairwisePoints,
+    pairwiseStatus,
     contacts: ballContacts,
     startFrame: rangeStartFrame,
     endFrame: rangeEndFrame,
@@ -1214,13 +1392,33 @@ export default function Scene3D() {
                     : 'text-zinc-300'
                 }`}
                 title={
-                  '擊球瞬間把拍面轉向球飛出去的方向，接觸前後各 4 格漸入漸出。'
-                  + '方向來自擊球後那一段的擬合。'
+                  `擊球瞬間把拍面中心轉到球上、拍面朝球飛出去的方向，接觸前後各 ${RACKET_AIM_BLEND_FRAMES} 格漸入漸出。`
+                  + '擊球時刻與位置用 2D 標註兩兩重建的 3D 點推算。'
                   + '關掉的話球拍完全跟著 SMPL 手腕的姿態走，'
                   + '開關兩邊比對就看得出這個修正改了什麼。'
                 }
               >
                 球拍轉向 {racketAimEnabled ? '開' : '關'}
+              </button>
+
+              <button
+                type="button"
+                onClick={toggleShowPairwiseTrajectory}
+                className={`px-3 py-1.5 font-semibold border-l border-zinc-800 first:border-l-0 ${
+                  showPairwiseTrajectory
+                    ? 'bg-rose-900/40 text-rose-200'
+                    : 'text-zinc-300'
+                }`}
+                title={
+                  '畫出每格用各相機 2D 標註兩兩重建、取中位數的 3D 位置（紅線），'
+                  + '可和灰色的 ball_traj 比對。只畫至少 2 組相機、且位置在球場範圍內的格子，'
+                  + '也就是擊球偵測實際用的那批點。'
+                }
+              >
+                2D 重建軌跡 {showPairwiseTrajectory ? '開' : '關'}
+                {showPairwiseTrajectory && pairwiseStatus === 'loading' && ' · 載入中'}
+                {showPairwiseTrajectory && pairwiseStatus === 'error' && ' · 載入失敗'}
+                {showPairwiseTrajectory && pairwiseStatus === 'ready' && !pairwisePoints.length && ' · 無資料'}
               </button>
 
               <button
@@ -1280,6 +1478,7 @@ export default function Scene3D() {
         <RealCameraMarkers />
         <SmplReplayLayer replayData={replayData} ballContacts={ballContacts} />
         <AnimatedTrajectory points={points} />
+        {showPairwiseTrajectory && <PairwiseTrajectory points={pairwisePoints} />}
         <PlaybackController />
 
         <OrbitControls
