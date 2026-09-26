@@ -1348,40 +1348,13 @@ export default function Scene3D() {
 
   return (
     <div className="w-full h-full relative bg-zinc-950 overflow-hidden">
-      {/* One row across the top: the wrapper itself must not eat pointer events,
-          otherwise it would swallow the orbit drag over its empty middle. */}
-      <div className="absolute top-2 left-2 right-2 z-20 flex items-start justify-between gap-2 pointer-events-none">
-        <div
-          className="pointer-events-auto shrink-0 bg-zinc-900/80 border border-zinc-800 rounded px-3 py-1.5 text-xs text-zinc-200 shadow backdrop-blur-md"
-          title="滾輪依滑鼠位置縮放｜右鍵平移｜點場上的 📷 切換影片"
-        >
-          3D Camera：<span className="text-yellow-300 font-semibold">{activeCamera?.label || activeCameraId}</span>
-          {activeCamera?.description && (
-            <span className="text-zinc-400 ml-2">{activeCamera.description}</span>
-          )}
-        </div>
-
+      {/* Keep only task-specific controls here; camera/status badges were removed to reduce visual clutter. */}
+      <div className="absolute top-2 right-2 z-20 flex items-start justify-end gap-2 pointer-events-none">
         <div className="pointer-events-auto flex flex-col items-end gap-1.5">
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             {/* Every toggle lives in one pill; first:border-l-0 keeps the
                 divider correct no matter which of them actually render. */}
             <div className="flex items-center bg-zinc-900/80 border border-zinc-800 rounded shadow backdrop-blur-md overflow-hidden text-xs">
-              {activeReplaySegment && (
-                <button
-                  type="button"
-                  onClick={toggleSmplReplay}
-                  className={`px-3 py-1.5 font-semibold border-l border-zinc-800 first:border-l-0 ${
-                    showSmplReplay
-                      ? 'bg-emerald-900/40 text-emerald-200'
-                      : 'text-zinc-300'
-                  }`}
-                  title="顯示或隱藏人物與球拍"
-                >
-                  人物球拍 {showSmplReplay ? '開' : '關'}
-                  {smplReplayNote && ` · ${smplReplayNote}`}
-                </button>
-              )}
-
               <button
                 type="button"
                 onClick={toggleRacketAim}

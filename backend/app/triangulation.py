@@ -830,11 +830,12 @@ def pairwise_consensus_point(
     observations: list[dict],
     reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
 ) -> dict | None:
-    """Median of every stable two-camera reconstruction of one frame.
+    """Reconstruct a frame from pairs supported by the other views.
 
-    Each pair gives its own 3D point; a wrong 2D label in one view only
-    corrupts the pairs containing it, and the median ignores them as long
-    as they are the minority. Returns None when no pair is usable.
+    A pair containing an incorrect label can outnumber the correct pairs
+    when only three cameras are available. Require a third agreeing view
+    whenever there are at least three observations, and only use candidates
+    with the largest camera support for the median.
     """
     observations_by_camera: dict[int, dict] = {}
 
@@ -851,7 +852,7 @@ def pairwise_consensus_point(
         except ValueError:
             continue
 
-    points = []
+    candidates = []
 
     for pair in combinations(
         [observations_by_camera[index] for index in sorted(observations_by_camera)],
@@ -866,11 +867,29 @@ def pairwise_consensus_point(
             continue
         if result["max_error"] > reprojection_threshold_px:
             continue
-        points.append([result["point"][axis] for axis in ("x", "y", "z")])
+        point = result["point"]
+        support = 0
+        for observation in observations_by_camera.values():
+            try:
+                projected = project_raw_point(
+                    point,
+                    cameras_by_index[observation["camera_index"]],
+                )
+            except (ValueError, np.linalg.LinAlgError, OverflowError):
+                continue
+            if projected is not None and math.hypot(
+                projected["x"] - observation["x"],
+                projected["y"] - observation["y"],
+            ) <= reprojection_threshold_px:
+                support += 1
+        if support >= min(3, len(observations_by_camera)):
+            candidates.append((support, [point[axis] for axis in ("x", "y", "z")]))
 
-    if not points:
+    if not candidates:
         return None
 
+    strongest_support = max(support for support, _ in candidates)
+    points = [point for support, point in candidates if support == strongest_support]
     consensus = np.median(np.asarray(points, dtype=np.float64), axis=0)
 
     return {

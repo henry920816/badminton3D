@@ -30,6 +30,44 @@ function clamp(
   )
 }
 
+const LAYOUT_STORAGE_KEY = 'badminton-ui-layout-v1'
+
+const DEFAULT_LAYOUT = {
+  topHeightPct: 58,
+  leftTopWidthPct: 50,
+  rightPanelWidth: 360,
+}
+
+function readSavedLayout() {
+  try {
+    const saved = JSON.parse(
+      window.localStorage.getItem(
+        LAYOUT_STORAGE_KEY,
+      ) || '{}',
+    )
+
+    return {
+      topHeightPct: clamp(
+        Number(saved.topHeightPct) || DEFAULT_LAYOUT.topHeightPct,
+        42,
+        72,
+      ),
+      leftTopWidthPct: clamp(
+        Number(saved.leftTopWidthPct) || DEFAULT_LAYOUT.leftTopWidthPct,
+        20,
+        80,
+      ),
+      rightPanelWidth: clamp(
+        Number(saved.rightPanelWidth) || DEFAULT_LAYOUT.rightPanelWidth,
+        260,
+        700,
+      ),
+    }
+  } catch {
+    return DEFAULT_LAYOUT
+  }
+}
+
 export default function App() {
   const matchId = useAppStore(
     state => state.matchId,
@@ -79,23 +117,90 @@ export default function App() {
     null,
   )
 
+  const savedLayoutRef = useRef(
+    readSavedLayout(),
+  )
+
   const [
     topHeightPct,
     setTopHeightPct,
-  ] = useState(58)
+  ] = useState(
+    savedLayoutRef.current.topHeightPct,
+  )
 
   const [
     leftTopWidthPct,
     setLeftTopWidthPct,
-  ] = useState(50)
+  ] = useState(
+    savedLayoutRef.current.leftTopWidthPct,
+  )
 
   const [
     rightPanelWidth,
     setRightPanelWidth,
-  ] = useState(360)
+  ] = useState(
+    savedLayoutRef.current.rightPanelWidth,
+  )
+
+  const [
+    focusMode,
+    setFocusMode,
+  ] = useState(null)
 
   const showRightDock = Boolean(
     activeItem?.type,
+  )
+
+  useEffect(
+    () => {
+      try {
+        window.localStorage.setItem(
+          LAYOUT_STORAGE_KEY,
+          JSON.stringify({
+            topHeightPct,
+            leftTopWidthPct,
+            rightPanelWidth,
+          }),
+        )
+      } catch {
+        // localStorage may be disabled; layout still works for this session.
+      }
+    },
+    [
+      topHeightPct,
+      leftTopWidthPct,
+      rightPanelWidth,
+    ],
+  )
+
+  useEffect(
+    () => {
+      const resetLayout = () => {
+        setTopHeightPct(
+          DEFAULT_LAYOUT.topHeightPct,
+        )
+        setLeftTopWidthPct(
+          DEFAULT_LAYOUT.leftTopWidthPct,
+        )
+        setRightPanelWidth(
+          DEFAULT_LAYOUT.rightPanelWidth,
+        )
+        setFocusMode(null)
+      }
+
+      window.addEventListener(
+        'badminton-reset-layout',
+        resetLayout,
+      )
+
+      return () => {
+        window.removeEventListener(
+          'badminton-reset-layout',
+          resetLayout,
+        )
+      }
+    },
+    [],
   )
 
   useEffect(
@@ -529,8 +634,12 @@ export default function App() {
                 relative
               "
               style={{
-                height:
-                  `${topHeightPct}%`,
+                height: focusMode
+                  ? '100%'
+                  : `${topHeightPct}%`,
+                display: focusMode === 'bottom'
+                  ? 'none'
+                  : 'flex',
               }}
             >
               <div
@@ -542,8 +651,12 @@ export default function App() {
                   relative
                 "
                 style={{
-                  width:
-                    `${leftTopWidthPct}%`,
+                  width: focusMode === 'scene'
+                    ? '100%'
+                    : `${leftTopWidthPct}%`,
+                  display: focusMode === 'video'
+                    ? 'none'
+                    : 'block',
                 }}
               >
                 <div
@@ -552,17 +665,45 @@ export default function App() {
                     z-10
                     top-2
                     left-2
+                    flex
+                    items-center
+                    gap-2
                     text-xs
                     font-semibold
                     px-2
                     py-1
                     rounded
-                    bg-zinc-900/70
+                    bg-zinc-900/80
                     border
                     border-zinc-800
+                    backdrop-blur
                   "
                 >
-                  3D Replay (raw points)
+                  <span>3D 場景</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFocusMode(
+                        focusMode === 'scene'
+                          ? null
+                          : 'scene',
+                      )
+                    }}
+                    className="
+                      px-1.5
+                      py-0.5
+                      rounded
+                      text-[10px]
+                      text-zinc-300
+                      hover:text-white
+                      hover:bg-zinc-700
+                    "
+                    title="放大 / 還原 3D 場景"
+                  >
+                    {focusMode === 'scene'
+                      ? '還原'
+                      : '專注'}
+                  </button>
                 </div>
 
                 <Scene3D />
@@ -586,6 +727,11 @@ export default function App() {
                 title="
                   拖拉調整 3D / 影片 寬度
                 "
+                style={{
+                  display: focusMode
+                    ? 'none'
+                    : 'block',
+                }}
               >
                 <div
                   className="
@@ -606,6 +752,11 @@ export default function App() {
                   min-h-0
                   relative
                 "
+                style={{
+                  display: focusMode === 'scene'
+                    ? 'none'
+                    : 'block',
+                }}
               >
                 <div
                   className="
@@ -613,17 +764,45 @@ export default function App() {
                     z-10
                     top-2
                     left-2
+                    flex
+                    items-center
+                    gap-2
                     text-xs
                     font-semibold
                     px-2
                     py-1
                     rounded
-                    bg-zinc-900/70
+                    bg-zinc-900/80
                     border
                     border-zinc-800
+                    backdrop-blur
                   "
                 >
-                  Source Video
+                  <span>影片</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFocusMode(
+                        focusMode === 'video'
+                          ? null
+                          : 'video',
+                      )
+                    }}
+                    className="
+                      px-1.5
+                      py-0.5
+                      rounded
+                      text-[10px]
+                      text-zinc-300
+                      hover:text-white
+                      hover:bg-zinc-700
+                    "
+                    title="放大 / 還原影片"
+                  >
+                    {focusMode === 'video'
+                      ? '還原'
+                      : '專注'}
+                  </button>
                 </div>
 
                 <VideoPanel />
@@ -648,6 +827,11 @@ export default function App() {
               title="
                 拖拉調整 上方 / Timeline 高度
               "
+              style={{
+                display: focusMode
+                  ? 'none'
+                  : 'block',
+              }}
             >
               <div
                 className="
@@ -664,12 +848,52 @@ export default function App() {
             <div
               className="
                 min-h-0
+                relative
               "
               style={{
-                height:
-                  `${bottomHeightPct}%`,
+                height: focusMode === 'bottom'
+                  ? '100%'
+                  : `${bottomHeightPct}%`,
+                display: (
+                  focusMode === 'scene'
+                  || focusMode === 'video'
+                )
+                  ? 'none'
+                  : 'block',
               }}
             >
+              <button
+                type="button"
+                onClick={() => {
+                  setFocusMode(
+                    focusMode === 'bottom'
+                      ? null
+                      : 'bottom',
+                  )
+                }}
+                className="
+                  absolute
+                  top-2
+                  right-3
+                  z-30
+                  px-2
+                  py-1
+                  rounded
+                  border
+                  border-zinc-700
+                  bg-zinc-900/85
+                  hover:bg-zinc-800
+                  text-[10px]
+                  text-zinc-300
+                  hover:text-white
+                  backdrop-blur
+                "
+                title="放大 / 還原底部檢視"
+              >
+                {focusMode === 'bottom'
+                  ? '還原版面'
+                  : '專注底部'}
+              </button>
               {bottomView
                 === 'projection2d'
                 ? (
@@ -687,7 +911,7 @@ export default function App() {
           </div>
         </div>
 
-        {showRightDock && (
+        {showRightDock && !focusMode && (
           <>
             <div
               onMouseDown={

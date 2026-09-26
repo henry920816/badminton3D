@@ -154,6 +154,12 @@ export const useAppStore = create(
     trajByFrame: new Map(),
     ball2DByCameraFrame: new Map(),
     loadedBall2DCameras: new Set(),
+    pairwiseRevision: 0,
+
+    // 已寫入的 2D 標註改變時，重新讀取由 2D 重建的擊球軌跡。
+    invalidatePairwisePoints: () => set(state => ({
+      pairwiseRevision: state.pairwiseRevision + 1,
+    })),
 
     // 擊球瞬間把拍面轉向球飛出去的方向。關掉的話球拍就完全跟著 SMPL
     // 手腕的姿態走，方便比對這個修正到底改了什麼。預設開著，維持原本行為。

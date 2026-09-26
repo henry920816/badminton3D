@@ -56,6 +56,7 @@ export default function RightDock() {
   const currentFrame = useAppStore(s => s.currentFrame)
   const updateHit = useAppStore(s => s.updateHit)
   const updateAnomaly = useAppStore(s => s.updateAnomaly)
+  const clearActiveItem = useAppStore(s => s.clearActiveItem)
 
   const [saving, setSaving] = useState(false)
   const [saveMessage, setSaveMessage] = useState('')
@@ -156,11 +157,24 @@ export default function RightDock() {
 
   return (
     <div className="w-full h-full border-l border-zinc-800 bg-zinc-950 flex flex-col min-w-0 min-h-0">
-      <div className="h-[42px] px-3 shrink-0 flex items-center justify-between border-b border-zinc-800">
+      <div className="h-[42px] px-3 shrink-0 flex items-center justify-between gap-2 border-b border-zinc-800">
         <div className="text-xs font-semibold text-zinc-200">編輯面板</div>
-        {saveMessage && (
-          <div className="text-xs text-emerald-400">{saveMessage}</div>
-        )}
+
+        <div className="ml-auto flex items-center gap-2 min-w-0">
+          {saveMessage && (
+            <div className="text-xs text-emerald-400 truncate">{saveMessage}</div>
+          )}
+
+          <button
+            type="button"
+            onClick={clearActiveItem}
+            className="w-7 h-7 rounded-md border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white shrink-0"
+            title="關閉編輯面板"
+            aria-label="關閉編輯面板"
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 p-3 overflow-auto space-y-3 text-sm">

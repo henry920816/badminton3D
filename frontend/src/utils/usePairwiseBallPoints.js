@@ -1,13 +1,17 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import { useAppStore } from '../store.js'
 
 
 // 一個 rally 要算 0.4~3.6 秒，來回切換 rally 時不要重算
 const cache = new Map()
 
 
-function loadPairwiseBallPoints(matchId, startFrame, endFrame) {
-  const key = `${matchId}:${startFrame}:${endFrame}`
+function loadPairwiseBallPoints(matchId, startFrame, endFrame, revision) {
+  const key = `${matchId}:${startFrame}:${endFrame}:${revision}`
+
+  // 修復多次後，已失效的版本不應永久留在記憶體。
+  if (cache.size > 100) cache.clear()
 
   if (!cache.has(key)) {
     const request = api.getPairwiseBallPoints(matchId, startFrame, endFrame)
@@ -30,8 +34,9 @@ function loadPairwiseBallPoints(matchId, startFrame, endFrame) {
  * status：'idle' 沒有範圍、'loading'、'ready'、'error'。
  */
 export function usePairwiseBallPoints(matchId, startFrame, endFrame) {
+  const revision = useAppStore(state => state.pairwiseRevision)
   const key = matchId != null && startFrame != null && endFrame != null
-    ? `${matchId}:${startFrame}:${endFrame}`
+    ? `${matchId}:${startFrame}:${endFrame}:${revision}`
     : null
 
   const [loaded, setLoaded] = useState({ key: null, status: 'idle', points: null })
@@ -43,7 +48,7 @@ export function usePairwiseBallPoints(matchId, startFrame, endFrame) {
 
     setLoaded({ key, status: 'loading', points: null })
 
-    loadPairwiseBallPoints(matchId, startFrame, endFrame)
+    loadPairwiseBallPoints(matchId, startFrame, endFrame, revision)
       .then((points) => {
         if (!cancelled) setLoaded({ key, status: 'ready', points: points || [] })
       })

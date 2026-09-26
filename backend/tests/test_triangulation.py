@@ -283,13 +283,27 @@ class TriangulationTest(unittest.TestCase):
 
         self.assertEqual(
             result["pair_count"],
-            10,
+            6,
         )
         self.assert_point_close(
             result["point"],
             expected,
             places=2,
         )
+
+    def test_pairwise_consensus_rejects_ambiguous_three_view_outlier(self):
+        cameras = {
+            index: camera(index, offset)
+            for index, offset in enumerate((0.0, -1.0, 0.8))
+        }
+        expected = {"x": 0.3, "y": -0.2, "z": 5.0}
+        observations = [
+            {"camera_index": index, **project_raw_point(expected, item)}
+            for index, item in cameras.items()
+        ]
+        observations[2]["x"] += 40.0
+
+        self.assertIsNone(pairwise_consensus_point(cameras, observations))
 
     def test_pairwise_consensus_without_pairs(self):
         cameras = {

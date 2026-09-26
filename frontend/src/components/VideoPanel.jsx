@@ -2254,6 +2254,9 @@ export default function VideoPanel() {
           true,
         )
       }
+      if (result?.ball_2d_points?.length) {
+        useAppStore.getState().invalidatePairwisePoints()
+      }
 
       setRepair2DPreview(
         result
@@ -2341,6 +2344,9 @@ export default function VideoPanel() {
             point.has_ball_2d,
           )
         }
+      }
+      if (result?.ball_2d_points?.length) {
+        useAppStore.getState().invalidatePairwisePoints()
       }
 
       setLastRepair2DId(null)
@@ -2514,71 +2520,6 @@ export default function VideoPanel() {
           relative
         "
       >
-        <div
-          className="
-            absolute
-            top-2
-            left-2
-            z-10
-            px-2
-            py-1
-            rounded
-            bg-black/65
-            border
-            border-white/10
-            text-xs
-            text-zinc-100
-          "
-        >
-          {activeCamera?.label
-            || 'No Camera'}
-
-          {activeCamera?.offset_frame
-            ? (
-                ` / offset ${
-                  activeCamera.offset_frame
-                    >= 0
-                    ? '+'
-                    : ''
-                }${
-                  activeCamera.offset_frame
-                }f`
-              )
-            : ''}
-
-          {projectionAvailable
-            && showProjection
-            ? ' / 3D 投影 ON'
-            : ''}
-
-          {ball2DAvailable
-            && showBall2D
-            ? ' / 2D 標註 ON'
-            : ''}
-
-          {projectionAvailable
-            && showRacketTip
-            ? ' / 拍頂 ON'
-            : ''}
-
-          {projectionAvailable
-            && showHands
-            ? ' / 手掌 ON'
-            : ''}
-
-          {repair2DMode
-            ? ' / 2D 修復 ON'
-            : ''}
-
-          {` / ${safePlaybackRate}x`}
-
-          {isLastFrameBeforeHit && (
-            <span className="text-amber-300 font-semibold">
-              {` / lastFrameBefore = ${currentFrame}`}
-            </span>
-          )}
-        </div>
-
         {activeSource && (
           <div
             className="

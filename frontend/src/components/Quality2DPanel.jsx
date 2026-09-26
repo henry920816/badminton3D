@@ -928,6 +928,9 @@ export default function Quality2DPanel() {
       )
 
       if (result.repairIds?.length) {
+        if (useAppStore.getState().matchId === matchId) {
+          useAppStore.getState().invalidatePairwisePoints()
+        }
         rememberRepair({ matchId, repairIds: result.repairIds,
           startFrame: currentRally.start_frame, endFrame: currentRally.end_frame })
         setUndoMessage('')
@@ -1005,6 +1008,7 @@ export default function Quality2DPanel() {
         grouped.get(point.camera_index).push(point)
       }
       for (const [camera, points] of grouped) state.upsertBall2DPoints(camera, points)
+      if (grouped.size) state.invalidatePairwisePoints()
       setAutoRepairResult(null)
       setUndoMessage(`已復原 ${result.reverted_frames} 個 frame 的 2D 標註`)
       if (currentRally) {
