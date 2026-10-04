@@ -1,14 +1,14 @@
 """Convert a fine-tune per-frame JSON export to the legacy dataset uploader format.
 
-The output contains cameras, RallySeg, 3D ball trajectories, and per-person
-SMPL body/racket pose (written as new_racket_npz-style .npz files, one per
-rally per person). 2D files are not copied.
+The output contains 3D ball trajectories and per-person SMPL body/racket pose
+(written as new_racket_npz-style .npz files, one per rally per person).
+Cameras, RallySeg, and 2D files are not written: the calibration and the rally
+segmentation are taken from the existing dataset, not regenerated here.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import re
 import sys
@@ -52,7 +52,7 @@ def _read_smpl_people(payload: dict, path: Path) -> list[dict[str, np.ndarray]]:
     return people
 
 
-def read_frames(source: Path) -> tuple[dict[str, list[dict]], dict]:
+def read_frames(source: Path) -> dict[str, list[dict]]:
     if not source.is_dir():
         raise ValueError(f"Source directory does not exist: {source}")
     rallies: dict[str, list[dict]] = defaultdict(list)
@@ -61,7 +61,6 @@ def read_frames(source: Path) -> tuple[dict[str, list[dict]], dict]:
     total = len(paths)
     frame_name_pattern = re.compile(r"frame_(\d+)\.json$")
 
-    camera_row: dict | None = None
     missing_ball_count = 0
     missing_smpl_count = 0
     skipped_count = 0
@@ -103,30 +102,17 @@ def read_frames(source: Path) -> tuple[dict[str, list[dict]], dict]:
             ball = np.asarray(ball_raw, dtype=np.float64)
             ball_valid = True
 
-        camera_ids = [int(item) for item in payload.get("cam_ids", [])]
-        if camera_row is None and camera_ids and "intrinsics" in payload and "extrinsics" in payload:
-            intrinsics = np.asarray(payload["intrinsics"], dtype=np.float64)
-            extrinsics = np.asarray(payload["extrinsics"], dtype=np.float64)
-            height, width = (int(item) for item in payload["image_hw"])
-            if intrinsics.shape == (len(camera_ids), 3, 3) and extrinsics.shape == (len(camera_ids), 3, 4):
-                camera_row = {
-                    "camera_ids": camera_ids, "intrinsics": intrinsics,
-                    "extrinsics": extrinsics, "height": height, "width": width,
-                }
-
         smpl_people = _read_smpl_people(payload, path)
         if not smpl_people:
             missing_smpl_count += 1
 
         rallies[rally_id].append({
             "frame": frame, "ball": ball, "valid": ball_valid and ball.shape == (3,),
-            "camera_ids": camera_ids, "smpl_people": smpl_people,
+            "smpl_people": smpl_people,
             "match_id": payload.get("match_id"),
         })
     if not rallies:
         raise ValueError("No usable frame_*.json files found")
-    if camera_row is None:
-        raise ValueError("No valid camera calibration found in the JSON export")
     if missing_ball_count or missing_smpl_count or skipped_count:
         print(
             f"Warning: {missing_ball_count} frame(s) missing ball, "
@@ -134,10 +120,13 @@ def read_frames(source: Path) -> tuple[dict[str, list[dict]], dict]:
             f"{skipped_count} file(s) skipped.",
             flush=True,
         )
-    return rallies, camera_row
+    return rallies
 
 
 _SMPL_MODEL_CACHE: dict[str, object] = {}
+
+# backend/tools/ -> backend/ -> badminton3D/ -> 放 badminton3D 的那層資料夾
+DEFAULT_DATASET_ROOT = Path(__file__).resolve().parents[3] / "badminton_dataset"
 
 
 def _load_smpl_model(dataset_root: Path, gender: str):
@@ -151,8 +140,6 @@ def _load_smpl_model(dataset_root: Path, gender: str):
     if gender in _SMPL_MODEL_CACHE:
         return _SMPL_MODEL_CACHE[gender]
 
-    import torch
-
     smplx_pkg_dir = dataset_root / "submodules" / "smplx"
     body_model_dir = dataset_root / "body_models" / "human_model_files" / "smpl"
     if not smplx_pkg_dir.is_dir():
@@ -165,6 +152,8 @@ def _load_smpl_model(dataset_root: Path, gender: str):
             f"Missing {body_model_dir} (expected SMPL_*.pkl under "
             "<dataset_root>/body_models/human_model_files/smpl; pass --dataset-root)"
         )
+
+    import torch
 
     dataset_root_str = str(dataset_root)
     if dataset_root_str not in sys.path:
@@ -233,19 +222,19 @@ def write_smpl_racket_npz(
     rally_id: str,
     frames: list[dict],
     length: int,
-    dataset_root: Path | None,
+    dataset_root: Path,
     gender: str,
 ) -> None:
     """Write one new_racket_npz-style .npz per person, matching the layout of
     12_24_1_actual/new_racket_npz/<match_id>/<rally_id>_<person_index>.npz.
 
-    When dataset_root is given, racket_transform/racket_frame_offset are
-    computed via compute_racket_transform() and written as top-level keys
-    (matching the real npz layout) so the racket renders the same way it does
-    for captured matches. When dataset_root is None, they are omitted, and
-    the frontend falls back to its own (less accurate) client-side FK guess --
-    the downstream loader (reconstruction_assets.normalize_motion_source)
-    already treats both as optional.
+    racket_transform/racket_frame_offset are computed via
+    compute_racket_transform() and written as top-level keys (matching the real
+    npz layout) so the racket renders the same way it does for captured
+    matches. dataset_root is required for that, which is why conversion stops
+    when it cannot be found: without these two arrays the frontend falls back to
+    its own client-side FK guess, which is what makes the racket look detached
+    from the hand.
     """
     person_count = max((len(item["smpl_people"]) for item in frames), default=0)
     if person_count == 0:
@@ -289,13 +278,11 @@ def write_smpl_racket_npz(
             "data/racket_pose": racket_pose,
             "data/mask": mask,
         }
-        has_racket_transform = dataset_root is not None
-        if has_racket_transform:
-            racket_transform, racket_frame_offset = compute_racket_transform(
-                dataset_root, gender, body_pose, beta, trans, racket_pose
-            )
-            payload["racket_transform"] = racket_transform
-            payload["racket_frame_offset"] = racket_frame_offset
+        racket_transform, racket_frame_offset = compute_racket_transform(
+            dataset_root, gender, body_pose, beta, trans, racket_pose
+        )
+        payload["racket_transform"] = racket_transform
+        payload["racket_frame_offset"] = racket_frame_offset
         metadata = {
             "source": "convert_finetune_json.py",
             "rally_id": rally_id,
@@ -304,22 +291,16 @@ def write_smpl_racket_npz(
             "format": "finetune-json-to-npz-v1",
             "frame_count": length,
             "valid_frame_count": int(mask.sum()),
-            "has_racket_transform": has_racket_transform,
+            "has_racket_transform": True,
             "note": (
                 "Converted from per-frame finetune JSON. smpl_pose[:72] is body_pose "
                 "(24 joints axis-angle incl. global orient); smpl_pose[72:75] is "
                 "racket_pose. beta is the mean over frames where this person was "
                 "detected. Frames absent from the JSON export are zero-filled with "
-                "mask=0. " + (
-                    "racket_transform/racket_frame_offset were computed via "
-                    "compute_racket_transform() (badminton_dataset's racket_pose-aware "
-                    "SMPL forward kinematics), matching the real captured-match npz "
-                    "layout."
-                    if has_racket_transform
-                    else "racket_transform/racket_frame_offset were not computed "
-                    "(--dataset-root not given); the frontend falls back to its own "
-                    "client-side FK approximation."
-                )
+                "mask=0. racket_transform/racket_frame_offset were computed via "
+                "compute_racket_transform() (badminton_dataset's racket_pose-aware "
+                "SMPL forward kinematics), matching the real captured-match npz "
+                "layout."
             ),
         }
         payload["__metadata_json__"] = np.asarray(json.dumps(metadata, ensure_ascii=False))
@@ -330,37 +311,27 @@ def convert(
     source: Path,
     destination: Path,
     fps: float,
-    match_folder: str,
-    dataset_root: Path | None = None,
+    dataset_root: Path,
     gender: str = "neutral",
 ) -> None:
     if destination.exists():
         raise FileExistsError(f"Destination already exists: {destination}")
-    rallies, camera_row = read_frames(source)
+    # Fail before reading tens of thousands of JSON files if the SMPL fork is
+    # not where it is expected to be.
+    _load_smpl_model(dataset_root, gender)
+    rallies = read_frames(source)
     destination.mkdir(parents=True)
-    camera_dir = destination / "cameras"
-    rally_dir = destination / "rally-data"
     ball_dir = destination / "ball"
     mask_dir = destination / "ball-mask"
     smpl_dir = destination / "new_racket_npz"
-    for directory in (camera_dir, rally_dir, ball_dir, mask_dir, smpl_dir):
+    for directory in (ball_dir, mask_dir, smpl_dir):
         directory.mkdir()
 
-    for offset, camera_id in enumerate(camera_row["camera_ids"]):
-        np.save(camera_dir / f"Cam_{camera_id}_intrinsic.npy", camera_row["intrinsics"][offset])
-        np.save(camera_dir / f"Cam_{camera_id}_extrinsic.npy", camera_row["extrinsics"][offset])
-
-    rally_rows: list[dict[str, str | int]] = []
-    global_cursor = 0
     for rally_id in sorted(rallies, key=natural_key):
         frames = sorted(rallies[rally_id], key=lambda item: item["frame"])
-        source_start = frames[0]["frame"]
-        source_end = frames[-1]["frame"]
         # frame_num is local to a Rally. Preserve it as the NPY index so
         # frame 57 produces 57 leading empty frames (0..56).
-        length = source_end + 1
-        global_start = global_cursor
-        global_end = global_start + length
+        length = frames[-1]["frame"] + 1
         ball = np.zeros((length, 3), dtype=np.float32)
         mask = np.zeros(length, dtype=np.uint8)
         for item in frames:
@@ -370,36 +341,18 @@ def convert(
                 mask[local_frame] = 1
         np.save(ball_dir / f"{rally_id}.npy", ball)
         np.save(mask_dir / f"{rally_id}.npy", mask)
-        rally_rows.append({
-            "Score": rally_id,
-            "Start": global_start,
-            "End": global_end,
-            "SourceStart": source_start,
-            "SourceEnd": source_end,
-        })
-        global_cursor = global_end
 
         write_smpl_racket_npz(smpl_dir, rally_id, frames, length, dataset_root, gender)
 
-    match_rally_dir = rally_dir / match_folder
-    match_rally_dir.mkdir()
-    with (match_rally_dir / "RallySeg.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["Score", "Start", "End", "SourceStart", "SourceEnd"])
-        writer.writeheader()
-        writer.writerows(rally_rows)
-    racket_note = (
-        "racket_pose, racket_transform, and racket_frame_offset (matching the real "
-        "captured-match layout)."
-        if dataset_root is not None
-        else "racket_pose (racket_transform/racket_frame_offset were not computed; "
-        "rerun with --dataset-root to include them)."
-    )
     (destination / "IMPORT_INSTRUCTIONS.txt").write_text(
-        "Upload cameras, rally-data, ball, and ball-mask to the matching legacy categories.\n"
+        "Upload ball and ball-mask to the matching legacy categories.\n"
         f"Use FPS={fps:g}. NPY indices preserve each local JSON frame_num with leading empty frames.\n"
-        "Rally Start/End are concatenated global timeline ranges. 2D and human (skeleton) files are absent.\n"
-        "new_racket_npz/<match_id>/<rally_id>_<person_index>.npz holds SMPL body_pose/beta/trans and "
-        f"{racket_note}\n",
+        "Cameras and rally-data (RallySeg.csv) are deliberately not generated: use the "
+        "calibration and the rally segmentation that already exist for this match.\n"
+        "2D and human (skeleton) files are absent.\n"
+        "new_racket_npz/<match_id>/<rally_id>_<person_index>.npz holds SMPL body_pose/beta/trans, "
+        "racket_pose, racket_transform, and racket_frame_offset (matching the real "
+        "captured-match layout).\n",
         encoding="utf-8",
     )
 
@@ -409,32 +362,33 @@ def main() -> None:
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--fps", type=float, default=50.0)
-    parser.add_argument("--match-folder", default="match17")
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path(__file__).resolve().parents[3] / "badminton_dataset",
+        default=DEFAULT_DATASET_ROOT,
         help="Path to the badminton_dataset checkout providing submodules/smplx and "
-        "body_models/human_model_files/smpl, used to compute racket_transform/"
-        "racket_frame_offset (default: ../../../badminton_dataset next to this repo)",
-    )
-    parser.add_argument(
-        "--no-racket-transform",
-        action="store_true",
-        help="Skip computing racket_transform/racket_frame_offset (no torch/smplx "
-        "required); only racket_pose is written, and the frontend falls back to its "
-        "own client-side FK approximation for racket placement.",
+        "body_models/human_model_files/smpl. It is what computes "
+        "racket_transform/racket_frame_offset, without which the racket does not sit "
+        "in the hand. Default: badminton_dataset next to the badminton3D folder.",
     )
     parser.add_argument("--gender", default="neutral", choices=["male", "female", "neutral"])
     args = parser.parse_args()
-    dataset_root = None if args.no_racket_transform else args.dataset_root
-    convert(args.source, args.destination, args.fps, args.match_folder, dataset_root, args.gender)
+    convert(
+        args.source.resolve(),
+        args.destination.resolve(),
+        args.fps,
+        args.dataset_root.resolve(),
+        args.gender,
+    )
 
 
 if __name__ == "__main__":
     main()
 
+# 在 badminton3D 的上一層資料夾執行（badminton3D、badminton_dataset、
+# 0807_finetune150_3_18000_all 三個資料夾放在一起）：
+#
 # python badminton3D\backend\tools\convert_finetune_json.py `
-#   "0807_finetune150_3_18000_all\0807_finetune150_3_18000_all\250108_5" `
-#   "250108_5_legacy_upload_v3" `
+#   "0807_finetune150_3_18000_all\0807_finetune150_3_18000_all\250216_2" `
+#   "converted\250216_2_legacy_upload" `
 #   --fps 50

@@ -114,24 +114,259 @@ docker compose down
 
 一般關閉不會刪除 PostgreSQL 或已上傳的資料。若執行 `docker compose down -v`，所有 Docker volumes 與其中的資料都會被刪除，請勿在需要保留資料時使用。
 
+## 準備資料集檔案
+
+建立資料集前，先把一場比賽的檔案整理好。網頁會讓你**分類別**各選一個資料夾上傳，所以每一類放在哪個資料夾都可以；但下面標出的資料夾層級（Set 資料夾、`rally*/view*/v3`、比賽名稱資料夾）會被用來配對，必須保留。
+
+### 檔案總覽
+
+以 `241224_1` 這場比賽為例，建議整理成：
+
+```text
+241224_1/
+├─ cameras/                        # 相機參數（必要）
+│  ├─ Cam_0_intrinsic.npy
+│  ├─ Cam_0_extrinsic.npy
+│  └─ ...
+├─ rally/                          # Rally 與擊球標註（必要）
+│  ├─ set1/
+│  │  ├─ RallySeg.csv
+│  │  └─ shot_annotated.csv
+│  └─ set2/
+│     └─ RallySeg.csv
+├─ ball/                           # 3D 球軌跡（選用）
+│  ├─ 1_01_00.npy                  # 檔名 = RallySeg 的 Score
+│  └─ ...
+├─ ball-mask/                      # 球軌跡 Mask（有 ball 就必須有）
+│  ├─ 1_01_00.npy
+│  └─ ...
+├─ ball-2d/                        # 2D 羽球標註（選用）
+│  └─ rally1/view0/v3/match17_1_3162_3778_view0_ball.csv
+└─ new_racket_npz/                 # 人體與球拍重建（選用）
+   ├─ gender.csv
+   └─ 241224_1/                    # 資料夾名稱 = 比賽名稱
+      ├─ 1_01_00_0.npz
+      ├─ 1_01_00_1.npz
+      └─ ...
+
+另外準備影片 0.mp4～9.mp4（不上傳，每次開網頁時從本機選取）
+```
+
+| 類別 | 是否必要 | 檔名規則 | 用什麼對應 |
+| --- | --- | --- | --- |
+| 相機參數 | 必要 | `Cam_{n}_intrinsic.npy`、`Cam_{n}_extrinsic.npy` | `n` = 相機編號 = 影片 `n.mp4` |
+| Rally 標註 | 必要 | `RallySeg.csv` | 每一列的 `Score` 是整份資料的 rally 鍵值 |
+| 擊球標註 | 選用 | `shot_annotated.csv` | 與同一個 Set 資料夾的 `RallySeg.csv` 配對；`Rally` 欄 = `Score` |
+| 球軌跡 | 選用 | `{Score}.npy` | 檔名 = `Score` |
+| 球軌跡 Mask | 有球軌跡就必要 | `{Score}.npy` | 檔名 = `Score`，與球軌跡同名 |
+| 2D 羽球位置 | 選用 | `rally{r}/view{n}/v3/match{m}_{r}_{start}_{end}_view{n}[_calib]_ball.csv` | 檔名中的 `start` 與相機 `n` |
+| 人體與球拍 | 選用 | `{Score}_0.npz`、`{Score}_1.npz`（或 `.pth`）、`gender.csv` | 檔名中的 `Score`；上一層資料夾 = 比賽名稱 |
+
+**所有東西都靠 `Score` 串起來**（例如 `1_01_00`）。球軌跡、Mask、擊球標註、人體重建的 Score 只要和 `RallySeg.csv` 對不上，該 rally 的那份資料就會被略過，並在建立畫面顯示提醒。
+
+### Frame 的對應方式
+
+整個系統只有一條全域 Timeline，單位是影片 frame（預設 50 FPS）。各檔案的 frame 欄位意義不同：
+
+| 檔案 | frame 的意思 |
+| --- | --- |
+| `RallySeg.csv` 的 `Start`／`End` | 影片的全域 frame |
+| `shot_annotated.csv` 的 `Hit Frame`／`New Hit Frame` | 影片的全域 frame |
+| `ball/`、`ball-mask/` 的第 `i` 列 | 全域 frame `= RallySeg.Start + i` |
+| 2D CSV 的 `Frame` | 全域 frame `= 檔名中的 start + Frame` |
+| 人體重建 `.npz` 的第 `i` 列 | 全域 frame `= RallySeg.Start + i` |
+
+如果 3D 球和影片看起來差了固定幾格，通常是 `Start` 和 npy 的第 0 列不是同一個時間點。
+
+### 1. 相機參數 `cameras/`
+
+- `Cam_{n}_intrinsic.npy`：內參，9 個數字（3×3 的 K 矩陣，`(3,3)` 或 `(9,)` 都可以）。
+- `Cam_{n}_extrinsic.npy`：外參，`(3, 4)` 的 `[R | t]`。
+- 每個相機的 intrinsic 和 extrinsic 必須成對。也接受 `cam0_intrinsic.npy`、`0_intrinsic.npy` 這類寫法。
+- 相機編號 `n` 必須和影片檔名 `n.mp4`、2D 標註的 `view{n}` 一致。
+- 可以用 [read_camera.py](read_camera.py) 印出內容確認（預設讀 `cameras/` 資料夾）。
+
+### 2. Rally 切分 `RallySeg.csv`
+
+```csv
+Score,UpCourt,DownCourt,Start,End,Comment,Player
+1_01_00,Chi,Wu,3162,3778,0,2
+1_01_01,Chi,Wu,4068,4418,0,1
+```
+
+| 欄位 | 必要 | 說明 |
+| --- | --- | --- |
+| `Score` | 必要 | 格式 `{局}_{上半場分數}_{下半場分數}`，記的是**這一球打完後**的比分。系統用它推算每球勝方，並作為整份資料的 rally 鍵值 |
+| `Start`／`End` | 必要 | 這一球在影片中的全域起訖 frame |
+| `UpCourt`／`DownCourt` | 建議 | 這一球站在上／下半場的選手。雙打把兩人寫在同一格，用 `/`、`&`、`,`、`、` 或 `+` 分隔。系統用它建立選手名單，並判斷單打或雙打 |
+| `Comment`、`Player` | 選用 | 備註、發球方，目前只保留不使用 |
+
+- 一局一個 Set 資料夾（`set1/`、`set2/`…），每個資料夾放一份 `RallySeg.csv`。
+- 比分必須連續：同一局相鄰兩球只能有一邊 +1，否則會出現「比分和上一球接不起來」的提醒（仍可建立）。
+- 中途換邊時，在換邊之後的列把 `UpCourt`／`DownCourt` 對調即可。
+
+### 3. 擊球標註 `shot_annotated.csv`（選用）
+
+放在和 `RallySeg.csv` 同一個 Set 資料夾，系統會自動配對。
+
+```csv
+Rally,Ball Round,Start,End,player,Hit Frame,New Hit Frame,Shot Type,Hand,Note,Diff
+1_01_00,1,3162,3778,Down,3204,3200,切球,正拍,,None
+1_01_00,2,3162,3778,Up,3295,,,,,91
+```
+
+| 欄位 | 說明 |
+| --- | --- |
+| `Rally` | 對應 `RallySeg.csv` 的 `Score` |
+| `Ball Round` | 這一球的第幾拍 |
+| `player` | `Up` 或 `Down`，擊球者在哪個半場 |
+| `Hit Frame` | 擊球的全域 frame |
+| `New Hit Frame` | 人工修正後的擊球 frame，可留空 |
+| `Shot Type`、`Hand`、`Note` | 球種、正反拍、備註，可留空 |
+
+`Start`、`End`、`Diff` 欄位不會被讀取。沒有這個檔案時，該 Set 一樣可以匯入，只是沒有擊球線。
+
+### 4. 3D 球軌跡 `ball/` 與 `ball-mask/`（選用）
+
+- 一個 rally 一組檔案，檔名都是 `{Score}.npy`。
+- `ball/{Score}.npy`：`(N, 3)` 的 float，每列是一個 frame 的球心 3D 座標。
+- `ball-mask/{Score}.npy`：`(N,)`，`1` 代表這一列有效，`0` 代表沒有球。
+- 兩者長度必須相同。**只有 ball 沒有 mask 的 rally 不會匯入軌跡。**
+- 第 `i` 列對應全域 frame `Start + i`；mask 為 0 的列不會寫入資料庫。
+
+可以用下面的「[從 fine-tune JSON 轉檔](#從-fine-tune-json-轉檔)」產生。
+
+### 5. 2D 羽球位置（選用）
+
+- 路徑必須是 `rally{r}/view{n}/v3/` 底下，檔名 `match{m}_{r}_{start}_{end}_view{n}[_calib]_ball.csv`。資料夾的 `r`、`n` 必須和檔名一致。
+- 內容欄位：`Frame,Visibility,X,Y`。`Frame` 從 0 開始，全域 frame = 檔名的 `start` + `Frame`；`Visibility` 為 1 才顯示；`X`、`Y` 是影片像素座標。
+- 品質檢查與多視角 2D→3D 修復都需要這份資料。
+
+### 6. 人體與球拍重建 `new_racket_npz/`（選用）
+
+- 每個 rally 兩個檔案：`{Score}_0.npz`（或 `.pth`）與 `{Score}_1.npz`，分別是兩位球員；缺任一個會提醒。`.pth` 會在上傳時由後端轉成 `.npz`。
+- 檔案的上一層資料夾名稱就是比賽名稱（例如 `new_racket_npz/241224_1/`）。一次上傳多場比賽時，建立畫面會讓你選要用哪一場。
+- `.npz` 內容：`data/body_pose (N,72)`、`data/beta (1,10)`、`data/trans (N,3)`、`data/racket_pose (N,3)`、`data/mask (N,)`，以及選用的 `racket_transform (N,4,4)`、`racket_frame_offset (N,3)`。少了後兩個時，前端會自己估算球拍位置，看起來可能和手脫節。
+- `gender.csv`（選用）指定每場比賽要用的 SMPL 體型：
+
+  ```csv
+  comp_name,gender
+  241224_1,female
+  ```
+
+  `gender` 可填 `male`、`female`、`neutral`。沒上傳時使用後端內建的 [reconstruction_gender.csv](backend/app/reconstruction_gender.csv)；上傳的優先。
+
+### 7. 多視角影片
+
+- 檔名 `0.mp4`～`9.mp4`，編號與相機參數一致，不必十支都有。
+- 影片**不會上傳到後端**，每次重新整理網頁都要在影片區重新選取。影片的第 0 幀應對應全域 frame 0；若有時間差，在建立資料集時用各相機的 `offset_frame` 校正。
+
+## 從 JSON 轉檔
+
+模型的輸出是「每個 frame 一個 JSON」，不能直接上傳。請用 [backend/tools/convert_finetune_json.py](backend/tools/convert_finetune_json.py) 轉成上傳格式。每個輸出檔案的計算方式詳見 [backend/tools/CONVERT_FINETUNE_JSON.md](backend/tools/CONVERT_FINETUNE_JSON.md)。
+
+### 轉檔會產生什麼、不會產生什麼
+
+| 產生 | 不產生（要從該場比賽既有資料拿） |
+| --- | --- |
+| `ball/{Score}.npy` | `cameras/` 相機參數 |
+| `ball-mask/{Score}.npy` | `RallySeg.csv`（JSON 裡沒有影片的全域 frame 和選手名字） |
+| `new_racket_npz/{match_id}/{Score}_{0,1}.npz`（含 `racket_transform`） | `shot_annotated.csv`（人工標註） |
+| `IMPORT_INSTRUCTIONS.txt` | 2D 羽球標註、`gender.csv`、影片 |
+
+### 1. 資料準備
+
+資料來源在 server `140.113.241.176` 上（需要該 server 的帳號）：
+
+```text
+/train-data-3-hdd/clchen/0807_finetune150_3_18000_all.tar.zst
+```
+
+解壓縮後，每場比賽的資料夾在**兩層同名資料夾**底下：
+
+```text
+0807_finetune150_3_18000_all/
+  0807_finetune150_3_18000_all/
+    241217_1/
+    241224_1/                # 一場比賽
+      1_00_01/               # rally id（= Score）
+        000/two_groups/
+          frame_000063.json
+          ...
+        001/two_groups/
+          frame_000162.json
+      1_01_02/
+      ...
+  log/                       # 預測時的紀錄，轉檔用不到
+```
+
+每個 JSON 會用到 `rally_id`、`frame_num`、`match_id`、`ball_3d`、`smpl_pose`（每人 75 維 = 72 body + 3 racket）、`smpl_beta`、`smpl_trans`。`frame_num` 是 rally 內的編號，會直接當成 npy 的列號，所以它的 0 必須對應到 `RallySeg.csv` 的 `Start`。
+
+### 2. 準備 `badminton_dataset` 與 Python 環境
+
+- Python（以 3.10 測試過），安裝 `numpy`、`torch`、`chumpy`；`ujson` 選用，可加快讀取。`chumpy` 是讀取 SMPL `.pkl` 必需的，缺少時會出現 `No module named 'chumpy'`。
+
+  ```bash
+  pip install numpy torch chumpy
+  ```
+
+- 一份 `badminton_dataset`。底下要有：
+  - `submodules/smplx`：支援 `racket_pose` 的 SMPL 修改版
+  - `body_models/human_model_files/smpl/SMPL_*.pkl`：SMPL 模型檔
+  
+  轉檔用它計算球拍跟著手腕的位置；找不到時，程式會在讀 JSON 之前就報錯。
+
+### 3. 擺放資料夾
+
+腳本使用相對路徑，把三個資料夾放在同一層最省事：
+
+```text
+<工作資料夾>/
+├─ badminton3D/                     # 本專案
+├─ badminton_dataset/               # SMPL 修改版與模型檔
+└─ 0807_finetune150_3_18000_all/    # 第 1 步解壓的資料
+```
+
+`--dataset-root` 預設就是 `badminton3D` 旁邊的 `badminton_dataset`。放在別處時，再用 `--dataset-root` 指定路徑。
+
+### 4. 執行轉檔
+
+在 `<工作資料夾>` 執行（PowerShell），一次轉一場比賽：
+
+```powershell
+python badminton3D\backend\tools\convert_finetune_json.py `
+  "0807_finetune150_3_18000_all\0807_finetune150_3_18000_all\241224_1" `
+  "converted\241224_1_legacy_upload" `
+  --fps 50
+```
+
+| 參數 | 說明 |
+| --- | --- |
+| 第 1 個 | 一場比賽的 JSON 資料夾，相對於目前所在的資料夾 |
+| 第 2 個 | 輸出資料夾，**必須不存在**，相對於目前所在的資料夾 |
+| `--fps` | 影片 FPS，預設 50 |
+| `--dataset-root` | `badminton_dataset` 的路徑，預設為 `badminton3D` 旁邊的 `badminton_dataset` |
+| `--gender` | 計算球拍位置用的 SMPL 體型：`male`、`female`、`neutral`（預設） |
+
+執行時會每 500 個 JSON 印一次進度；結束時若有缺球或缺人體的 frame，會印出數量提醒。
+
+### 5. 轉完之後上傳
+
+1. 把該場比賽既有的 `RallySeg.csv`（和 `shot_annotated.csv`，如果有）依 Set 資料夾放進輸出資料夾，例如 `rally/set1/RallySeg.csv`，並確認 `Score` 和 `ball/` 的檔名對得上。
+2. 準備該場的 `cameras/`，以及需要的 2D 標註、`gender.csv`。
+3. 依「[建立步驟](#建立步驟)」上傳，類別對應如下：
+
+| 輸出資料夾 | 上傳到的類別 |
+| --- | --- |
+| `ball/` | 球軌跡 |
+| `ball-mask/` | 球軌跡 Mask |
+| `new_racket_npz/`（連同 `gender.csv`） | 人體與球拍重建 |
+| `rally/` | Rally 與擊球標註 |
+| `cameras/` | 相機參數 |
+
 ## 第一次使用：建立資料集
 
-進入網頁後，點選上方的「建立新資料集」。系統會建立暫存上傳工作階段，接著依畫面選擇各類資料夾。
-
-### 資料類型與檔案需求
-
-| 類型 | 是否必要 | 接受的檔案 | 說明 |
-| --- | --- | --- | --- |
-| 相機參數 | 必要 | `Cam_*_intrinsic.npy`、`Cam_*_extrinsic.npy` | 每個相機的內參與外參必須成對 |
-| Rally 與擊球標註 | 必要 | `RallySeg.csv`、`shot_annotated.csv` | 系統會依相同 Set 資料夾自動配對 |
-| 球軌跡 | 選用 | `.npy` | 未提供時仍可建立資料集，但不會顯示 3D 球軌跡 |
-| 球軌跡 Mask | 選用 | `.npy` | 依檔名與球軌跡配對；缺少時不會匯入對應軌跡 |
-| 2D 羽球位置 | 選用 | `match{n}_{rally}_{start}_{end}_view{camera}[_calib]_ball.csv` | 讀取 `rally*/view*/v3` 下的 `Frame,Visibility,X,Y`，顯示於對應視角影片 |
-| 人體與球拍重建 | 選用 | `.pth`、`.npz`、`gender.csv` | `.pth` 會在建立資料集時由後端轉為 NPZ |
-
-相機檔名可使用 `Cam_0_intrinsic.npy`、`Cam_0_extrinsic.npy` 這類格式。Rally 資料應保留原本的 Set 資料夾層級，讓同一組 `RallySeg.csv` 與 `shot_annotated.csv` 能被正確配對。
-
-人體與球拍資料可選擇單一比賽資料夾，或選擇包含 `new_racket` 與 `gender.csv` 的最外層資料夾。重建檔案使用 `{Score}_0.pth` 與 `{Score}_1.pth` 命名，分別對應兩位球員。
+進入網頁後，點選上方的「建立新資料集」。系統會建立暫存上傳工作階段，接著依畫面分類別選擇資料夾。各類檔案的格式請見上一節「[準備資料集檔案](#準備資料集檔案)」。
 
 ### 建立步驟
 
@@ -352,7 +587,7 @@ docker compose logs --tail=200 backend
 
 ### 選擇資料夾後顯示沒有可上傳檔案
 
-系統只接受指定檔名與副檔名。請確認瀏覽器選擇的是資料夾，且檔名符合本 README 的「資料類型與檔案需求」。不要先把資料夾壓縮成 ZIP 再選取。
+系統只接受指定檔名與副檔名。請確認瀏覽器選擇的是資料夾，且檔名符合本 README 的「[準備資料集檔案](#準備資料集檔案)」。不要先把資料夾壓縮成 ZIP 再選取。
 
 ### 影片沒有出現或視角對不上
 
@@ -393,6 +628,7 @@ badminton3D/
 │  │  ├─ dataset_upload.py       # 分批上傳、檢查、匯入與資料集管理
 │  │  ├─ models.py               # SQLAlchemy 資料表模型
 │  │  └─ reconstruction_assets.py# 人體／球拍重建資產處理
+│  ├─ tools/convert_finetune_json.py # fine-tune JSON → 上傳格式轉檔
 │  ├─ Dockerfile
 │  └─ requirements.txt
 ├─ frontend/
