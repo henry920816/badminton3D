@@ -108,18 +108,22 @@ function getAxes(view) {
     }
   }
 
+  // 橫軸是球場長邊（z），縱軸是寬（x），球場橫躺、網在中間直立。
+  // 縱軸畫 -x，也就是 x 往下增加
   return {
     title: 'Top view',
-    xLabel: 'court width x',
-    yLabel: 'court depth z',
-    getX: (p) => p.x,
-    getY: (p) => p.z,
-    minX: -COURT_WIDTH / 2,
-    maxX: COURT_WIDTH / 2,
-    minY: -COURT_LENGTH / 2,
-    maxY: COURT_LENGTH / 2,
+    xLabel: 'court depth z',
+    yLabel: 'court width x',
+    getX: (p) => p.z,
+    getY: (p) => -p.x,
+    minX: -COURT_LENGTH / 2,
+    maxX: COURT_LENGTH / 2,
+    minY: -COURT_WIDTH / 2,
+    maxY: COURT_WIDTH / 2,
     includeDataRange: true,
     court: true,
+    // drawCourt 給的是球場座標 { x: 寬, y: 長 }，換成這張圖的兩軸
+    courtToChart: ({ x, y }) => ({ x: y, y: -x }),
   }
 }
 
@@ -258,7 +262,7 @@ function ProjectionChart({
     if (axes.court) {
       ctx.fillStyle = '#14532d'
       ctx.fillRect(pad.left, pad.top, chartW, chartH)
-      drawCourt(ctx, mapPoint)
+      drawCourt(ctx, (courtPoint) => mapPoint(axes.courtToChart(courtPoint)))
     } else {
       for (let i = 1; i <= 3; i++) {
         const y = pad.top + (chartH * i) / 4
@@ -497,7 +501,8 @@ export default function Projection2DPanel() {
 
   return (
     <div className="h-full w-full min-h-0 min-w-0 flex flex-col bg-zinc-950">
-      <div className="h-[42px] shrink-0 px-4 flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20 min-w-0 overflow-hidden">
+      {/* 右側留 104px 給 App 疊在上面的「專注底部」按鈕 */}
+      <div className="h-[42px] shrink-0 pl-4 pr-[104px] flex items-center gap-4 border-b border-zinc-800 bg-zinc-950 shadow-sm z-20 min-w-0 overflow-hidden">
         <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
           {[
             ['timeline', 'TIMELINE'],

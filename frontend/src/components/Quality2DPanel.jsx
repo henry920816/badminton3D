@@ -171,6 +171,19 @@ export default function Quality2DPanel() {
     || 50
   )
 
+  // 依目前選的 2D 來源（原始 / 修正後）做品質檢查
+  const ball2DSource = (
+    useAppStore(
+      state => state.ball2DSource,
+    )
+  )
+
+  const ball2DCorrectionTick = (
+    useAppStore(
+      state => state.ball2DCorrectionTick,
+    )
+  )
+
   const currentFrame = (
     useAppStore(
       state => state.currentFrame,
@@ -484,6 +497,7 @@ export default function Quality2DPanel() {
               matchId,
               currentRally.start_frame,
               currentRally.end_frame,
+              useAppStore.getState().ball2DSource,
             )
           )
 
@@ -543,6 +557,69 @@ export default function Quality2DPanel() {
     [
       matchId,
       currentRally,
+      // 切換原始 / 修正後時重新檢查
+      ball2DSource,
+    ],
+  )
+
+
+  /*
+   * 影片面板存好一格 2D 標註修正：
+   * 品質檢查逐格獨立，只重算那一格，
+   * 不必整個 rally 重抓。
+   */
+  useEffect(
+    () => {
+      const tick = ball2DCorrectionTick
+
+      if (
+        !tick
+        || matchId == null
+        || tick.matchId !== matchId
+        || ball2DSource !== 'corrected'
+        || !currentRally
+        || tick.frame < currentRally.start_frame
+        || tick.frame > currentRally.end_frame
+      ) {
+        return
+      }
+
+      const rallyId = currentRally.id
+
+      api.getTraj2DCameraGrid(
+        matchId,
+        tick.frame,
+        tick.frame,
+        'corrected',
+      )
+        .then(rows => {
+          if (
+            useAppStore.getState().matchId !== matchId
+            || currentRallyRef.current?.id !== rallyId
+          ) {
+            return
+          }
+
+          setGrid(
+            previous => [
+              ...previous.filter(
+                item => item.frame !== tick.frame,
+              ),
+              ...(rows || []),
+            ].sort(
+              (first, second) => first.frame - second.frame,
+            ),
+          )
+        })
+        .catch(error => {
+          console.warn(
+            'Quality grid frame refresh failed:',
+            error,
+          )
+        })
+    },
+    [
+      ball2DCorrectionTick,
     ],
   )
 
@@ -946,6 +1023,7 @@ export default function Quality2DPanel() {
           matchId,
           currentRally.start_frame,
           currentRally.end_frame,
+          useAppStore.getState().ball2DSource,
         )
       )
 
@@ -1012,7 +1090,9 @@ export default function Quality2DPanel() {
       setAutoRepairResult(null)
       setUndoMessage(`已復原 ${result.reverted_frames} 個 frame 的 2D 標註`)
       if (currentRally) {
-        const refreshed = await api.getTraj2DCameraGrid(matchId, currentRally.start_frame, currentRally.end_frame)
+        const refreshed = await api.getTraj2DCameraGrid(
+          matchId, currentRally.start_frame, currentRally.end_frame, useAppStore.getState().ball2DSource,
+        )
         if (useAppStore.getState().matchId === batch.matchId && currentRallyRef.current?.id === currentRally.id) {
           setGrid(refreshed)
           setLoadedRallyId(currentRally.id)
@@ -1899,7 +1979,8 @@ export default function Quality2DPanel() {
           py-2
           flex-wrap
           shrink-0
-          px-4
+          pl-4
+          pr-[104px]
           flex
           items-center
           gap-3

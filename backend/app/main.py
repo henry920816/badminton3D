@@ -10,6 +10,11 @@ from sqlalchemy.orm import Session
 from .db import engine, get_db
 from .dataset_upload import router as dataset_upload_router
 from .auto_repair import router as auto_repair_router
+from .ball2d_corrections import (
+    Ball2DSource,
+    load_ball_2d_rows,
+    router as ball2d_corrections_router,
+)
 from .models import (
     Anomaly,
     BallPosition2D,
@@ -32,7 +37,7 @@ from .schemas import (
 )
 from .triangulation import (
     pairwise_consensus_point,
-    pairwise_triangulation_diagnostics,
+    per_view_pairwise_points,
     scan_2d_camera_grid,
     triangulate_observations,
 )
@@ -49,6 +54,10 @@ app.include_router(
 
 app.include_router(
     auto_repair_router
+)
+
+app.include_router(
+    ball2d_corrections_router
 )
 
 
@@ -306,6 +315,7 @@ def get_traj_2d(
     start: int = 0,
     end: int = 999999999,
     db: Session = Depends(get_db),
+    source: Ball2DSource = "original",
 ):
     match = db.get(
         Match,
@@ -330,27 +340,18 @@ def get_traj_2d(
             detail="end must be greater than or equal to start",
         )
 
-    rows = (
-        db.query(BallPosition2D)
-        .filter(
-            BallPosition2D.match_id == match_id,
-            BallPosition2D.camera_index == camera_index,
-            BallPosition2D.frame >= start,
-            BallPosition2D.frame <= end,
-        )
-        .order_by(
-            BallPosition2D.frame
-        )
-        .all()
+    rows = load_ball_2d_rows(
+        db,
+        match_id,
+        start,
+        end,
+        camera_index=camera_index,
+        source=source,
     )
 
     return [
         BallPosition2DPoint(
-            frame=row.frame,
-            camera_index=row.camera_index,
-            visibility=row.visibility,
-            x=row.x,
-            y=row.y,
+            **row
         )
         for row in rows
     ]
@@ -410,89 +411,18 @@ def get_traj_2d_camera_grid(
     start_frame: int,
     end_frame: int,
     db: Session = Depends(get_db),
+    source: Ball2DSource = "original",
 ):
-    match = db.get(
-        Match,
-        match_id,
-    )
-
-    if match is None:
-        raise HTTPException(
-            status_code=404,
-            detail="match not found",
-        )
-
-    if end_frame < start_frame:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "end_frame must be greater "
-                "than or equal to start_frame"
-            ),
-        )
-
-    if (
-        end_frame
-        - start_frame
-        > MAX_CAMERA_GRID_FRAMES
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"range too large "
-                f"(max {MAX_CAMERA_GRID_FRAMES} frames)"
-            ),
-        )
-
-    cameras_by_index = (
-        cameras_by_index_for_match(
-            match
+    cameras_by_index, observations_by_frame = (
+        load_pairwise_inputs(
+            match_id,
+            start_frame,
+            end_frame,
+            db,
+            source,
+            max_frames=MAX_CAMERA_GRID_FRAMES,
         )
     )
-
-    rows = (
-        db.query(BallPosition2D)
-        .filter(
-            BallPosition2D.match_id
-            == match_id,
-            BallPosition2D.frame
-            >= start_frame,
-            BallPosition2D.frame
-            <= end_frame,
-            BallPosition2D.visibility
-            > 0,
-        )
-        .order_by(
-            BallPosition2D.frame,
-            BallPosition2D.camera_index,
-        )
-        .all()
-    )
-
-    observations_by_frame = {}
-
-    for row in rows:
-        if (
-            row.camera_index
-            not in cameras_by_index
-        ):
-            continue
-
-        observations_by_frame.setdefault(
-            row.frame,
-            [],
-        ).append(
-            {
-                "camera_index":
-                    row.camera_index,
-
-                "x":
-                    row.x,
-
-                "y":
-                    row.y,
-            }
-        )
 
     return scan_2d_camera_grid(
         cameras_by_index,
@@ -505,20 +435,14 @@ def get_traj_2d_camera_grid(
 MAX_PAIRWISE_FRAMES = 6000
 
 
-@app.get(
-    "/matches/{match_id}/traj2d/pairwise"
-)
-def get_traj_2d_pairwise(
+def require_match_frame_range(
     match_id: int,
     start_frame: int,
     end_frame: int,
-    db: Session = Depends(get_db),
-):
-    """每個 frame 用 2D 羽球位置兩兩重建，回傳各組 3D 點的中位數。
-
-    前端拿這串點來偵測擊球，擊球前最後一格的點也是球拍拍面中心要對準的
-    位置。沒有可用相機組合的 frame 不會出現在結果裡。
-    """
+    db: Session,
+    max_frames: int,
+) -> Match:
+    """依 frame 範圍讀 2D 資料的 API 共用的檢查。"""
     match = db.get(
         Match,
         match_id,
@@ -542,15 +466,38 @@ def get_traj_2d_pairwise(
     if (
         end_frame
         - start_frame
-        > MAX_PAIRWISE_FRAMES
+        > max_frames
     ):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"range too large "
-                f"(max {MAX_PAIRWISE_FRAMES} frames)"
+                f"(max {max_frames} frames)"
             ),
         )
+
+    return match
+
+
+def load_pairwise_inputs(
+    match_id: int,
+    start_frame: int,
+    end_frame: int,
+    db: Session,
+    source: Ball2DSource = "original",
+    max_frames: int = MAX_PAIRWISE_FRAMES,
+) -> tuple[dict[int, dict], dict[int, list[dict]]]:
+    """重建共用的檢查與讀取：回傳相機參數，以及每個 frame 的 2D 羽球點。
+
+    沒有相機參數的視角無法重建，直接略過。
+    """
+    match = require_match_frame_range(
+        match_id,
+        start_frame,
+        end_frame,
+        db,
+        max_frames,
+    )
 
     cameras_by_index = (
         cameras_by_index_for_match(
@@ -558,39 +505,67 @@ def get_traj_2d_pairwise(
         )
     )
 
-    rows = (
-        db.query(BallPosition2D)
-        .filter(
-            BallPosition2D.match_id
-            == match_id,
-            BallPosition2D.frame
-            >= start_frame,
-            BallPosition2D.frame
-            <= end_frame,
-            BallPosition2D.visibility
-            > 0,
-        )
-        .all()
+    rows = load_ball_2d_rows(
+        db,
+        match_id,
+        start_frame,
+        end_frame,
+        source=source,
+        visible_only=True,
     )
 
     observations_by_frame = {}
 
     for row in rows:
+        if (
+            row["camera_index"]
+            not in cameras_by_index
+        ):
+            continue
+
         observations_by_frame.setdefault(
-            row.frame,
+            row["frame"],
             [],
         ).append(
             {
                 "camera_index":
-                    row.camera_index,
+                    row["camera_index"],
 
                 "x":
-                    row.x,
+                    row["x"],
 
                 "y":
-                    row.y,
+                    row["y"],
             }
         )
+
+    return cameras_by_index, observations_by_frame
+
+
+@app.get(
+    "/matches/{match_id}/traj2d/pairwise"
+)
+def get_traj_2d_pairwise(
+    match_id: int,
+    start_frame: int,
+    end_frame: int,
+    db: Session = Depends(get_db),
+    source: Ball2DSource = "original",
+):
+    """每個 frame 用 2D 羽球位置兩兩重建，回傳各組 3D 點的中位數。
+
+    前端拿這串點來偵測擊球，擊球前最後一格的點也是球拍拍面中心要對準的
+    位置。沒有可用相機組合的 frame 不會出現在結果裡。
+    """
+    cameras_by_index, observations_by_frame = (
+        load_pairwise_inputs(
+            match_id,
+            start_frame,
+            end_frame,
+            db,
+            source,
+        )
+    )
 
     results = []
 
@@ -614,6 +589,94 @@ def get_traj_2d_pairwise(
                     consensus["pair_count"],
             }
         )
+
+    return results
+
+
+@app.get(
+    "/matches/{match_id}/traj2d/visible"
+)
+def get_traj_2d_visible(
+    match_id: int,
+    start_frame: int,
+    end_frame: int,
+    db: Session = Depends(get_db),
+    source: Ball2DSource = "original",
+):
+    """每一格有哪些相機看得見羽球（有 2D 標註），回傳 [{frame, camera_index}]。
+
+    影片面板用來在相機按鈕上標示目前這格哪些視角有 2D 標註，
+    只回傳 frame 與相機，不帶座標，一個 rally 的量很小。
+    """
+    # 只看有沒有標註，用不到相機參數，沒有參數的視角也要列出來
+    require_match_frame_range(
+        match_id,
+        start_frame,
+        end_frame,
+        db,
+        MAX_PAIRWISE_FRAMES,
+    )
+
+    rows = load_ball_2d_rows(
+        db,
+        match_id,
+        start_frame,
+        end_frame,
+        source=source,
+        visible_only=True,
+    )
+
+    return [
+        {
+            "frame": row["frame"],
+            "camera_index": row["camera_index"],
+        }
+        for row in rows
+    ]
+
+
+@app.get(
+    "/matches/{match_id}/traj2d/pairwise/views"
+)
+def get_traj_2d_pairwise_views(
+    match_id: int,
+    start_frame: int,
+    end_frame: int,
+    db: Session = Depends(get_db),
+    source: Ball2DSource = "original",
+):
+    """每個 frame、每個相機視角各給一個兩兩重建的 3D 點。
+
+    做法同 triangulation_3Dline.py：一個視角的點是所有包含它的相機組合
+    重建點的中位數，distance 是這些點到原點距離的中位數。時間軸用來畫
+    各視角的距離與速度曲線，哪個視角的標註歪掉會直接看出來。
+    """
+    cameras_by_index, observations_by_frame = (
+        load_pairwise_inputs(
+            match_id,
+            start_frame,
+            end_frame,
+            db,
+            source,
+        )
+    )
+
+    results = []
+
+    for frame in sorted(observations_by_frame):
+        views = per_view_pairwise_points(
+            cameras_by_index,
+            observations_by_frame[frame],
+        )
+
+        for camera_index in sorted(views):
+            results.append(
+                {
+                    "frame": frame,
+                    "camera_index": camera_index,
+                    **views[camera_index],
+                }
+            )
 
     return results
 

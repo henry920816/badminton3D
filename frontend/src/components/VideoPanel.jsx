@@ -24,10 +24,41 @@ import {
 import {
   useRallyBallData,
 } from '../utils/useRallyBallData.js'
+import {
+  useBall2DVisibleRows,
+} from '../utils/usePairwiseBallPoints.js'
+
+import Ball2DCorrectionPanel from './Ball2DCorrectionPanel.jsx'
 
 
 // 後端 get_traj2d 的 end 預設值，代表「這台相機全部」
 const ALL_FRAMES = 999999999
+
+
+// 影片右上角的圖層 / 模式按鈕：底色一律中性，顏色只留在圓點上，
+// 圓點的顏色就是那個圖層畫在影片上的顏色，當圖例用
+function overlayButtonClass(available, active) {
+  return [
+    'px-2 py-1 rounded border text-xs flex items-center gap-1.5',
+    available
+      ? (
+          active
+            ? 'bg-zinc-700/90 border-zinc-400 text-white hover:bg-zinc-600/90'
+            : 'bg-zinc-900/80 border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+        )
+      : 'bg-zinc-950/80 border-zinc-800 text-zinc-600 cursor-not-allowed',
+  ].join(' ')
+}
+
+
+function OverlayDot({ color, active }) {
+  return (
+    <span
+      className={`inline-block h-2 w-2 rounded-full ${active ? '' : 'opacity-30'}`}
+      style={{ backgroundColor: color }}
+    />
+  )
+}
 
 
 function resolveVideoUrl(url) {
@@ -363,6 +394,7 @@ function drawProjectionOverlay({
   showRacketTip,
   handPoints,
   showHands,
+  correctionOverlay,
 }) {
   if (
     !canvas
@@ -670,6 +702,48 @@ function drawProjectionOverlay({
       })
     }
   }
+
+  // 2D 標註修正：灰圈是原始標註，琥珀色實心點是修正後的位置
+  if (correctionOverlay) {
+    const imageWidth = (
+      cameraParams?.imageWidth
+      || video.videoWidth
+      || 1920
+    )
+    const imageHeight = (
+      cameraParams?.imageHeight
+      || video.videoHeight
+      || 1200
+    )
+    const {
+      original,
+      correction,
+    } = correctionOverlay
+
+    if (Number(original?.visibility) === 1) {
+      drawPoint({
+        u: original.x,
+        v: original.y,
+        imageWidth,
+        imageHeight,
+        fillStyle: 'rgba(0, 0, 0, 0)',
+        strokeStyle: '#a1a1aa',
+        radius: 8,
+      })
+    }
+
+    if (Number(correction?.visibility) === 1) {
+      drawPoint({
+        u: correction.x,
+        v: correction.y,
+        imageWidth,
+        imageHeight,
+        fillStyle: '#f59e0b',
+        strokeStyle: '#fef3c7',
+        radius: 5,
+      })
+    }
+  }
 }
 
 
@@ -725,7 +799,32 @@ export default function VideoPanel() {
   // 和 3D 場景同一份擊球結果（兩兩重建點有快取，不會多打一次後端）
   const {
     contacts: ballContacts,
+    startFrame: rallyStartFrame,
+    endFrame: rallyEndFrame,
   } = useRallyBallData()
+
+  // 這個 rally 每一格哪些相機有 2D 標註，相機按鈕用來上色
+  const ball2DVisible = useBall2DVisibleRows(
+    matchId,
+    rallyStartFrame,
+    rallyEndFrame,
+  )
+
+  const camerasWith2DByFrame = useMemo(
+    () => {
+      const byFrame = new Map()
+
+      for (const row of ball2DVisible.points || []) {
+        if (!byFrame.has(row.frame)) byFrame.set(row.frame, new Set())
+        byFrame.get(row.frame).add(Number(row.camera_index))
+      }
+
+      return byFrame
+    },
+    [
+      ball2DVisible.points,
+    ],
+  )
 
   // 這一格是不是某次擊球「球速或方向改變前的最後一個點」，
   // 也就是球拍拍面中心要對準的那一格
@@ -754,6 +853,10 @@ export default function VideoPanel() {
 
   const removeTrajFrames = useAppStore(
     state => state.removeTrajFrames
+  )
+
+  const ball2DSource = useAppStore(
+    state => state.ball2DSource
   )
 
   const ball2DByCameraFrame = useAppStore(
@@ -832,15 +935,16 @@ export default function VideoPanel() {
     setShowBall2D,
   ] = useState(true)
 
+  // 拍頂、手掌的投影預設關掉，需要時再從工具列打開
   const [
     showRacketTip,
     setShowRacketTip,
-  ] = useState(true)
+  ] = useState(false)
 
   const [
     showHands,
     setShowHands,
-  ] = useState(true)
+  ] = useState(false)
 
   const [
     videoReadyIdentity,
@@ -1023,6 +1127,327 @@ export default function VideoPanel() {
     ],
   )
 
+  // 2D 標註修正：修正存在獨立的表，原始資料不會被改動
+  const [
+    correction2DMode,
+    setCorrection2DMode,
+  ] = useState(false)
+
+  const [
+    correction2DSaving,
+    setCorrection2DSaving,
+  ] = useState(false)
+
+  const [
+    correction2DError,
+    setCorrection2DError,
+  ] = useState('')
+
+  const [
+    correction2DAdvance,
+    setCorrection2DAdvance,
+  ] = useState(false)
+
+  const ball2DCorrections = useAppStore(
+    state => state.ball2DCorrections
+  )
+
+  const activeCorrectionMap = useMemo(
+    () => (
+      ball2DCorrections.get(
+        Number(activeCamera?.index),
+      )
+      || null
+    ),
+    [
+      ball2DCorrections,
+      activeCamera,
+    ],
+  )
+
+  const activeCorrection = (
+    activeCorrectionMap?.get(currentFrame)
+    || null
+  )
+
+  // 這格的原始標註：有修正時取修正紀錄附的原始值；沒有修正時，
+  // 畫面上的 2D 點不論來源都等於原始值
+  const activeOriginal2D = (
+    activeCorrection
+      ? activeCorrection.original
+      : activeBall2DMap?.get(currentFrame) || null
+  )
+
+  const correctionOverlay = useMemo(
+    () => (
+      correction2DMode
+        ? {
+            original: activeOriginal2D,
+            correction: activeCorrection,
+          }
+        : null
+    ),
+    [
+      correction2DMode,
+      activeOriginal2D,
+      activeCorrection,
+    ],
+  )
+
+  useEffect(
+    () => {
+      if (
+        !correction2DMode
+        || matchId == null
+        || !Number.isInteger(
+          Number(activeCamera?.index),
+        )
+      ) {
+        return undefined
+      }
+
+      const cameraIndex = Number(
+        activeCamera.index,
+      )
+
+      // 存檔 / 清除時 store 已同步更新，換資料集時會清空；
+      // 讀過的相機不用每次打開修正模式都重抓
+      if (
+        useAppStore.getState().ball2DCorrections.has(
+          cameraIndex,
+        )
+      ) {
+        return undefined
+      }
+
+      let cancelled = false
+
+      api.getBall2DCorrections(
+        matchId,
+        cameraIndex,
+      )
+        .then(list => {
+          if (!cancelled) {
+            useAppStore.getState().setBall2DCorrections(
+              cameraIndex,
+              list,
+            )
+          }
+        })
+        .catch(error => {
+          if (!cancelled) {
+            setCorrection2DError(
+              error?.message
+              || String(error)
+            )
+          }
+        })
+
+      return () => {
+        cancelled = true
+      }
+    },
+    [
+      correction2DMode,
+      matchId,
+      activeCamera?.index,
+    ],
+  )
+
+  // 讀的是修正後資料時，畫面上的 2D 點立刻換掉，兩兩重建與品質檢查
+  // 只重算這一格（整個 rally 重算要好幾秒）
+  const applyCorrectionToView = (
+    cameraIndex,
+    frame,
+    point,
+  ) => {
+    const state = useAppStore.getState()
+
+    if (state.ball2DSource !== 'corrected') return
+
+    if (point) {
+      state.upsertBall2DPoints(
+        cameraIndex,
+        [
+          {
+            camera_index: cameraIndex,
+            frame,
+            ...point,
+          },
+        ],
+      )
+    } else {
+      state.removeBall2DPoints(
+        cameraIndex,
+        [frame],
+      )
+    }
+
+    state.notifyBall2DCorrected(frame)
+  }
+
+  const saveCorrection2D = async payload => {
+    if (matchId == null) return
+
+    setCorrection2DSaving(true)
+    setCorrection2DError('')
+
+    try {
+      const result = await api.saveBall2DCorrection(
+        matchId,
+        payload,
+      )
+
+      if (useAppStore.getState().matchId !== matchId) return
+
+      useAppStore.getState().upsertBall2DCorrection(
+        result
+      )
+      applyCorrectionToView(
+        result.camera_index,
+        result.frame,
+        {
+          visibility: result.visibility,
+          x: result.x,
+          y: result.y,
+          corrected: true,
+        },
+      )
+
+      if (correction2DAdvance) {
+        setCurrentFrame(
+          payload.frame + 1
+        )
+      }
+    } catch (error) {
+      console.error(error)
+      setCorrection2DError(
+        error?.message
+        || String(error)
+      )
+    } finally {
+      setCorrection2DSaving(false)
+    }
+  }
+
+  const markCorrection2DHidden = () => {
+    if (
+      !Number.isInteger(
+        Number(activeCamera?.index),
+      )
+    ) {
+      return
+    }
+
+    saveCorrection2D({
+      camera_index: Number(activeCamera.index),
+      frame: currentFrame,
+      visibility: 0,
+      x: 0,
+      y: 0,
+    })
+  }
+
+  const clearCorrection2D = async () => {
+    if (
+      matchId == null
+      || !activeCorrection
+    ) {
+      return
+    }
+
+    setCorrection2DSaving(true)
+    setCorrection2DError('')
+
+    try {
+      const result = await api.deleteBall2DCorrection(
+        matchId,
+        activeCorrection.camera_index,
+        activeCorrection.frame,
+      )
+
+      if (useAppStore.getState().matchId !== matchId) return
+
+      useAppStore.getState().removeBall2DCorrection(
+        result.camera_index,
+        result.frame,
+      )
+      applyCorrectionToView(
+        result.camera_index,
+        result.frame,
+        result.original
+          ? {
+              ...result.original,
+              corrected: false,
+            }
+          : null,
+      )
+    } catch (error) {
+      console.error(error)
+      setCorrection2DError(
+        error?.message
+        || String(error)
+      )
+    } finally {
+      setCorrection2DSaving(false)
+    }
+  }
+
+  const handleCorrection2DPointerDown = event => {
+    if (
+      !correction2DMode
+      || correction2DSaving
+      || !Number.isInteger(
+        Number(activeCamera?.index),
+      )
+    ) {
+      return
+    }
+
+    event.preventDefault()
+    event.stopPropagation()
+    setPlaying(false)
+
+    const point = getImagePointFromPointer({
+      event,
+      canvas: overlayCanvasRef.current,
+      container: videoWrapRef.current,
+      video: videoRef.current,
+      cameraParams: activeCameraParams,
+    })
+
+    if (!point) {
+      setCorrection2DError(
+        '請點在影片畫面範圍內'
+      )
+      return
+    }
+
+    saveCorrection2D({
+      camera_index: Number(activeCamera.index),
+      frame: currentFrame,
+      visibility: 1,
+      x: point.x,
+      y: point.y,
+    })
+  }
+
+  const toggleCorrection2DMode = () => {
+    if (correction2DMode) {
+      setCorrection2DMode(false)
+      return
+    }
+
+    if (repair2DMode) {
+      setRepair2DMode(false)
+      resetRepair2DWork(null)
+    }
+
+    setPlaying(false)
+    setCorrection2DError('')
+    setCorrection2DMode(true)
+  }
+
   const activeSource = useMemo(
     () => {
       if (!activeCamera) {
@@ -1085,6 +1510,7 @@ export default function VideoPanel() {
       showRacketTip,
       handPoints,
       showHands,
+      correctionOverlay,
     })
   }
 
@@ -1144,6 +1570,7 @@ export default function VideoPanel() {
       showRacketTip,
       handPoints,
       showHands,
+      correctionOverlay,
     ],
   )
 
@@ -1180,6 +1607,7 @@ export default function VideoPanel() {
       showRacketTip,
       handPoints,
       showHands,
+      correctionOverlay,
     ],
   )
 
@@ -1225,6 +1653,7 @@ export default function VideoPanel() {
       showRacketTip,
       handPoints,
       showHands,
+      correctionOverlay,
     ],
   )
 
@@ -1239,6 +1668,9 @@ export default function VideoPanel() {
       setRepair2DStatus('idle')
       setRepair2DError('')
       setLastRepair2DId(null)
+
+      setCorrection2DMode(false)
+      setCorrection2DError('')
     },
     [
       matchId,
@@ -1319,16 +1751,19 @@ export default function VideoPanel() {
         return
       }
 
+      // 同一台相機、同一個 2D 來源只發一次；換來源後舊的請求不擋新的
+      const inflightKey = `${cameraIndex}:${ball2DSource}`
+
       if (
         ball2DInflightRef.current.has(
-          cameraIndex,
+          inflightKey,
         )
       ) {
         return
       }
 
       ball2DInflightRef.current.add(
-        cameraIndex,
+        inflightKey,
       )
 
       /*
@@ -1348,11 +1783,15 @@ export default function VideoPanel() {
             cameraIndex,
             0,
             ALL_FRAMES,
+            ball2DSource,
           )
 
+          // 等待期間換了資料集或 2D 來源，這批已經作廢
           if (
             useAppStore.getState().matchId
             !== matchId
+            || useAppStore.getState().ball2DSource
+            !== ball2DSource
           ) {
             return
           }
@@ -1369,7 +1808,7 @@ export default function VideoPanel() {
           console.error(error)
         } finally {
           ball2DInflightRef.current.delete(
-            cameraIndex,
+            inflightKey,
           )
         }
       })()
@@ -1382,6 +1821,7 @@ export default function VideoPanel() {
       hasBall2DCameraLoaded,
       upsertBall2DPoints,
       markBall2DCameraLoaded,
+      ball2DSource,
     ],
   )
 
@@ -2081,6 +2521,7 @@ export default function VideoPanel() {
 
     setPlaying(false)
     setShowProjection(true)
+    setCorrection2DMode(false)
     setRepair2DMode(true)
     resetRepair2DWork(
       currentFrame
@@ -2427,6 +2868,17 @@ export default function VideoPanel() {
                   ?.extrinsic
               )
 
+              // 目前這格這台相機有看得見的 2D 標註；播放中每格都在變，
+              // 只在停下來時標示
+              const has2DAtFrame = (
+                !playing
+                && Boolean(
+                  camerasWith2DByFrame
+                    .get(currentFrame)
+                    ?.has(Number(camera.index))
+                )
+              )
+
               return (
                 <button
                   key={camera.id}
@@ -2440,10 +2892,19 @@ export default function VideoPanel() {
                     'px-2.5 py-1 rounded text-xs border shrink-0 transition-colors',
 
                     isActive
-                      ? 'bg-sky-700 border-sky-500 text-white'
+                      ? 'bg-sky-700 text-white'
                       : hasVideo
-                        ? 'bg-zinc-800 border-zinc-700 text-zinc-100 hover:bg-zinc-700'
-                        : 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:bg-zinc-900',
+                        ? 'bg-zinc-800 text-zinc-100 hover:bg-zinc-700'
+                        : 'bg-zinc-950 text-zinc-500 hover:bg-zinc-900',
+
+                    // 選中的相機平常邊框和底色同色，藍框才看得出是 2D 標註
+                    has2DAtFrame
+                      ? 'border-blue-400'
+                      : isActive
+                        ? 'border-sky-700'
+                        : hasVideo
+                          ? 'border-zinc-700'
+                          : 'border-zinc-800',
                   ].join(' ')}
                   title={[
                     camera.label,
@@ -2456,6 +2917,10 @@ export default function VideoPanel() {
 
                     hasProjection
                       ? 'has projection params'
+                      : '',
+
+                    has2DAtFrame
+                      ? '這格有 2D 標註'
                       : '',
                   ]
                     .filter(Boolean)
@@ -2530,178 +2995,100 @@ export default function VideoPanel() {
               flex
               flex-col
               items-end
-              gap-2
+              gap-3
             "
           >
-            <button
-              type="button"
-              disabled={
-                !projectionAvailable
-              }
-              onClick={() => {
-                setShowProjection(
-                  value => !value
-                )
-              }}
-              className={[
-                'px-2 py-1 rounded border text-xs',
+            {/* 顯示在影片上的圖層 */}
+            <div className="flex flex-col items-end gap-1">
+              <button
+                type="button"
+                disabled={!projectionAvailable}
+                onClick={() => setShowProjection(value => !value)}
+                className={overlayButtonClass(projectionAvailable, showProjection)}
+                title={
+                  projectionAvailable
+                    ? '顯示或隱藏 3D 球點投影'
+                    : '此視角沒有 camera params'
+                }
+              >
+                <OverlayDot color="#ef4444" active={projectionAvailable && showProjection} />
+                3D→2D
+              </button>
 
-                projectionAvailable
-                  ? (
-                      showProjection
-                        ? 'bg-yellow-700/80 border-yellow-500 text-yellow-50 hover:bg-yellow-600/80'
-                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
-                    )
-                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
-              ].join(' ')}
-              title={
-                projectionAvailable
-                  ? '顯示或隱藏 3D 球點投影'
-                  : '此視角沒有 camera params'
-              }
-            >
-              <span className="text-red-400">
-                ●
-              </span>
-              {' 3D→2D'}
-            </button>
+              <button
+                type="button"
+                disabled={!ball2DAvailable}
+                onClick={() => setShowBall2D(value => !value)}
+                className={overlayButtonClass(ball2DAvailable, showBall2D)}
+                title={
+                  ball2DAvailable
+                    ? '顯示或隱藏上傳的 2D 羽球標註'
+                    : '此視角沒有上傳 2D 羽球位置'
+                }
+              >
+                <OverlayDot color="#22d3ee" active={ball2DAvailable && showBall2D} />
+                2D 標註
+              </button>
 
-            <button
-              type="button"
-              disabled={
-                !projectionAvailable
-              }
-              onClick={() => {
-                setShowRacketTip(
-                  value => !value
-                )
-              }}
-              className={[
-                'px-2 py-1 rounded border text-xs',
+              <button
+                type="button"
+                disabled={!projectionAvailable}
+                onClick={() => setShowRacketTip(value => !value)}
+                className={overlayButtonClass(projectionAvailable, showRacketTip)}
+                title={
+                  projectionAvailable
+                    ? '顯示或隱藏 3D 球拍拍頂的投影'
+                    : '此視角沒有 camera params'
+                }
+              >
+                <OverlayDot color="#f97316" active={projectionAvailable && showRacketTip} />
+                拍頂
+              </button>
 
-                projectionAvailable
-                  ? (
-                      showRacketTip
-                        ? 'bg-orange-900/80 border-orange-500 text-orange-50 hover:bg-orange-800/80'
-                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
-                    )
-                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
-              ].join(' ')}
-              title={
-                projectionAvailable
-                  ? '顯示或隱藏 3D 球拍拍頂的投影'
-                  : '此視角沒有 camera params'
-              }
-            >
-              <span className="text-orange-400">
-                ●
-              </span>
-              {' 拍頂'}
-            </button>
+              <button
+                type="button"
+                disabled={!projectionAvailable}
+                onClick={() => setShowHands(value => !value)}
+                className={overlayButtonClass(projectionAvailable, showHands)}
+                title={
+                  projectionAvailable
+                    ? '顯示或隱藏 SMPL 雙手掌心的投影'
+                    : '此視角沒有 camera params'
+                }
+              >
+                <OverlayDot color="#facc15" active={projectionAvailable && showHands} />
+                手掌
+              </button>
+            </div>
 
-            <button
-              type="button"
-              disabled={
-                !projectionAvailable
-              }
-              onClick={() => {
-                setShowHands(
-                  value => !value
-                )
-              }}
-              className={[
-                'px-2 py-1 rounded border text-xs',
+            {/* 在影片上點選的編輯模式 */}
+            <div className="flex flex-col items-end gap-1">
+              <button
+                type="button"
+                disabled={repairCapableCameraCount < 2}
+                onClick={toggleRepair2DMode}
+                className={overlayButtonClass(repairCapableCameraCount >= 2, repair2DMode)}
+                title={
+                  repairCapableCameraCount >= 2
+                    ? '從至少兩個相機點選 2D 羽球位置並重建 3D 點'
+                    : '至少需要兩個具有 camera params 的視角'
+                }
+              >
+                <OverlayDot color="#d946ef" active={repair2DMode} />
+                2D 修復
+              </button>
 
-                projectionAvailable
-                  ? (
-                      showHands
-                        ? 'bg-yellow-900/80 border-yellow-500 text-yellow-50 hover:bg-yellow-800/80'
-                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
-                    )
-                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
-              ].join(' ')}
-              title={
-                projectionAvailable
-                  ? '顯示或隱藏 SMPL 雙手掌心的投影'
-                  : '此視角沒有 camera params'
-              }
-            >
-              <span className="text-yellow-400">
-                ●
-              </span>
-              {' 手掌'}
-            </button>
-
-            <button
-              type="button"
-              disabled={
-                !ball2DAvailable
-              }
-              onClick={() => {
-                setShowBall2D(
-                  value => !value
-                )
-              }}
-              className={[
-                'px-2 py-1 rounded border text-xs',
-
-                ball2DAvailable
-                  ? (
-                      showBall2D
-                        ? 'bg-cyan-900/80 border-cyan-500 text-cyan-50 hover:bg-cyan-800/80'
-                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
-                    )
-                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
-              ].join(' ')}
-              title={
-                ball2DAvailable
-                  ? '顯示或隱藏上傳的 2D 羽球標註'
-                  : '此視角沒有上傳 2D 羽球位置'
-              }
-            >
-              <span className="text-cyan-400">
-                ●
-              </span>
-              {' 2D 標註'}
-            </button>
-
-            <button
-              type="button"
-              disabled={
-                repairCapableCameraCount
-                < 2
-              }
-              onClick={
-                toggleRepair2DMode
-              }
-              className={[
-                'px-2 py-1 rounded border text-xs',
-
-                repairCapableCameraCount
-                  >= 2
-                  ? (
-                      repair2DMode
-                        ? 'bg-fuchsia-900/90 border-fuchsia-500 text-fuchsia-50 hover:bg-fuchsia-800/90'
-                        : 'bg-zinc-900/80 border-zinc-700 text-zinc-200 hover:bg-zinc-800'
-                    )
-                  : 'bg-zinc-950/80 border-zinc-800 text-zinc-500 cursor-not-allowed',
-              ].join(' ')}
-              title={
-                repairCapableCameraCount
-                  >= 2
-                  ? (
-                      '從至少兩個相機點選 2D 羽球位置並重建 3D 點'
-                    )
-                  : (
-                      '至少需要兩個具有 camera params 的視角'
-                    )
-              }
-            >
-              <span className="text-fuchsia-400">
-                ●
-              </span>
-              {' 2D 修復'}
-            </button>
+              <button
+                type="button"
+                disabled={matchId == null}
+                onClick={toggleCorrection2DMode}
+                className={overlayButtonClass(matchId != null, correction2DMode)}
+                title="在影片上逐格修正這台相機的 2D 羽球標註；修正另外存放，不會改動原始資料"
+              >
+                <OverlayDot color="#f59e0b" active={correction2DMode} />
+                2D 修正
+              </button>
+            </div>
           </div>
         )}
 
@@ -2852,6 +3239,7 @@ export default function VideoPanel() {
               playsInline
               onClick={
                 repair2DMode
+                || correction2DMode
                   ? undefined
                   : togglePlaying
               }
@@ -2860,13 +3248,18 @@ export default function VideoPanel() {
             <canvas
               ref={overlayCanvasRef}
               onPointerDown={
-                handleRepair2DPointerDown
+                correction2DMode
+                  ? handleCorrection2DPointerDown
+                  : handleRepair2DPointerDown
               }
               className={[
                 'absolute inset-0',
 
-                repair2DMode
-                && lastRepair2DId == null
+                (
+                  repair2DMode
+                  && lastRepair2DId == null
+                )
+                || correction2DMode
                   ? (
                       'pointer-events-auto cursor-crosshair'
                     )
@@ -3327,6 +3720,26 @@ export default function VideoPanel() {
             </div>
           )}
       </div>
+
+      {/* 放在影片區下方，不疊在影片上 */}
+      {correction2DMode
+        && (
+          <Ball2DCorrectionPanel
+            frame={currentFrame}
+            original={activeOriginal2D}
+            correction={activeCorrection}
+            source={ball2DSource}
+            canClick={Boolean(activeSource)}
+            saving={correction2DSaving}
+            error={correction2DError}
+            advance={correction2DAdvance}
+            onAdvanceChange={setCorrection2DAdvance}
+            correctionCount={activeCorrectionMap?.size || 0}
+            onMarkHidden={markCorrection2DHidden}
+            onClear={clearCorrection2D}
+            onClose={toggleCorrection2DMode}
+          />
+        )}
     </div>
   )
 }

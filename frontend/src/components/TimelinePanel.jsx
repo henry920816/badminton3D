@@ -1,6 +1,68 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useAppStore } from '../store.js'
+import { usePairwiseViewPoints } from '../utils/usePairwiseBallPoints.js'
+import { useRallyFrameRange } from '../utils/useRallyBallData.js'
+
+
+// matplotlib 的 tab10，和 triangulation_3Dline.py 各視角的配色一樣
+const VIEW_COLORS = [
+  '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+  '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+]
+
+// 同 triangulation_3Dline.py 速度點圖的 y 軸上限：只靠一組相機重建的
+// 視角偶爾會跳出好幾百 m/s，不截掉整條軸都會被壓扁
+const SPEED_AXIS_MAX = 50
+
+
+/**
+ * 依相機視角整理距離與速度。速度是相鄰兩格 3D 點的位移乘上 fps，
+ * 和原腳本一樣中間缺格就不算。
+ */
+function buildViewSeries(rows, fps) {
+  const rowsByCamera = new Map()
+
+  for (const row of rows || []) {
+    if (!rowsByCamera.has(row.camera_index)) rowsByCamera.set(row.camera_index, [])
+    rowsByCamera.get(row.camera_index).push(row)
+  }
+
+  return [...rowsByCamera.keys()]
+    .sort((a, b) => a - b)
+    .map((cameraIndex, order) => {
+      const cameraRows = rowsByCamera.get(cameraIndex).sort((a, b) => a.frame - b.frame)
+      const speed = []
+
+      for (let i = 1; i < cameraRows.length; i++) {
+        const previous = cameraRows[i - 1]
+        const current = cameraRows[i]
+
+        if (current.frame - previous.frame !== 1) continue
+
+        speed.push({
+          frame: current.frame,
+          value: Math.hypot(
+            current.x - previous.x,
+            current.y - previous.y,
+            current.z - previous.z,
+          ) * fps,
+        })
+      }
+
+      return {
+        cameraIndex,
+        color: VIEW_COLORS[order % VIEW_COLORS.length],
+        distance: cameraRows.map(row => ({ frame: row.frame, value: row.distance })),
+        speed,
+      }
+    })
+}
+
+
+function formatAxisValue(value) {
+  return Math.abs(value) >= 10 ? value.toFixed(0) : value.toFixed(1)
+}
 
 export function PlaybackUI({
   goPrevRally,
@@ -151,6 +213,120 @@ export function PlaybackUI({
   )
 }
 
+const LABEL_W = 112
+const RULER_H = 28
+const PLAYHEAD_GRAB_PX = 10
+
+// 曲線軌道平分剩下的高度，太矮就改成捲動
+const MIN_PLOT_H = 40
+const MAX_PLOT_H = 150
+
+const RALLY_LANE = { id: 'rally', label: 'Rally', height: 24 }
+const HITS_LANE = { id: 'hits', label: '擊球', height: 22 }
+const ANOMALY_LANE = { id: 'anomaly', label: '異常', height: 18 }
+
+const PLOT_TRACKS = [
+  { id: 'pos_x', toggle: 'x', label: 'X', unit: 'm', valueFn: p => p.x, color: '#38bdf8' },
+  // raw 座標的 y 朝下（地板 y = 0.5，越高越小），反過來畫，球飛高時曲線往上
+  { id: 'pos_y', toggle: 'y', label: 'Y', unit: 'm', valueFn: p => p.y, color: '#fb923c', invert: true },
+  { id: 'pos_z', toggle: 'z', label: 'Z', unit: 'm', valueFn: p => p.z, color: '#34d399' },
+  // 2D 標註兩兩重建、每個視角各一條（同 triangulation_3Dline.py）
+  { id: 'view_distance', toggle: 'distance', label: '距離', unit: 'm·log', metric: 'distance', log: true },
+  { id: 'view_speed', toggle: 'speed', label: '速度', unit: 'm/s', metric: 'speed' },
+]
+
+const TRACK_TOGGLES = [
+  ['x', 'X', '#38bdf8'],
+  ['y', 'Y', '#fb923c'],
+  ['z', 'Z', '#34d399'],
+  ['distance', '距離', '#a1a1aa'],
+  ['speed', '速度', '#a1a1aa'],
+  ['reference', '3D 參考', '#e4e4e7', true],
+]
+
+// ball_traj 的距離與速度，在距離 / 速度軌道上畫成白色虛線當參考，
+// 角色同 triangulation_3Dline.py 的 Ground truth 線
+const REFERENCE_COLOR = 'rgba(244,244,245,0.9)'
+
+const DEFAULT_VISIBLE_TRACKS = {
+  x: true,
+  y: true,
+  z: true,
+  distance: true,
+  speed: true,
+  reference: true,
+}
+const VISIBLE_TRACKS_KEY = 'badminton3d.timeline.visibleTracks'
+
+const RALLY_STYLES = {
+  verified: ['rgba(16,185,129,0.20)', '#10b981'],
+  needs_fix: ['rgba(244,63,94,0.20)', '#f43f5e'],
+  reviewing: ['rgba(14,165,233,0.20)', '#0ea5e9'],
+  default: ['rgba(82,82,91,0.30)', '#71717a'],
+}
+
+const TICK_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+
+const SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif'
+const MONO = 'ui-monospace, SFMono-Regular, Consolas, monospace'
+
+const TIMELINE_TIPS = (
+  'Timeline 操作\n'
+  + '拖曳空白處：平移\n'
+  + '拖曳播放線或上方尺規：Scrub\n'
+  + '拖曳擊球線：移動 Hit frame\n'
+  + '點 Rally：選取整段\n'
+  + '滾輪：平移；Shift + 滾輪：縮放\n'
+  + '← / →：單幀移動\n'
+  + 'I / O：設定 In / Out；Esc：取消選取'
+)
+
+
+function loadVisibleTracks() {
+  try {
+    const raw = window.localStorage.getItem(VISIBLE_TRACKS_KEY)
+    if (raw) return { ...DEFAULT_VISIBLE_TRACKS, ...JSON.parse(raw) }
+  } catch {
+    // 無痕視窗或封鎖儲存時用預設值
+  }
+  return DEFAULT_VISIBLE_TRACKS
+}
+
+
+function saveVisibleTracks(value) {
+  try {
+    window.localStorage.setItem(VISIBLE_TRACKS_KEY, JSON.stringify(value))
+  } catch {
+    // 存不了就只在這次開啟有效
+  }
+}
+
+
+// 主刻度間距至少 80 px
+function pickTickStep(pxPerSec) {
+  return TICK_STEPS.find(step => step * pxPerSec >= 80) ?? TICK_STEPS[TICK_STEPS.length - 1]
+}
+
+
+function formatTick(t, step) {
+  const minutes = Math.floor(t / 60 + 1e-9)
+  const seconds = t - minutes * 60
+  const secondsText = step < 1 ? seconds.toFixed(1) : String(Math.round(seconds))
+
+  if (minutes > 0) {
+    return `${minutes}:${secondsText.padStart(step < 1 ? 4 : 2, '0')}`
+  }
+  return `${secondsText}s`
+}
+
+
+function formatClock(t) {
+  const minutes = Math.floor(t / 60)
+  const seconds = t - minutes * 60
+  return `${String(minutes).padStart(2, '0')}:${seconds.toFixed(2).padStart(5, '0')}`
+}
+
+
 export default function TimelinePanel() {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
@@ -191,31 +367,72 @@ export default function TimelinePanel() {
   const [draggingHit, setDraggingHit] = useState(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
   const [isPanning, setIsPanning] = useState(null)
+  const [visibleTracks, setVisibleTracks] = useState(loadVisibleTracks)
 
-  const TRACK_LABELS_WIDTH = 100
-  const RULER_HEIGHT = 30
-  const PLAYHEAD_GRAB_PX = 10
+  const toggleTrack = (key) => {
+    setVisibleTracks((previous) => {
+      const next = { ...previous, [key]: !previous[key] }
+      saveVisibleTracks(next)
+      return next
+    })
+  }
 
-  const TRACKS = [
-    { id: 'rally', label: 'Rally', height: 30, bg: '#09090b' },
-    { id: 'pos_x', label: 'X (t)', height: 85, bg: '#18181b', valueFn: p => p.x, color: '#38bdf8' },
-    { id: 'pos_y', label: 'Y (t)', height: 85, bg: '#09090b', valueFn: p => p.y, color: '#fb923c' },
-    { id: 'pos_z', label: 'Z (t)', height: 85, bg: '#18181b', valueFn: p => p.z, color: '#34d399' },
-    { id: 'anomaly', label: 'Anomaly', height: 40, bg: '#09090b' },
-  ]
+  const showViewMetrics = visibleTracks.distance || visibleTracks.speed
+  const matchId = useAppStore(s => s.matchId)
+  const { startFrame: rangeStartFrame, endFrame: rangeEndFrame } = useRallyFrameRange()
+  const viewPoints = usePairwiseViewPoints(
+    showViewMetrics ? matchId : null,
+    rangeStartFrame,
+    rangeEndFrame,
+  )
+  const viewSeries = useMemo(
+    () => buildViewSeries(viewPoints.points, fps),
+    [viewPoints.points, fps],
+  )
 
-  const TOTAL_TRACKS_HEIGHT = TRACKS.reduce((s, t) => s + t.height, 0)
+  const lanes = useMemo(() => {
+    const plots = PLOT_TRACKS.filter(track => visibleTracks[track.toggle])
+    const fixedHeight = RULER_H + RALLY_LANE.height + HITS_LANE.height + ANOMALY_LANE.height
+    const plotHeight = plots.length
+      ? Math.max(MIN_PLOT_H, Math.min(MAX_PLOT_H, Math.floor((dimensions.height - fixedHeight) / plots.length)))
+      : 0
+
+    let top = RULER_H
+
+    return [
+      RALLY_LANE,
+      HITS_LANE,
+      ...plots.map(track => ({ ...track, height: plotHeight })),
+      ANOMALY_LANE,
+    ].map((lane) => {
+      const placed = { ...lane, top }
+      top += lane.height
+      return placed
+    })
+  }, [visibleTracks, dimensions.height])
+
+  const lastLane = lanes[lanes.length - 1]
+  const tracksBottom = lastLane.top + lastLane.height
+  const canvasHeight = Math.max(dimensions.height, tracksBottom)
+  const laneAtY = y => lanes.find(lane => y >= lane.top && y < lane.top + lane.height)
+
+  const currentFrame = Math.round(currentTime * fps)
+  const currentRally = rallies.find(
+    rally => currentFrame >= rally.start_frame && currentFrame <= rally.end_frame,
+  )
 
   const maxScrollLeft = Math.max(
     0,
-    durationSec * pxPerSec - Math.max(0, dimensions.width - TRACK_LABELS_WIDTH)
+    durationSec * pxPerSec - Math.max(0, dimensions.width - LABEL_W)
   )
 
   const clampScroll = (value) => Math.max(0, Math.min(value, maxScrollLeft))
-  const getUsableWidth = () => Math.max(0, dimensions.width - TRACK_LABELS_WIDTH)
-  const getFixedPlayheadX = () => TRACK_LABELS_WIDTH + getUsableWidth() / 2
-  const getTimeFromCanvasX = (x) => Math.max(0, (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec)
+  const getUsableWidth = () => Math.max(0, dimensions.width - LABEL_W)
+  // 平常播放線在正中間；捲到開頭或結尾時捲不動，播放線才會離開中間
+  const getPlayheadX = () => LABEL_W + currentTime * pxPerSec - scrollLeft
+  const getTimeFromCanvasX = (x) => Math.max(0, (x - LABEL_W + scrollLeft) / pxPerSec)
   const getCenterTimeFromScroll = (nextScroll) => Math.max(0, (nextScroll + getUsableWidth() / 2) / pxPerSec)
+  const clampZoom = value => Math.max(5, Math.min(value, 1000))
 
   const pauseForTimelineDrag = () => {
     setPlaying(false)
@@ -235,6 +452,28 @@ export default function TimelinePanel() {
     if (Math.abs(targetScroll - scrollLeft) > 0.5) {
       setScrollLeft(targetScroll)
     }
+  }
+
+  // 播放線固定在中間，縮放後由下面的 effect 把目前時間捲回中間
+  const zoomBy = (factor) => {
+    pauseForTimelineDrag()
+    setZoom(clampZoom(pxPerSec * factor))
+  }
+
+  const fitRange = () => {
+    if (rangeStartFrame == null || rangeEndFrame == null) return
+
+    const usableWidth = getUsableWidth()
+    if (usableWidth <= 0) return
+
+    const startSec = rangeStartFrame / fps
+    const endSec = rangeEndFrame / fps
+    const centerTime = Math.min(Math.max(currentTime, startSec), endSec)
+    const halfSpan = Math.max(centerTime - startSec, endSec - centerTime, 0.5)
+
+    pauseForTimelineDrag()
+    setZoom(clampZoom(usableWidth / (2 * halfSpan * 1.06)))
+    if (centerTime !== currentTime) setCurrentTime(centerTime)
   }
 
   const goToRallyByIndex = (targetIdx) => {
@@ -264,11 +503,10 @@ export default function TimelinePanel() {
       }
     }
 
-    const curFrame = Math.round(currentTime * fps)
     let targetIdx = -1
 
     for (let i = sorted.length - 1; i >= 0; i--) {
-      if (sorted[i].start_frame < curFrame) {
+      if (sorted[i].start_frame < currentFrame) {
         targetIdx = i
         break
       }
@@ -290,8 +528,7 @@ export default function TimelinePanel() {
       }
     }
 
-    const curFrame = Math.round(currentTime * fps)
-    let targetIdx = sorted.findIndex(r => r.start_frame > curFrame)
+    let targetIdx = sorted.findIndex(r => r.start_frame > currentFrame)
 
     if (targetIdx === -1) targetIdx = sorted.length - 1
     goToRallyByIndex(targetIdx)
@@ -412,24 +649,31 @@ export default function TimelinePanel() {
 
     const ctx = canvas.getContext('2d')
     const scale = window.devicePixelRatio || 1
-
-    canvas.width = dimensions.width * scale
-    canvas.height = Math.max(dimensions.height, TOTAL_TRACKS_HEIGHT + RULER_HEIGHT) * scale
-
-    ctx.scale(scale, scale)
-
     const w = dimensions.width
-    const h = Math.max(dimensions.height, TOTAL_TRACKS_HEIGHT + RULER_HEIGHT)
+    const h = canvasHeight
 
-    ctx.clearRect(0, 0, w, h)
+    canvas.width = w * scale
+    canvas.height = h * scale
+    ctx.setTransform(scale, 0, 0, scale, 0, 0)
 
-    const timeToX = (t) => t * pxPerSec - scrollLeft + TRACK_LABELS_WIDTH
-    const xToTime = (x) => (x - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec
+    ctx.fillStyle = '#09090b'
+    ctx.fillRect(0, 0, w, h)
 
-    const sSec = xToTime(TRACK_LABELS_WIDTH)
+    const timeToX = (t) => t * pxPerSec - scrollLeft + LABEL_W
+    const xToTime = (x) => (x - LABEL_W + scrollLeft) / pxPerSec
+
+    const sSec = xToTime(LABEL_W)
     const eSec = xToTime(w)
     const sF = Math.max(0, Math.floor(sSec * fps))
     const eF = Math.max(0, Math.ceil(eSec * fps))
+    const tickStep = pickTickStep(pxPerSec)
+    const firstTick = Math.max(0, Math.ceil(sSec / tickStep))
+    const lastTick = Math.floor(eSec / tickStep)
+
+    const laneById = Object.fromEntries(lanes.map(lane => [lane.id, lane]))
+    const hitsLane = laneById.hits
+    const anomalyLane = laneById.anomaly
+    const plotRanges = {}
 
     const pts = []
     const step = Math.max(1, Math.floor((eF - sF) / 1000))
@@ -439,387 +683,562 @@ export default function TimelinePanel() {
       if (p) pts.push(p)
     }
 
-    ctx.save()
+    // ball_traj 的距離與速度；速度同各視角，是和前一格的位移乘上 fps
+    const referencePoints = { distance: [], speed: [] }
 
-    let currentY = RULER_HEIGHT
+    if (visibleTracks.reference) {
+      for (const p of pts) {
+        if (![p.x, p.y, p.z].every(Number.isFinite)) continue
 
-    for (const track of TRACKS) {
-      ctx.fillStyle = track.bg
-      ctx.fillRect(0, currentY, w, track.height)
+        referencePoints.distance.push({ frame: p.frame, value: Math.hypot(p.x, p.y, p.z) })
 
-      ctx.strokeStyle = '#27272a'
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(0, currentY + track.height)
-      ctx.lineTo(w, currentY + track.height)
-      ctx.stroke()
-
-      currentY += track.height
+        const previous = trajMap.get(p.frame - 1)
+        if (previous && [previous.x, previous.y, previous.z].every(Number.isFinite)) {
+          referencePoints.speed.push({
+            frame: p.frame,
+            value: Math.hypot(p.x - previous.x, p.y - previous.y, p.z - previous.z) * fps,
+          })
+        }
+      }
     }
 
-    ctx.restore()
+    // 軌道底色與分隔線
+    let plotIndex = 0
+
+    for (const lane of lanes) {
+      const isPlot = Boolean(lane.valueFn || lane.metric)
+      ctx.fillStyle = isPlot ? (plotIndex++ % 2 ? '#0d0d10' : '#111114') : '#09090b'
+      ctx.fillRect(LABEL_W, lane.top, w - LABEL_W, lane.height)
+
+      ctx.fillStyle = '#1c1c21'
+      ctx.fillRect(0, lane.top + lane.height - 1, w, 1)
+    }
 
     ctx.save()
     ctx.beginPath()
-    ctx.rect(TRACK_LABELS_WIDTH, RULER_HEIGHT, w - TRACK_LABELS_WIDTH, TOTAL_TRACKS_HEIGHT)
+    ctx.rect(LABEL_W, RULER_H, w - LABEL_W, tracksBottom - RULER_H)
     ctx.clip()
 
-    currentY = RULER_HEIGHT
-
-    for (const track of TRACKS) {
-      const trackTop = currentY
-      const trackBot = currentY + track.height
-
-      if (track.id === 'rally') {
-        for (const r of rallies) {
-          const sx = timeToX(r.start_frame / fps)
-          const ex = timeToX(r.end_frame / fps)
-
-          if (ex < TRACK_LABELS_WIDTH || sx > w) continue
-
-          let color = 'rgba(63,63,70,0.5)'
-          if (r.status === 'verified') color = 'rgba(5,150,105,0.5)'
-          else if (r.status === 'needs_fix') color = 'rgba(225,29,72,0.5)'
-          else if (r.status === 'reviewing') color = 'rgba(2,132,199,0.5)'
-
-          const barY = trackTop + 4
-          const barH = track.height - 8
-          const rectW = Math.max(1, ex - sx)
-
-          ctx.fillStyle = color
-          ctx.beginPath()
-          ctx.roundRect(sx, barY, rectW, barH, 4)
-          ctx.fill()
-
-          ctx.fillStyle = '#f4f4f5'
-          ctx.font = '10px sans-serif'
-          ctx.textAlign = 'center'
-          ctx.textBaseline = 'middle'
-
-          const text = `R${r.rally_index}`
-          const m = ctx.measureText(text)
-
-          if (m.width < rectW - 4) {
-            ctx.fillText(text, sx + rectW / 2, barY + barH / 2)
-          }
-        }
-      }
-
-      if (track.valueFn && pts.length > 1) {
-        let minV = Infinity
-        let maxV = -Infinity
-
-        for (const p of pts) {
-          const v = track.valueFn(p)
-          if (v == null) continue
-          if (v < minV) minV = v
-          if (v > maxV) maxV = v
-        }
-
-        if (minV !== Infinity) {
-          const pad = (maxV - minV) * 0.1 || 1
-          const drawMin = minV - pad
-          const drawMax = maxV + pad
-
-          ctx.strokeStyle = 'rgba(63,63,70,0.5)'
-          ctx.setLineDash([4, 4])
-          ctx.beginPath()
-          ctx.moveTo(TRACK_LABELS_WIDTH, trackTop + track.height / 2)
-          ctx.lineTo(w, trackTop + track.height / 2)
-          ctx.stroke()
-          ctx.setLineDash([])
-
-          ctx.strokeStyle = track.color
-          ctx.lineWidth = 1.5
-          ctx.lineJoin = 'round'
-          ctx.beginPath()
-
-          let first = true
-          const pxs = []
-          const pys = []
-          const segments = []
-
-          for (let i = 0; i < pts.length; i++) {
-            const val = track.valueFn(pts[i])
-            if (val == null) continue
-
-            if (!first && (pts[i].frame - pts[i - 1].frame > step * 2 + 10)) {
-              ctx.stroke()
-
-              if (pxs.length > 0) {
-                segments.push({
-                  pxs: [...pxs],
-                  pys: [...pys],
-                })
-              }
-
-              pxs.length = 0
-              pys.length = 0
-              first = true
-              ctx.beginPath()
-            }
-
-            const px = timeToX(pts[i].frame / fps)
-            const py = trackTop + track.height - ((val - drawMin) / (drawMax - drawMin)) * track.height
-
-            if (first) {
-              ctx.moveTo(px, py)
-              first = false
-            } else {
-              ctx.lineTo(px, py)
-            }
-
-            pxs.push(px)
-            pys.push(py)
-          }
-
-          ctx.stroke()
-
-          if (pxs.length > 0) {
-            segments.push({
-              pxs: [...pxs],
-              pys: [...pys],
-            })
-          }
-
-          if (track.fill) {
-            for (const seg of segments) {
-              if (seg.pxs.length < 2) continue
-
-              ctx.beginPath()
-              ctx.moveTo(seg.pxs[0], seg.pys[0])
-
-              for (let i = 1; i < seg.pxs.length; i++) {
-                ctx.lineTo(seg.pxs[i], seg.pys[i])
-              }
-
-              ctx.lineTo(seg.pxs[seg.pxs.length - 1], trackBot)
-              ctx.lineTo(seg.pxs[0], trackBot)
-              ctx.closePath()
-
-              const grad = ctx.createLinearGradient(0, trackTop, 0, trackBot)
-              grad.addColorStop(0, track.fill)
-              grad.addColorStop(1, 'rgba(0,0,0,0)')
-
-              ctx.fillStyle = grad
-              ctx.fill()
-            }
-          }
-        }
-      }
-
-      if (track.id === 'anomaly') {
-        for (const a of anomalies) {
-          const sx = timeToX(a.start_frame / fps)
-          const ex = timeToX(a.end_frame / fps)
-
-          if (ex < TRACK_LABELS_WIDTH || sx > w) continue
-
-          const sev = a.severity ?? 3
-          const opacity = Math.min(0.85, 0.3 + sev * 0.1)
-          const rectW = Math.max(2, ex - sx)
-
-          ctx.fillStyle = `rgba(244,63,94,${opacity})`
-          ctx.beginPath()
-          ctx.roundRect(sx, trackTop + 10, rectW, 20, 2)
-          ctx.fill()
-        }
-      }
-
-      currentY += track.height
+    // 主刻度的垂直格線
+    ctx.fillStyle = 'rgba(63,63,70,0.28)'
+    for (let i = firstTick; i <= lastTick; i++) {
+      ctx.fillRect(Math.round(timeToX(i * tickStep)), RULER_H, 1, tracksBottom - RULER_H)
     }
 
     if (selection.inTime != null && selection.outTime != null) {
       const s = Math.min(selection.inTime, selection.outTime)
       const e = Math.max(selection.inTime, selection.outTime)
-      const sx = Math.max(TRACK_LABELS_WIDTH, timeToX(s))
+      const sx = Math.max(LABEL_W, timeToX(s))
       const ex = Math.min(w, timeToX(e))
 
-      if (sx < w && ex > TRACK_LABELS_WIDTH) {
-        ctx.fillStyle = 'rgba(167, 139, 250, 0.15)'
-        ctx.fillRect(sx, RULER_HEIGHT, ex - sx, TOTAL_TRACKS_HEIGHT)
+      if (sx < w && ex > LABEL_W) {
+        ctx.fillStyle = 'rgba(167,139,250,0.10)'
+        ctx.fillRect(sx, RULER_H, ex - sx, tracksBottom - RULER_H)
 
-        ctx.strokeStyle = 'rgba(167, 139, 250, 0.8)'
+        ctx.strokeStyle = 'rgba(167,139,250,0.7)'
         ctx.lineWidth = 1
         ctx.setLineDash([4, 4])
-
         ctx.beginPath()
-        ctx.moveTo(sx, RULER_HEIGHT)
-        ctx.lineTo(sx, h)
-        ctx.moveTo(ex, RULER_HEIGHT)
-        ctx.lineTo(ex, h)
+        ctx.moveTo(sx + 0.5, RULER_H)
+        ctx.lineTo(sx + 0.5, tracksBottom)
+        ctx.moveTo(ex - 0.5, RULER_H)
+        ctx.lineTo(ex - 0.5, tracksBottom)
         ctx.stroke()
-
         ctx.setLineDash([])
       }
     }
 
+    const drawLaneMessage = (lane, text) => {
+      ctx.fillStyle = '#52525b'
+      ctx.font = `11px ${SANS}`
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(text, LABEL_W + 12, lane.top + lane.height / 2)
+    }
+
+    const drawMidline = (lane) => {
+      ctx.strokeStyle = 'rgba(63,63,70,0.45)'
+      ctx.lineWidth = 1
+      ctx.setLineDash([3, 5])
+      ctx.beginPath()
+      ctx.moveTo(LABEL_W, Math.round(lane.top + lane.height / 2) + 0.5)
+      ctx.lineTo(w, Math.round(lane.top + lane.height / 2) + 0.5)
+      ctx.stroke()
+      ctx.setLineDash([])
+    }
+
+    const drawPositionTrack = (lane) => {
+      let minV = Infinity
+      let maxV = -Infinity
+
+      for (const p of pts) {
+        const v = lane.valueFn(p)
+        if (v == null) continue
+        if (v < minV) minV = v
+        if (v > maxV) maxV = v
+      }
+
+      if (minV === Infinity) {
+        drawLaneMessage(lane, '畫面範圍內沒有軌跡')
+        return
+      }
+
+      if (maxV - minV < 1e-6) {
+        minV -= 1
+        maxV += 1
+      }
+
+      plotRanges[lane.id] = { min: minV, max: maxV }
+
+      const innerTop = lane.top + 8
+      const innerBot = lane.top + lane.height - 8
+      const toY = (v) => {
+        const t = (v - minV) / (maxV - minV)
+        return lane.invert
+          ? innerTop + t * (innerBot - innerTop)
+          : innerBot - t * (innerBot - innerTop)
+      }
+
+      drawMidline(lane)
+
+      ctx.strokeStyle = lane.color
+      ctx.lineWidth = 1.5
+      ctx.lineJoin = 'round'
+      ctx.beginPath()
+
+      let previous = null
+
+      for (const p of pts) {
+        const v = lane.valueFn(p)
+        if (v == null) {
+          previous = null
+          continue
+        }
+
+        const px = timeToX(p.frame / fps)
+        const py = toY(v)
+
+        if (previous && p.frame - previous.frame <= step * 2 + 10) {
+          ctx.lineTo(px, py)
+        } else {
+          ctx.moveTo(px, py)
+        }
+
+        previous = p
+      }
+
+      ctx.stroke()
+    }
+
+    const drawViewMetric = (lane) => {
+      const viewsReady = viewPoints.status === 'ready'
+      const reference = referencePoints[lane.metric]
+      const isUsable = value => Number.isFinite(value) && !(lane.log && value <= 0)
+
+      let minV = Infinity
+      let maxV = -Infinity
+      const include = (value) => {
+        if (!isUsable(value)) return
+        if (value < minV) minV = value
+        if (value > maxV) maxV = value
+      }
+
+      if (viewsReady) {
+        for (const series of viewSeries) {
+          for (const point of series[lane.metric]) {
+            if (point.frame >= sF && point.frame <= eF) include(point.value)
+          }
+        }
+      }
+
+      for (const point of reference) include(point.value)
+
+      const statusMessage = {
+        idle: '沒有 rally 範圍',
+        loading: '兩兩重建計算中…',
+        error: '無法取得兩兩重建（範圍過大或後端錯誤）',
+      }[viewPoints.status]
+
+      if (minV === Infinity) {
+        drawLaneMessage(lane, statusMessage || '畫面範圍內沒有重建點')
+        return
+      }
+
+      // 距離和原腳本一樣用對數軸；速度從 0 起算，上限截在 SPEED_AXIS_MAX
+      let lo
+      let hi
+
+      if (lane.log) {
+        lo = Math.log10(minV)
+        hi = Math.log10(maxV)
+        if (hi - lo < 1e-6) {
+          lo -= 0.5
+          hi += 0.5
+        }
+        plotRanges[lane.id] = { min: 10 ** lo, max: 10 ** hi }
+      } else {
+        lo = 0
+        hi = Math.min(SPEED_AXIS_MAX, maxV) || 1
+        plotRanges[lane.id] = { min: lo, max: hi }
+      }
+
+      const innerTop = lane.top + 8
+      const innerBot = lane.top + lane.height - 8
+      const toY = (value) => {
+        const t = lane.log ? Math.log10(value) : value
+        return innerBot - ((t - lo) / (hi - lo)) * (innerBot - innerTop)
+      }
+
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(LABEL_W, lane.top, w - LABEL_W, lane.height - 1)
+      ctx.clip()
+
+      ctx.lineWidth = 1
+      ctx.lineJoin = 'round'
+      ctx.globalAlpha = 0.85
+
+      for (const series of viewsReady ? viewSeries : []) {
+        ctx.strokeStyle = series.color
+        ctx.beginPath()
+
+        let previousFrame = null
+
+        for (const point of series[lane.metric]) {
+          if (
+            point.frame < sF - 1
+            || point.frame > eF + 1
+            || !Number.isFinite(point.value)
+            || (lane.log && point.value <= 0)
+          ) {
+            previousFrame = null
+            continue
+          }
+
+          const px = timeToX(point.frame / fps)
+          const py = toY(point.value)
+
+          // 缺格處斷開，同原腳本用 NaN 留空
+          if (previousFrame !== null && point.frame - previousFrame === 1) {
+            ctx.lineTo(px, py)
+          } else {
+            ctx.moveTo(px, py)
+          }
+
+          previousFrame = point.frame
+        }
+
+        ctx.stroke()
+      }
+
+      if (reference.length) {
+        ctx.globalAlpha = 1
+        ctx.strokeStyle = REFERENCE_COLOR
+        ctx.lineWidth = 1.4
+        ctx.setLineDash([5, 3])
+        ctx.beginPath()
+
+        let previousFrame = null
+
+        for (const point of reference) {
+          if (!isUsable(point.value)) {
+            previousFrame = null
+            continue
+          }
+
+          const px = timeToX(point.frame / fps)
+          const py = toY(point.value)
+
+          if (previousFrame !== null && point.frame - previousFrame <= step) {
+            ctx.lineTo(px, py)
+          } else {
+            ctx.moveTo(px, py)
+          }
+
+          previousFrame = point.frame
+        }
+
+        ctx.stroke()
+        ctx.setLineDash([])
+      }
+
+      ctx.restore()
+
+      // 兩兩重建還沒好時，參考線照畫，再疊上狀態
+      if (statusMessage) drawLaneMessage(lane, statusMessage)
+    }
+
+    for (const lane of lanes) {
+      if (lane.valueFn) drawPositionTrack(lane)
+      else if (lane.metric) drawViewMetric(lane)
+    }
+
+    // Rally
+    const rallyLane = laneById.rally
+
+    for (const r of rallies) {
+      const sx = timeToX(r.start_frame / fps)
+      const ex = timeToX(r.end_frame / fps)
+
+      if (ex < LABEL_W || sx > w) continue
+
+      const [fill, accent] = RALLY_STYLES[r.status] || RALLY_STYLES.default
+      const isActive = (activeItem?.type === 'rally' && activeItem.id === r.id) || currentRally?.id === r.id
+      const barY = rallyLane.top + 4
+      const barH = rallyLane.height - 8
+      const barW = Math.max(2, ex - sx)
+
+      ctx.fillStyle = fill
+      ctx.beginPath()
+      ctx.roundRect(sx, barY, barW, barH, 3)
+      ctx.fill()
+
+      ctx.fillStyle = accent
+      ctx.fillRect(sx, barY, Math.min(2, barW), barH)
+
+      if (isActive) {
+        ctx.strokeStyle = accent
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.roundRect(sx + 0.5, barY + 0.5, barW - 1, barH - 1, 3)
+        ctx.stroke()
+      }
+
+      // 標籤貼著可見範圍左緣，捲動時還看得到
+      const text = `R${r.rally_index}`
+      ctx.font = `600 10px ${SANS}`
+      const labelX = Math.max(sx, LABEL_W) + 7
+      if (labelX + ctx.measureText(text).width < ex - 4) {
+        ctx.fillStyle = isActive ? '#f4f4f5' : '#a1a1aa'
+        ctx.textAlign = 'left'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(text, labelX, barY + barH / 2 + 0.5)
+      }
+    }
+
+    // 異常
+    for (const a of anomalies) {
+      const sx = timeToX(a.start_frame / fps)
+      const ex = timeToX(a.end_frame / fps)
+
+      if (ex < LABEL_W || sx > w) continue
+
+      const sev = a.severity ?? 3
+      ctx.fillStyle = `rgba(244,63,94,${Math.min(0.85, 0.3 + sev * 0.1)})`
+      ctx.beginPath()
+      ctx.roundRect(sx, anomalyLane.top + 5, Math.max(2, ex - sx), anomalyLane.height - 10, 2)
+      ctx.fill()
+    }
+
+    // 擊球：線穿過曲線軌道，標籤放在自己那條
     for (const hItem of hits) {
       const isDraggingThis = draggingHit?.id === hItem.id
       const frame = isDraggingThis && draggingHit.currentFrame !== undefined
         ? draggingHit.currentFrame
         : (hItem.new_hit_frame ?? hItem.hit_frame)
 
-      const hx = timeToX(frame / fps)
+      const hx = Math.round(timeToX(frame / fps)) + 0.5
 
-      if (hx < TRACK_LABELS_WIDTH || hx > w) continue
+      if (hx < LABEL_W - 40 || hx > w + 40) continue
 
-      const conf = hItem.confidence ?? 1
-      const isLow = conf < 0.5
+      const isLow = (hItem.confidence ?? 1) < 0.5
       const isHovered = hoveredHit === hItem.id || isDraggingThis
+      const lineColor = isHovered ? '#22d3ee' : isLow ? 'rgba(244,63,94,0.7)' : 'rgba(228,228,231,0.28)'
 
-      ctx.save()
-
-      ctx.strokeStyle = isHovered
-        ? '#22d3ee'
-        : isLow
-          ? '#f43f5e'
-          : 'rgba(244, 244, 245, 0.65)'
-      ctx.lineWidth = isHovered ? 2 : 1
-      ctx.setLineDash(isHovered ? [] : [4, 4])
-
+      ctx.strokeStyle = lineColor
+      ctx.lineWidth = isHovered ? 1.5 : 1
+      ctx.setLineDash(isHovered ? [] : [3, 4])
       ctx.beginPath()
-      ctx.moveTo(hx, RULER_HEIGHT)
-      ctx.lineTo(hx, RULER_HEIGHT + TOTAL_TRACKS_HEIGHT)
+      ctx.moveTo(hx, hitsLane.top + hitsLane.height)
+      ctx.lineTo(hx, anomalyLane.top)
       ctx.stroke()
-
       ctx.setLineDash([])
 
       const label = hItem.shot_type || 'Hit'
-      ctx.font = '10px sans-serif'
-      const textWidth = ctx.measureText(label).width
-      const boxWidth = Math.max(42, textWidth + 10)
-      const boxHeight = 22
-      const boxX = Math.max(
-        TRACK_LABELS_WIDTH + 2,
-        Math.min(w - boxWidth - 2, hx - boxWidth / 2)
-      )
-      const boxY = RULER_HEIGHT + 6
+      ctx.font = `10px ${SANS}`
+      const pillW = Math.max(28, ctx.measureText(label).width + 12)
+      const pillH = hitsLane.height - 6
+      const pillX = hx - pillW / 2
+      const pillY = hitsLane.top + 3
 
-      ctx.fillStyle = isHovered
-        ? '#083344'
-        : 'rgba(39,39,42,0.9)'
-      ctx.strokeStyle = isLow
-        ? '#f43f5e'
-        : isHovered
-          ? '#22d3ee'
-          : '#52525b'
+      ctx.fillStyle = isHovered ? '#083344' : '#18181b'
+      ctx.strokeStyle = isHovered ? '#22d3ee' : isLow ? '#f43f5e' : '#3f3f46'
       ctx.lineWidth = 1
-
       ctx.beginPath()
-      ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 4)
+      ctx.roundRect(pillX, pillY, pillW, pillH, pillH / 2)
       ctx.fill()
       ctx.stroke()
 
-      ctx.fillStyle = isLow
-        ? '#fda4af'
-        : isHovered
-          ? '#67e8f9'
-          : '#d4d4d8'
+      ctx.fillStyle = isHovered ? '#67e8f9' : isLow ? '#fda4af' : '#d4d4d8'
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
-      ctx.fillText(label, boxX + boxWidth / 2, boxY + boxHeight / 2)
-
-      ctx.restore()
-    }
-
-    const cx = getFixedPlayheadX()
-
-    if (cx >= TRACK_LABELS_WIDTH && cx <= w) {
-      ctx.strokeStyle = '#38bdf8'
-      ctx.lineWidth = 1.5
-      ctx.beginPath()
-      ctx.moveTo(cx, 0)
-      ctx.lineTo(cx, h)
-      ctx.stroke()
-
-      ctx.fillStyle = '#38bdf8'
-      ctx.beginPath()
-      ctx.moveTo(cx - 6, 0)
-      ctx.lineTo(cx + 6, 0)
-      ctx.lineTo(cx + 6, Math.max(10, RULER_HEIGHT - 10))
-      ctx.lineTo(cx, RULER_HEIGHT)
-      ctx.lineTo(cx - 6, Math.max(10, RULER_HEIGHT - 10))
-      ctx.closePath()
-      ctx.fill()
+      ctx.fillText(label, hx, pillY + pillH / 2 + 0.5)
     }
 
     ctx.restore()
 
-    ctx.fillStyle = 'rgba(9, 9, 11, 0.9)'
-    ctx.fillRect(TRACK_LABELS_WIDTH, 0, w - TRACK_LABELS_WIDTH, RULER_HEIGHT)
+    // 尺規
+    ctx.fillStyle = '#0b0b0e'
+    ctx.fillRect(LABEL_W, 0, w - LABEL_W, RULER_H)
+    ctx.fillStyle = '#27272a'
+    ctx.fillRect(0, RULER_H - 1, w, 1)
 
-    ctx.strokeStyle = '#27272a'
-    ctx.lineWidth = 1
-    ctx.beginPath()
-    ctx.moveTo(TRACK_LABELS_WIDTH, RULER_HEIGHT)
-    ctx.lineTo(w, RULER_HEIGHT)
-    ctx.stroke()
+    const minorDivisions = tickStep * pxPerSec / 5 >= 10 ? 5 : 2
+    const minorStep = tickStep / minorDivisions
 
-    ctx.fillStyle = '#a1a1aa'
-    ctx.font = '10px sans-serif'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'bottom'
-
-    let tickSpacingSec = 1
-
-    if (pxPerSec < 20) tickSpacingSec = 10
-    else if (pxPerSec < 50) tickSpacingSec = 5
-    else if (pxPerSec > 200) tickSpacingSec = 0.5
-
-    const firstTick = Math.floor(sSec / tickSpacingSec) * tickSpacingSec
-
-    for (let t = firstTick; t <= eSec; t += tickSpacingSec) {
-      if (t < 0) continue
-
-      const tx = timeToX(t)
-
-      if (tx < TRACK_LABELS_WIDTH) continue
-
-      ctx.beginPath()
-      ctx.moveTo(tx, RULER_HEIGHT - 6)
-      ctx.lineTo(tx, RULER_HEIGHT)
-      ctx.stroke()
-
-      const m = Math.floor(t / 60)
-      const s = Math.floor(t % 60)
-      const ms = Math.round((t % 1) * 10)
-
-      let text = m > 0 ? `${m}:${s.toString().padStart(2, '0')}` : `${s}s`
-
-      if (tickSpacingSec < 1 && ms > 0) text += `.${ms}`
-
-      ctx.fillText(text, tx, RULER_HEIGHT - 8)
+    ctx.fillStyle = '#3f3f46'
+    for (
+      let i = Math.max(0, Math.ceil(sSec / minorStep));
+      i <= Math.floor(eSec / minorStep);
+      i++
+    ) {
+      if (i % minorDivisions === 0) continue
+      const tx = Math.round(timeToX(i * minorStep))
+      if (tx >= LABEL_W) ctx.fillRect(tx, RULER_H - 5, 1, 4)
     }
 
-    ctx.fillStyle = '#09090b'
-    ctx.fillRect(0, 0, TRACK_LABELS_WIDTH, h)
-
-    ctx.strokeStyle = '#27272a'
-    ctx.beginPath()
-    ctx.moveTo(TRACK_LABELS_WIDTH, 0)
-    ctx.lineTo(TRACK_LABELS_WIDTH, h)
-    ctx.stroke()
-
-    ctx.fillStyle = '#52525b'
+    ctx.font = `10px ${MONO}`
     ctx.textAlign = 'left'
     ctx.textBaseline = 'middle'
-    ctx.font = '10px sans-serif'
 
-    currentY = RULER_HEIGHT
+    for (let i = firstTick; i <= lastTick; i++) {
+      const tx = Math.round(timeToX(i * tickStep))
+      if (tx < LABEL_W) continue
 
-    for (const track of TRACKS) {
-      ctx.fillText(track.label, 12, currentY + track.height / 2)
+      ctx.fillStyle = '#52525b'
+      ctx.fillRect(tx, RULER_H - 9, 1, 8)
 
+      ctx.fillStyle = '#a1a1aa'
+      ctx.fillText(formatTick(i * tickStep, tickStep), tx + 4, RULER_H - 15)
+    }
+
+    // 播放線
+    const cx = Math.round(getPlayheadX()) + 0.5
+
+    if (cx >= LABEL_W && cx <= w) {
+      ctx.strokeStyle = '#22d3ee'
+      ctx.lineWidth = 1.5
       ctx.beginPath()
-      ctx.moveTo(0, currentY + track.height)
-      ctx.lineTo(TRACK_LABELS_WIDTH, currentY + track.height)
+      ctx.moveTo(cx, RULER_H - 4)
+      ctx.lineTo(cx, h)
       ctx.stroke()
 
-      currentY += track.height
+      const badge = `F ${currentFrame}`
+      ctx.font = `600 10px ${MONO}`
+      const badgeW = ctx.measureText(badge).width + 12
+      const badgeH = 16
+      const badgeX = Math.max(LABEL_W + 2, Math.min(w - badgeW - 2, cx - badgeW / 2))
+      const badgeY = 3
+
+      ctx.fillStyle = '#0891b2'
+      ctx.beginPath()
+      ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3)
+      ctx.fill()
+
+      ctx.beginPath()
+      ctx.moveTo(cx - 4, badgeY + badgeH)
+      ctx.lineTo(cx + 4, badgeY + badgeH)
+      ctx.lineTo(cx, badgeY + badgeH + 5)
+      ctx.closePath()
+      ctx.fill()
+
+      ctx.fillStyle = '#ecfeff'
+      ctx.textAlign = 'center'
+      ctx.fillText(badge, badgeX + badgeW / 2, badgeY + badgeH / 2 + 0.5)
+    }
+
+    // 左側標籤欄
+    ctx.fillStyle = '#0b0b0e'
+    ctx.fillRect(0, 0, LABEL_W, h)
+    ctx.fillStyle = '#27272a'
+    ctx.fillRect(LABEL_W - 1, 0, 1, h)
+    ctx.fillRect(0, RULER_H - 1, LABEL_W, 1)
+
+    ctx.fillStyle = '#d4d4d8'
+    ctx.font = `11px ${MONO}`
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(formatClock(currentTime), 12, RULER_H / 2)
+
+    const currentPoint = trajMap.get(currentFrame)
+
+    for (const lane of lanes) {
+      ctx.fillStyle = '#1c1c21'
+      ctx.fillRect(0, lane.top + lane.height - 1, LABEL_W, 1)
+
+      if (!lane.valueFn && !lane.metric) {
+        ctx.fillStyle = '#71717a'
+        ctx.font = `11px ${SANS}`
+        ctx.textAlign = 'left'
+        ctx.fillText(lane.label, 12, lane.top + lane.height / 2)
+        continue
+      }
+
+      const rowY = lane.top + 13
+
+      if (lane.color) {
+        ctx.fillStyle = lane.color
+        ctx.fillRect(0, lane.top, 2, lane.height - 1)
+      }
+
+      ctx.fillStyle = '#e4e4e7'
+      ctx.font = `600 11px ${SANS}`
+      ctx.textAlign = 'left'
+      ctx.fillText(lane.label, 12, rowY)
+      const labelWidth = ctx.measureText(lane.label).width
+
+      ctx.fillStyle = '#52525b'
+      ctx.font = `10px ${SANS}`
+      ctx.fillText(lane.unit, 12 + labelWidth + 5, rowY)
+
+      // 播放線所在 frame 的值
+      const currentValue = lane.valueFn && currentPoint ? lane.valueFn(currentPoint) : null
+      if (currentValue != null) {
+        ctx.fillStyle = lane.color
+        ctx.font = `10px ${MONO}`
+        ctx.textAlign = 'right'
+        ctx.fillText(currentValue.toFixed(2), LABEL_W - 8, rowY)
+      }
+
+      const range = plotRanges[lane.id]
+
+      if (lane.metric && range) {
+        ctx.fillStyle = '#52525b'
+        ctx.font = `9px ${MONO}`
+        ctx.textAlign = 'right'
+        ctx.fillText(
+          `${formatAxisValue(range.min)}–${formatAxisValue(range.max)}`,
+          LABEL_W - 8,
+          rowY,
+        )
+      }
+
+      if (lane.metric && lane.height >= 36) {
+        const spacing = Math.min(16, (LABEL_W - 24) / Math.max(1, viewSeries.length - 1))
+        ctx.font = `600 10px ${MONO}`
+        ctx.textAlign = 'center'
+        viewSeries.forEach((series, order) => {
+          ctx.fillStyle = series.color
+          ctx.fillText(String(series.cameraIndex), 15 + order * spacing, lane.top + 29)
+        })
+      }
+
+      if (lane.valueFn && range && lane.height >= 36) {
+        ctx.fillStyle = '#52525b'
+        ctx.font = `9px ${MONO}`
+        ctx.textAlign = 'left'
+        ctx.fillText(
+          `${formatAxisValue(range.min)} – ${formatAxisValue(range.max)}`,
+          12,
+          lane.top + lane.height - 10,
+        )
+      }
     }
   }, [
     dimensions,
+    canvasHeight,
+    lanes,
+    tracksBottom,
     scrollLeft,
     pxPerSec,
     trajMap,
@@ -827,10 +1246,16 @@ export default function TimelinePanel() {
     hits,
     anomalies,
     currentTime,
+    currentFrame,
+    currentRally,
+    activeItem,
     hoveredHit,
     draggingHit,
     fps,
     selection,
+    viewPoints.status,
+    viewSeries,
+    visibleTracks.reference,
   ])
 
   useEffect(() => {
@@ -843,15 +1268,12 @@ export default function TimelinePanel() {
 
       if (e.shiftKey) {
         const mouseX = e.offsetX
-        if (mouseX < TRACK_LABELS_WIDTH) return
+        if (mouseX < LABEL_W) return
 
         const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1
-        const targetTime = (mouseX - TRACK_LABELS_WIDTH + scrollLeft) / pxPerSec
-
-        let newPx = pxPerSec * zoomFactor
-        newPx = Math.max(5, Math.min(newPx, 1000))
-
-        const newScroll = targetTime * newPx - (mouseX - TRACK_LABELS_WIDTH)
+        const targetTime = (mouseX - LABEL_W + scrollLeft) / pxPerSec
+        const newPx = clampZoom(pxPerSec * zoomFactor)
+        const newScroll = targetTime * newPx - (mouseX - LABEL_W)
 
         setZoom(newPx)
         setScrollAndCenterTime(newScroll)
@@ -885,8 +1307,20 @@ export default function TimelinePanel() {
     return bestHit
   }
 
-  const getPlayheadX = () => getFixedPlayheadX()
+  const getRallyAtTime = t => rallies.find(r => t >= r.start_frame / fps && t <= r.end_frame / fps)
   const isNearPlayhead = (x) => Math.abs(x - getPlayheadX()) <= PLAYHEAD_GRAB_PX
+
+  const startHitDrag = (hit, x) => {
+    const frame = hit.new_hit_frame ?? hit.hit_frame
+
+    setDraggingHit({
+      id: hit.id,
+      startX: x,
+      frameOffset: frame,
+    })
+    setActiveItem('hit', hit.id)
+    setCurrentTime(frame / fps)
+  }
 
   const handlePointerDown = (e) => {
     e.target.setPointerCapture(e.pointerId)
@@ -894,76 +1328,36 @@ export default function TimelinePanel() {
     const x = e.nativeEvent.offsetX
     const y = e.nativeEvent.offsetY
 
-    if (x < TRACK_LABELS_WIDTH) return
+    if (x < LABEL_W) return
 
     pauseForTimelineDrag()
 
     const t = getTimeFromCanvasX(x)
 
-    if (isNearPlayhead(x) || y < RULER_HEIGHT) {
+    if (isNearPlayhead(x) || y < RULER_H) {
       setIsScrubbing(true)
       setCurrentTime(t)
       return
     }
 
-    let currentYOffset = RULER_HEIGHT
+    if (laneAtY(y)?.id === 'rally') {
+      const rally = getRallyAtTime(t)
 
-    for (const track of TRACKS) {
-      if (y >= currentYOffset && y <= currentYOffset + track.height) {
-        if (track.id !== 'rally') {
-          const hit = getHitAtX(x)
+      if (rally) {
+        const startSec = rally.start_frame / fps
 
-          if (hit) {
-            setDraggingHit({
-              id: hit.id,
-              startX: x,
-              frameOffset: hit.new_hit_frame ?? hit.hit_frame,
-            })
-
-            setActiveItem('hit', hit.id)
-
-            const frame = hit.new_hit_frame ?? hit.hit_frame
-            setCurrentTime(frame / fps)
-
-            return
-          }
-        }
-
-        if (track.id === 'rally') {
-          for (const r of rallies) {
-            const startSec = r.start_frame / fps
-            const endSec = r.end_frame / fps
-
-            if (t >= startSec && t <= endSec) {
-              setSelectionRange(startSec, endSec)
-              setCurrentTime(startSec)
-              setActiveItem('rally', r.id)
-              ensureTimeVisible(startSec)
-              return
-            }
-          }
-        }
-
-        break
+        setSelectionRange(startSec, rally.end_frame / fps)
+        setCurrentTime(startSec)
+        setActiveItem('rally', rally.id)
+        ensureTimeVisible(startSec)
+        return
       }
-
-      currentYOffset += track.height
     }
 
     const hit = getHitAtX(x)
 
-    if (hit && y >= RULER_HEIGHT && y <= RULER_HEIGHT + TOTAL_TRACKS_HEIGHT) {
-      setDraggingHit({
-        id: hit.id,
-        startX: x,
-        frameOffset: hit.new_hit_frame ?? hit.hit_frame,
-      })
-
-      setActiveItem('hit', hit.id)
-
-      const frame = hit.new_hit_frame ?? hit.hit_frame
-      setCurrentTime(frame / fps)
-
+    if (hit && y < tracksBottom) {
+      startHitDrag(hit, x)
       return
     }
 
@@ -981,42 +1375,36 @@ export default function TimelinePanel() {
     const x = e.nativeEvent.offsetX
     const y = e.nativeEvent.offsetY
     const canvas = canvasRef.current
+    const setCursor = (cursor) => {
+      if (canvas) canvas.style.cursor = cursor
+    }
 
     if (isScrubbing) {
       pauseForTimelineDrag()
-
-      const t = getTimeFromCanvasX(x)
-
-      setCurrentTime(t)
-
-      if (canvas) canvas.style.cursor = 'ew-resize'
+      setCurrentTime(getTimeFromCanvasX(x))
+      setCursor('ew-resize')
       return
     }
 
     if (draggingHit) {
       pauseForTimelineDrag()
 
-      const dx = x - draggingHit.startX
-      const dxSec = dx / pxPerSec
+      const dxSec = (x - draggingHit.startX) / pxPerSec
       const newFrame = Math.max(0, Math.round(draggingHit.frameOffset + dxSec * fps))
-      const t = newFrame / fps
 
       setDraggingHit(prev => ({
         ...prev,
         currentFrame: newFrame,
       }))
-
-      setCurrentTime(t)
-
-      if (canvas) canvas.style.cursor = 'ew-resize'
+      setCurrentTime(newFrame / fps)
+      setCursor('ew-resize')
       return
     }
 
     if (isPanning) {
       pauseForTimelineDrag()
 
-      const dx = x - isPanning.startX
-      const targetScroll = isPanning.startScroll - dx
+      const targetScroll = isPanning.startScroll - (x - isPanning.startX)
 
       if (rafPanRef.current) cancelAnimationFrame(rafPanRef.current)
 
@@ -1024,34 +1412,34 @@ export default function TimelinePanel() {
         setScrollAndCenterTime(targetScroll)
       })
 
-      if (canvas) canvas.style.cursor = 'grabbing'
+      setCursor('grabbing')
       return
     }
 
-    if (x > TRACK_LABELS_WIDTH && isNearPlayhead(x)) {
-      if (canvas) canvas.style.cursor = 'ew-resize'
+    if (x <= LABEL_W) {
       if (hoveredHit) setHoveredHit(null)
+      setCursor('default')
       return
     }
 
-    if (x > TRACK_LABELS_WIDTH && y > RULER_HEIGHT && y < RULER_HEIGHT + TOTAL_TRACKS_HEIGHT) {
-      const hit = getHitAtX(x)
-
-      if (hit && hoveredHit !== hit.id) {
-        setHoveredHit(hit.id)
-
-        if (canvas) canvas.style.cursor = 'ew-resize'
-      } else if (!hit && hoveredHit) {
-        setHoveredHit(null)
-
-        if (canvas) canvas.style.cursor = 'grab'
-      } else if (!hit && canvas) {
-        canvas.style.cursor = 'grab'
-      }
-    } else {
+    if (isNearPlayhead(x) || y < RULER_H) {
       if (hoveredHit) setHoveredHit(null)
-      if (canvas) canvas.style.cursor = 'grab'
+      setCursor('ew-resize')
+      return
     }
+
+    const hit = y < tracksBottom ? getHitAtX(x) : null
+
+    if (hit) {
+      if (hoveredHit !== hit.id) setHoveredHit(hit.id)
+      setCursor('ew-resize')
+      return
+    }
+
+    if (hoveredHit) setHoveredHit(null)
+
+    const overRally = laneAtY(y)?.id === 'rally' && getRallyAtTime(getTimeFromCanvasX(x))
+    setCursor(overRally ? 'pointer' : 'grab')
   }
 
   const handlePointerUp = (e) => {
@@ -1084,13 +1472,20 @@ export default function TimelinePanel() {
     }
   }
 
+  const rallyStatusColor = currentRally
+    ? (RALLY_STYLES[currentRally.status] || RALLY_STYLES.default)[1]
+    : null
+
+  const headerButton = 'h-7 px-2 flex items-center justify-center text-[11px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors'
+
   return (
     <div className="h-full w-full min-h-0 min-w-0 relative flex flex-col bg-[#09090b] select-none overflow-hidden">
-      <div className="h-[42px] shrink-0 px-3 grid grid-cols-[auto_1fr_auto] items-center border-b border-zinc-800 bg-zinc-950 shadow-sm z-20 min-w-0 overflow-hidden">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="flex bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
+      {/* 右側留 104px 給 App 疊在上面的「專注底部」按鈕 */}
+      <div className="h-[42px] shrink-0 pl-3 pr-[104px] flex items-center gap-3 border-b border-zinc-800 bg-zinc-950 z-20 min-w-0 overflow-hidden">
+        <div className="flex flex-1 basis-0 items-center gap-2 min-w-0">
+          <div className="flex bg-zinc-900 border border-zinc-800 rounded-md p-0.5 gap-0.5 shrink-0">
             {[
-              ['timeline', 'TIMELINE'],
+              ['timeline', 'Timeline'],
               ['projection2d', '2D'],
               ['quality2d', '品質檢查'],
             ].map(([id, label]) => (
@@ -1098,10 +1493,10 @@ export default function TimelinePanel() {
                 key={id}
                 type="button"
                 onClick={() => setBottomView(id)}
-                className={`px-3 py-1 text-xs font-bold tracking-wider transition-colors ${
+                className={`h-6 px-2.5 rounded text-[11px] font-semibold transition-colors ${
                   bottomView === id
-                    ? 'bg-zinc-800 text-zinc-100'
-                    : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800/70'
+                    ? 'bg-zinc-700 text-zinc-50'
+                    : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800'
                 }`}
               >
                 {label}
@@ -1109,45 +1504,90 @@ export default function TimelinePanel() {
             ))}
           </div>
 
-          {(draggingHit?.currentFrame !== undefined) && (
-            <div className="hidden md:block text-xs text-amber-300 font-semibold px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 rounded shrink-0">
-              Hit #{draggingHit.id} → Frame {draggingHit.currentFrame}
+          {currentRally && (
+            <div className="hidden lg:flex items-center gap-1.5 h-7 px-2 rounded-md border border-zinc-800 bg-zinc-900 text-[11px] text-zinc-300 shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: rallyStatusColor }} />
+              R{currentRally.rally_index}
+              <span className="text-zinc-500 font-mono">
+                {((currentRally.end_frame - currentRally.start_frame) / fps).toFixed(1)}s
+              </span>
+            </div>
+          )}
+
+          {draggingHit?.currentFrame !== undefined && (
+            <div className="text-[11px] text-amber-300 font-semibold px-2 h-7 flex items-center bg-amber-500/10 border border-amber-500/30 rounded-md shrink-0">
+              Hit #{draggingHit.id} → F {draggingHit.currentFrame}
             </div>
           )}
         </div>
 
-        <div className="flex justify-center min-w-0 overflow-hidden">
+        <div className="shrink-0">
           <PlaybackUI
             goPrevRally={goPrevRally}
             goNextRally={goNextRally}
           />
         </div>
 
-        <div className="flex items-center justify-end gap-2 min-w-0">
-          <button
-            type="button"
-            className="px-2 py-1 text-xs rounded border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 shrink-0"
-            title={
-              '操作說明\n' +
-              '拖曳空白區域：平移 Timeline\n' +
-              '拖曳藍色播放線：Scrub\n' +
-              '拖曳 Hit 線：移動 Hit frame\n' +
-              'Rally 按鈕：切換上一個 / 下一個 Rally\n' +
-              'Space：播放 / 暫停\n' +
-              '← / →：單幀移動\n' +
-              'I / O：設定 In / Out\n' +
-              'Esc：取消選取'
-            }
+        <div className="flex flex-1 basis-0 items-center justify-end gap-2 min-w-0">
+          <div className="flex bg-zinc-900 border border-zinc-800 rounded-md p-0.5 gap-0.5 shrink-0" title="顯示 / 隱藏軌道">
+            {TRACK_TOGGLES.map(([key, label, color, dashed]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => toggleTrack(key)}
+                className={`h-6 px-2 rounded flex items-center gap-1.5 text-[11px] transition-colors ${
+                  visibleTracks[key]
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {dashed ? (
+                  <span
+                    className="w-3 border-t border-dashed"
+                    style={{ borderColor: visibleTracks[key] ? color : '#3f3f46' }}
+                  />
+                ) : (
+                  <span
+                    className="w-1.5 h-1.5 rounded-full"
+                    style={{ background: visibleTracks[key] ? color : '#3f3f46' }}
+                  />
+                )}
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="hidden xl:flex items-center bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
+            <button type="button" onClick={() => zoomBy(1 / 1.25)} className={`${headerButton} w-7`} title="縮小">
+              −
+            </button>
+            <button
+              type="button"
+              onClick={fitRange}
+              disabled={rangeStartFrame == null}
+              className={`${headerButton} border-x border-zinc-800 disabled:opacity-40 disabled:hover:bg-transparent`}
+              title="縮放到整段 rally（或選取範圍）"
+            >
+              適配
+            </button>
+            <button type="button" onClick={() => zoomBy(1.25)} className={`${headerButton} w-7`} title="放大">
+              +
+            </button>
+          </div>
+
+          <div
+            className="w-6 h-6 shrink-0 rounded-full border border-zinc-700 text-zinc-500 hover:text-zinc-200 flex items-center justify-center text-[11px] cursor-help"
+            title={TIMELINE_TIPS}
           >
-            快捷鍵
-          </button>
+            ?
+          </div>
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 min-w-0 relative overflow-hidden bg-[#09090b]" ref={containerRef}>
+      <div className="flex-1 min-h-0 min-w-0 relative overflow-y-auto overflow-x-hidden" ref={containerRef}>
         <canvas
           ref={canvasRef}
-          className="absolute inset-0 w-full h-full block"
+          className="absolute left-0 top-0 w-full block"
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -1156,13 +1596,13 @@ export default function TimelinePanel() {
             e.preventDefault()
             clearSelection()
           }}
-          style={{ touchAction: 'none', cursor: 'grab' }}
+          style={{ touchAction: 'none', cursor: 'grab', height: `${canvasHeight}px` }}
         />
       </div>
 
       <div
         ref={scrollBarRef}
-        className="h-[14px] w-full shrink-0 overflow-x-scroll overflow-y-hidden bg-zinc-950 border-t border-zinc-800"
+        className="h-[12px] w-full shrink-0 overflow-x-scroll overflow-y-hidden bg-zinc-950 border-t border-zinc-800"
         onScroll={(e) => {
           const nextScroll = clampScroll(e.target.scrollLeft)
 
@@ -1185,7 +1625,7 @@ export default function TimelinePanel() {
       >
         <div
           style={{
-            width: `${(durationSec * pxPerSec) + TRACK_LABELS_WIDTH}px`,
+            width: `${(durationSec * pxPerSec) + LABEL_W}px`,
             height: '1px',
           }}
         />

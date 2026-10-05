@@ -49,6 +49,15 @@ export default function TopBar() {
     state => state.playbackRate,
   )
 
+  // 重建、品質檢查讀原始 2D 標註還是疊上修正後的版本
+  const ball2DSource = useAppStore(
+    state => state.ball2DSource,
+  )
+
+  const setBall2DSource = useAppStore(
+    state => state.setBall2DSource,
+  )
+
   const [
     browserOpen,
     setBrowserOpen,
@@ -129,7 +138,7 @@ export default function TopBar() {
           "
           title="Badminton 3D Debugger"
         >
-          B3D Debugger
+          Badminton 3D Debugger
         </div>
 
         <button
@@ -252,6 +261,47 @@ export default function TopBar() {
               )}
             </>
           )}
+
+          <div
+            className="
+              hidden
+              md:flex
+              items-center
+              rounded-md
+              border
+              border-zinc-800
+              bg-zinc-900
+              p-0.5
+              text-xs
+              shrink-0
+            "
+            title="3D 重建、時間軸距離 / 速度、品質檢查與影片上的 2D 點，讀原始 2D 標註還是疊上 2D 標註修正（原始資料永遠不會被改動）"
+          >
+            <span className="px-1.5 text-zinc-500">
+              2D
+            </span>
+            {[
+              ['original', '原始'],
+              ['corrected', '修正後'],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setBall2DSource(value)}
+                className={`px-2 py-1 rounded ${
+                  ball2DSource === value
+                    ? (
+                        value === 'corrected'
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-zinc-700 text-zinc-50'
+                      )
+                    : 'text-zinc-400 hover:text-zinc-100'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
 
           <button
             type="button"

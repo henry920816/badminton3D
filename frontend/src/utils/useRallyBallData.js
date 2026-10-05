@@ -52,21 +52,16 @@ function collectRangePoints(trajByFrame, startFrame, endFrame) {
 
 
 /**
- * 目前要顯示的那段球軌跡，以及那段裡推算出來的擊球位置。
- *
- * 軌跡線畫的是 ball_traj，擊球卻是用 2D 標註兩兩重建的 3D 點去猜：
- * ball_traj 不一定準，而擊球前球最慢，2D 標註在那裡相對準。
- * 每次擊球的 anchor 是擊球前最後一格的重建點，球拍拍面中心要對準它。
+ * 目前在看的 frame 範圍：有 in/out 選取就用選取範圍，否則用目前
+ * （或下一個）rally。沒有 rally 時兩者都是 null。
  */
-export function useRallyBallData() {
+export function useRallyFrameRange() {
   const selection = useAppStore(state => state.selection)
   const fps = useAppStore(state => state.fps) || 60
-  const matchId = useAppStore(state => state.matchId)
-  const trajByFrame = useAppStore(state => state.trajByFrame)
   const rallies = useAppStore(state => state.rallies) || []
   const currentFrame = useAppStore(state => state.currentFrame)
 
-  const { startFrame, endFrame } = useMemo(
+  return useMemo(
     () => {
       const inTime = selection.inTime
       const outTime = selection.outTime
@@ -102,6 +97,21 @@ export function useRallyBallData() {
     },
     [selection.inTime, selection.outTime, fps, currentFrame, rallies],
   )
+}
+
+
+/**
+ * 目前要顯示的那段球軌跡，以及那段裡推算出來的擊球位置。
+ *
+ * 軌跡線畫的是 ball_traj，擊球卻是用 2D 標註兩兩重建的 3D 點去猜：
+ * ball_traj 不一定準，而擊球前球最慢，2D 標註在那裡相對準。
+ * 每次擊球的 anchor 是擊球前最後一格的重建點，球拍拍面中心要對準它。
+ */
+export function useRallyBallData() {
+  const fps = useAppStore(state => state.fps) || 60
+  const matchId = useAppStore(state => state.matchId)
+  const trajByFrame = useAppStore(state => state.trajByFrame)
+  const { startFrame, endFrame } = useRallyFrameRange()
 
   const points = useMemo(
     () => collectRangePoints(trajByFrame, startFrame, endFrame),

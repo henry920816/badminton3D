@@ -2,6 +2,7 @@ import unittest
 
 from app.triangulation import (
     pairwise_consensus_point,
+    per_view_pairwise_points,
     project_raw_point,
     triangulate_observations,
 )
@@ -321,6 +322,31 @@ class TriangulationTest(unittest.TestCase):
                     },
                 ],
             )
+        )
+
+    def test_per_view_points_isolate_bad_view(self):
+        cameras = {
+            index: camera(index, offset)
+            for index, offset in enumerate((0.0, -1.0, 0.8, -1.8))
+        }
+        expected = {"x": 0.3, "y": -0.2, "z": 5.0}
+        observations = [
+            {"camera_index": index, **project_raw_point(expected, item)}
+            for index, item in cameras.items()
+        ]
+        observations[2]["x"] += 40.0
+
+        views = per_view_pairwise_points(cameras, observations)
+
+        self.assertEqual(sorted(views), [0, 1, 2, 3])
+        for view in views.values():
+            self.assertEqual(view["pair_count"], 3)
+        # 不含 Cam 2 的組合各有兩組準確，中位數仍落在真值附近
+        for index in (0, 1, 3):
+            self.assert_point_close(views[index], expected, places=6)
+        self.assertGreater(
+            abs(views[2]["distance"] - views[0]["distance"]),
+            0.05,
         )
 
     def test_requires_two_distinct_cameras(self):

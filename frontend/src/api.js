@@ -236,11 +236,14 @@ export const api = {
     )
   ),
 
+  // 以下讀 2D 標註的 API 都帶 source：'original' 只讀原始資料，
+  // 'corrected' 把 2D 標註修正疊上去
   getTraj2D: (
     matchId,
     cameraIndex,
     start,
     end,
+    source = 'original',
   ) => (
     request(
       `/matches/${matchId}/traj2d?camera_index=${encodeURIComponent(
@@ -249,6 +252,8 @@ export const api = {
         start,
       )}&end=${encodeURIComponent(
         end,
+      )}&source=${encodeURIComponent(
+        source,
       )}`,
     )
   ),
@@ -257,12 +262,15 @@ export const api = {
     matchId,
     startFrame,
     endFrame,
+    source = 'original',
   ) => (
     request(
       `/matches/${matchId}/traj2d/camera-grid?start_frame=${encodeURIComponent(
         startFrame,
       )}&end_frame=${encodeURIComponent(
         endFrame,
+      )}&source=${encodeURIComponent(
+        source,
       )}`,
     )
   ),
@@ -271,14 +279,75 @@ export const api = {
     matchId,
     startFrame,
     endFrame,
+    source = 'original',
   ) => (
     request(
       `/matches/${matchId}/traj2d/pairwise?start_frame=${encodeURIComponent(
         startFrame,
       )}&end_frame=${encodeURIComponent(
         endFrame,
+      )}&source=${encodeURIComponent(
+        source,
       )}`,
     )
+  ),
+
+  getPairwiseViewPoints: (
+    matchId,
+    startFrame,
+    endFrame,
+    source = 'original',
+  ) => (
+    request(
+      `/matches/${matchId}/traj2d/pairwise/views?start_frame=${encodeURIComponent(
+        startFrame,
+      )}&end_frame=${encodeURIComponent(
+        endFrame,
+      )}&source=${encodeURIComponent(
+        source,
+      )}`,
+    )
+  ),
+
+  // 每一格哪些相機有看得見的 2D 標註，回傳 [{ frame, camera_index }]
+  getBall2DVisibleRows: (
+    matchId,
+    startFrame,
+    endFrame,
+    source = 'original',
+  ) => (
+    request(
+      `/matches/${matchId}/traj2d/visible?start_frame=${encodeURIComponent(
+        startFrame,
+      )}&end_frame=${encodeURIComponent(
+        endFrame,
+      )}&source=${encodeURIComponent(
+        source,
+      )}`,
+    )
+  ),
+
+  // 2D 標註修正：存在獨立的表，原始資料不會被改動
+  getBall2DCorrections: (matchId, cameraIndex) => request(
+    `/matches/${matchId}/traj2d/corrections${
+      cameraIndex == null ? '' : `?camera_index=${encodeURIComponent(cameraIndex)}`
+    }`,
+  ),
+
+  saveBall2DCorrection: (matchId, payload) => request(
+    `/matches/${matchId}/traj2d/corrections`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  ),
+
+  deleteBall2DCorrection: (matchId, cameraIndex, frame) => request(
+    `/matches/${matchId}/traj2d/corrections?camera_index=${encodeURIComponent(
+      cameraIndex,
+    )}&frame=${encodeURIComponent(frame)}`,
+    { method: 'DELETE' },
   ),
 
   repairTraj2D: (

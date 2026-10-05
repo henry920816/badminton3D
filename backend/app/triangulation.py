@@ -902,6 +902,63 @@ def pairwise_consensus_point(
     }
 
 
+def per_view_pairwise_points(
+    cameras_by_index: dict[int, dict],
+    observations: list[dict],
+) -> dict[int, dict]:
+    """Reconstruct every camera pair, then summarize each view on its own.
+
+    Same as triangulation_3Dline.py: a view's point is the per-axis median of
+    the reconstructions from every pair it belongs to, and its distance is the
+    median of those reconstructions' distances from the origin. Unlike
+    pairwise_consensus_point no reprojection filtering is done, so a view with
+    a bad label shows up as a line that strays from the others.
+    """
+    observations_by_camera: dict[int, dict] = {}
+
+    for observation in observations:
+        camera_index = int(observation.get("camera_index"))
+        if camera_index not in cameras_by_index:
+            continue
+        try:
+            observations_by_camera[camera_index] = {
+                "camera_index": camera_index,
+                "x": _finite_float(observation.get("x"), "2D x"),
+                "y": _finite_float(observation.get("y"), "2D y"),
+            }
+        except ValueError:
+            continue
+
+    points_by_camera: dict[int, list] = {}
+
+    for first, second in combinations(sorted(observations_by_camera), 2):
+        try:
+            result = triangulate_observations(
+                cameras_by_index,
+                [observations_by_camera[first], observations_by_camera[second]],
+            )
+        except (ValueError, np.linalg.LinAlgError, OverflowError, FloatingPointError):
+            continue
+        point = [result["point"][axis] for axis in ("x", "y", "z")]
+        points_by_camera.setdefault(first, []).append(point)
+        points_by_camera.setdefault(second, []).append(point)
+
+    views = {}
+
+    for camera_index, points in points_by_camera.items():
+        points = np.asarray(points, dtype=np.float64)
+        median = np.median(points, axis=0)
+        views[camera_index] = {
+            "x": float(median[0]),
+            "y": float(median[1]),
+            "z": float(median[2]),
+            "distance": float(np.median(np.linalg.norm(points, axis=1))),
+            "pair_count": len(points),
+        }
+
+    return views
+
+
 def scan_2d_camera_grid(
     cameras_by_index: dict[int, dict],
     observations_by_frame: dict[int, list[dict]],

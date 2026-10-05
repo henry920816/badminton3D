@@ -4,6 +4,30 @@ import {
 } from './utils/cameraScenePose.js'
 
 
+const BALL_2D_SOURCE_KEY = 'badminton3d.ball2DSource'
+
+
+// 預設讀修正後的資料：沒有任何修正時和原始資料完全一樣
+function loadBall2DSource() {
+  try {
+    const value = window.localStorage.getItem(BALL_2D_SOURCE_KEY)
+    if (value === 'original' || value === 'corrected') return value
+  } catch {
+    // 無痕視窗或封鎖儲存時用預設值
+  }
+  return 'corrected'
+}
+
+
+function saveBall2DSource(value) {
+  try {
+    window.localStorage.setItem(BALL_2D_SOURCE_KEY, value)
+  } catch {
+    // 存不了就只在這次開啟有效
+  }
+}
+
+
 function normalizeCameras(
   cameras,
   fallbackFps = 50,
@@ -160,6 +184,65 @@ export const useAppStore = create(
     invalidatePairwisePoints: () => set(state => ({
       pairwiseRevision: state.pairwiseRevision + 1,
     })),
+
+    // 讀 2D 標註時用 'original'（只看原始資料）還是 'corrected'
+    // （疊上 2D 標註修正）。修正存在獨立的表，原始資料不會被改動
+    ball2DSource: loadBall2DSource(),
+
+    // 最近一次存好或清掉的 2D 標註修正 { matchId, frame, seq }。
+    // 兩兩重建與品質檢查都是逐格獨立計算，收到後只重算這一格
+    ball2DCorrectionTick: null,
+
+    notifyBall2DCorrected: frame => set(state => ({
+      ball2DCorrectionTick: {
+        matchId: state.matchId,
+        frame,
+        seq: (state.ball2DCorrectionTick?.seq || 0) + 1,
+      },
+    })),
+
+    // 2D 標註修正，cameraIndex -> Map(frame -> 修正)，
+    // 每筆是 { camera_index, frame, visibility, x, y, original }
+    ball2DCorrections: new Map(),
+
+    setBall2DSource: source => {
+      if (source === get().ball2DSource) return
+
+      saveBall2DSource(source)
+
+      // 換來源後已載入的 2D 球點作廢，影片面板會重新讀取。兩兩重建的快取
+      // key 本來就含來源，不用 bump pairwiseRevision，切回來時還能用快取
+      set({
+        ball2DSource: source,
+        ball2DByCameraFrame: new Map(),
+        loadedBall2DCameras: new Set(),
+      })
+    },
+
+    setBall2DCorrections: (cameraIndex, corrections) => {
+      const byCamera = new Map(get().ball2DCorrections)
+      byCamera.set(
+        cameraIndex,
+        new Map((corrections || []).map(item => [item.frame, item])),
+      )
+      set({ ball2DCorrections: byCamera })
+    },
+
+    upsertBall2DCorrection: correction => {
+      const byCamera = new Map(get().ball2DCorrections)
+      const cameraMap = new Map(byCamera.get(correction.camera_index) || [])
+      cameraMap.set(correction.frame, correction)
+      byCamera.set(correction.camera_index, cameraMap)
+      set({ ball2DCorrections: byCamera })
+    },
+
+    removeBall2DCorrection: (cameraIndex, frame) => {
+      const byCamera = new Map(get().ball2DCorrections)
+      const cameraMap = new Map(byCamera.get(cameraIndex) || [])
+      cameraMap.delete(frame)
+      byCamera.set(cameraIndex, cameraMap)
+      set({ ball2DCorrections: byCamera })
+    },
 
     // 擊球瞬間把拍面轉向球飛出去的方向。關掉的話球拍就完全跟著 SMPL
     // 手腕的姿態走，方便比對這個修正到底改了什麼。預設開著，維持原本行為。
@@ -901,6 +984,7 @@ export const useAppStore = create(
         trajByFrame: new Map(),
         ball2DByCameraFrame: new Map(),
         loadedBall2DCameras: new Set(),
+        ball2DCorrections: new Map(),
         smplReplayBySegmentId: new Map(),
       })
     },

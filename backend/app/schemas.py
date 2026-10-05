@@ -34,6 +34,7 @@ class BallPosition2DPoint(BaseModel):
     visibility: int
     x: float
     y: float
+    corrected: bool = False
 
 class HitPatch(BaseModel):
     new_hit_frame: Optional[int] = None

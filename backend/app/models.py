@@ -132,6 +132,33 @@ Index(
 )
 
 
+class BallPosition2DCorrection(Base):
+    """使用者對 2D 羽球標註的修正。
+
+    原始的 ball_positions_2d 不會被改動；要用修正後的資料時，讀取時再把這
+    張表疊上去。每個 (match, camera, frame) 最多一筆，刪掉就回到原始值。
+    """
+    __tablename__ = "ball_position_2d_corrections"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    camera_index: Mapped[int] = mapped_column(Integer, index=True)
+    frame: Mapped[int] = mapped_column(Integer, index=True)
+    visibility: Mapped[int] = mapped_column(Integer, default=1)
+    x: Mapped[float] = mapped_column(Float, default=0.0)
+    y: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+Index(
+    "uq_ball_2d_correction_match_camera_frame",
+    BallPosition2DCorrection.match_id,
+    BallPosition2DCorrection.camera_index,
+    BallPosition2DCorrection.frame,
+    unique=True,
+)
+
+
 class TrajectoryRepairHistory(Base):
     __tablename__ = "trajectory_repair_history"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
