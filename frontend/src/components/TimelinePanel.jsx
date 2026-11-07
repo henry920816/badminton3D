@@ -221,7 +221,6 @@ const MAX_PLOT_H = 150
 
 const RALLY_LANE = { id: 'rally', label: 'Rally', height: 24 }
 const HITS_LANE = { id: 'hits', label: '擊球', height: 22 }
-const ANOMALY_LANE = { id: 'anomaly', label: '異常', height: 18 }
 
 const PLOT_TRACKS = [
   { id: 'pos_x', toggle: 'x', label: 'X', unit: 'm', valueFn: p => p.x, color: '#38bdf8' },
@@ -309,7 +308,6 @@ export default function TimelinePanel() {
 
   const rallies = useAppStore(s => s.rallies) || []
   const hits = useAppStore(s => s.hits) || []
-  const anomalies = useAppStore(s => s.anomalies) || []
   const updateHit = useAppStore(s => s.updateHit)
   const trajMap = useAppStore(s => s.trajByFrame)
   // 3D 參考線和 3D 場景畫同一份軌跡（可能是純 2D 補點、平滑過的）
@@ -439,7 +437,7 @@ export default function TimelinePanel() {
 
   const lanes = useMemo(() => {
     const plots = PLOT_TRACKS.filter(track => visibleTracks[track.toggle])
-    const fixedHeight = RULER_H + RALLY_LANE.height + HITS_LANE.height + ANOMALY_LANE.height
+    const fixedHeight = RULER_H + RALLY_LANE.height + HITS_LANE.height
     const plotHeight = plots.length
       ? Math.max(MIN_PLOT_H, Math.min(MAX_PLOT_H, Math.floor((dimensions.height - fixedHeight) / plots.length)))
       : 0
@@ -450,7 +448,6 @@ export default function TimelinePanel() {
       RALLY_LANE,
       HITS_LANE,
       ...plots.map(track => ({ ...track, height: plotHeight })),
-      ANOMALY_LANE,
     ].map((lane) => {
       const placed = { ...lane, top }
       top += lane.height
@@ -632,7 +629,7 @@ export default function TimelinePanel() {
 
   drawTimelineRef.current = () => drawTimeline({
     canvasRef, dimensions, canvasHeight, lanes, tracksBottom, scrollLeft, pxPerSec,
-    trajMap, displayLookup, rallies, hits, anomalies, currentTime, currentFrame,
+    trajMap, displayLookup, rallies, hits, currentTime, currentFrame,
     currentRally, activeItem, hoveredHit, draggingHit, fps, selection,
     visibleTracks, consistencyByFrame, laneSource, getPlayheadX,
   })
@@ -664,7 +661,6 @@ export default function TimelinePanel() {
     displayLookup,
     rallies,
     hits,
-    anomalies,
     currentTime,
     currentFrame,
     currentRally,

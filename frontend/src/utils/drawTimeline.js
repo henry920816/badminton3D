@@ -1,4 +1,4 @@
-// 時間軸 canvas 的繪製：尺規、各軌道曲線、rally / 擊球 / 異常、播放線。
+// 時間軸 canvas 的繪製：尺規、各軌道曲線、rally / 擊球、播放線。
 // 純繪圖，狀態全部由 TimelinePanel 傳進來
 
 
@@ -60,7 +60,7 @@ function formatClock(t) {
 
 export function drawTimeline({
   canvasRef, dimensions, canvasHeight, lanes, tracksBottom, scrollLeft, pxPerSec,
-  trajMap, displayLookup, rallies, hits, anomalies, currentTime, currentFrame,
+  trajMap, displayLookup, rallies, hits, currentTime, currentFrame,
   currentRally, activeItem, hoveredHit, draggingHit, fps, selection,
   visibleTracks, consistencyByFrame, laneSource, getPlayheadX,
 }) {
@@ -94,7 +94,6 @@ export function drawTimeline({
 
   const laneById = Object.fromEntries(lanes.map(lane => [lane.id, lane]))
   const hitsLane = laneById.hits
-  const anomalyLane = laneById.anomaly
   const plotRanges = {}
 
   const pts = []
@@ -448,20 +447,6 @@ export function drawTimeline({
     }
   }
 
-  // 異常
-  for (const a of anomalies) {
-    const sx = timeToX(a.start_frame / fps)
-    const ex = timeToX(a.end_frame / fps)
-
-    if (ex < LABEL_W || sx > w) continue
-
-    const sev = a.severity ?? 3
-    ctx.fillStyle = `rgba(244,63,94,${Math.min(0.85, 0.3 + sev * 0.1)})`
-    ctx.beginPath()
-    ctx.roundRect(sx, anomalyLane.top + 5, Math.max(2, ex - sx), anomalyLane.height - 10, 2)
-    ctx.fill()
-  }
-
   // 擊球：線穿過曲線軌道，標籤放在自己那條
   for (const hItem of hits) {
     const isDraggingThis = draggingHit?.id === hItem.id
@@ -482,7 +467,7 @@ export function drawTimeline({
     ctx.setLineDash(isHovered ? [] : [3, 4])
     ctx.beginPath()
     ctx.moveTo(hx, hitsLane.top + hitsLane.height)
-    ctx.lineTo(hx, anomalyLane.top)
+    ctx.lineTo(hx, tracksBottom)
     ctx.stroke()
     ctx.setLineDash([])
 
