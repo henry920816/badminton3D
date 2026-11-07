@@ -292,7 +292,13 @@ export function drawTimeline({
     let lo
     let hi
 
-    if (lane.log) {
+    if (lane.fixedRange) {
+      // 固定刻度：不看畫面範圍內的最小最大值
+      const [fixedMin, fixedMax] = lane.fixedRange
+      lo = lane.log ? Math.log10(fixedMin) : fixedMin
+      hi = lane.log ? Math.log10(fixedMax) : fixedMax
+      plotRanges[lane.id] = { min: fixedMin, max: fixedMax }
+    } else if (lane.log) {
       lo = Math.log10(minV)
       hi = Math.log10(maxV)
       if (hi - lo < 1e-6) {
@@ -309,7 +315,9 @@ export function drawTimeline({
     const innerTop = lane.top + 8
     const innerBot = lane.top + lane.height - 8
     const toY = (value) => {
-      const t = lane.log ? Math.log10(value) : value
+      const raw = lane.log ? Math.log10(value) : value
+      // 固定刻度時超出範圍的值貼在上下緣，不會畫到軌道外看不見
+      const t = lane.fixedRange ? Math.min(hi, Math.max(lo, raw)) : raw
       return innerBot - ((t - lo) / (hi - lo)) * (innerBot - innerTop)
     }
 

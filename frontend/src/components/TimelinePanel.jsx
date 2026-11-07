@@ -233,7 +233,9 @@ const PLOT_TRACKS = [
   { id: 'view_speed', toggle: 'speed', label: '速度', unit: 'm/s', metric: 'speed' },
   // 每一格所有視角的 2D 標註一起三角化、投影回各台的 RMS：各台極線交會
   // 越集中越低，越高越該回去修那一格的標註
-  { id: 'label_consistency', toggle: 'consistency', label: '標註一致', unit: 'px', metric: 'consistency', log: true },
+  // y 軸固定（不隨畫面範圍縮放），播放時同樣的誤差永遠在同一個高度；
+  // 超出範圍的貼在上下緣
+  { id: 'label_consistency', toggle: 'consistency', label: '標註一致', unit: 'px', metric: 'consistency', log: true, fixedRange: [1, 1000] },
 ]
 
 const TRACK_TOGGLES = [
