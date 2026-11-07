@@ -16,7 +16,7 @@ from app.ball2d_corrections import (
     load_ball_2d_rows,
     save_ball_2d_correction,
 )
-from app.main import get_traj_2d, get_traj_2d_visible
+from app.routers.traj2d import get_traj_2d, get_traj_2d_visible
 from app.models import BallPosition2D, Base, Match, Rally
 
 

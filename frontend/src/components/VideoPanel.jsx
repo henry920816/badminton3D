@@ -1,4 +1,5 @@
 import React, {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -14,14 +15,11 @@ import {
 } from '../config.js'
 
 import {
-  project3DToImage,
-} from '../utils/cameraProjection.js'
-
-import {
   api,
 } from '../api.js'
 
 import {
+  useDisplayTrajectoryLookup,
   useRallyBallData,
 } from '../utils/useRallyBallData.js'
 import {
@@ -29,6 +27,21 @@ import {
 } from '../utils/usePairwiseBallPoints.js'
 
 import Ball2DCorrectionPanel from './Ball2DCorrectionPanel.jsx'
+import Magnifier from './Magnifier.jsx'
+import {
+  drawProjectionOverlay,
+  getObjectContainRect,
+} from '../utils/drawProjectionOverlay.js'
+import {
+  useRepair2D,
+} from '../utils/useRepair2D.js'
+import {
+  useCorrection2D,
+} from '../utils/useCorrection2D.js'
+import {
+  getCameraVideoTime,
+  useVideoClock,
+} from '../utils/useVideoClock.js'
 
 
 // 後端 get_traj2d 的 end 預設值，代表「這台相機全部」
@@ -119,632 +132,12 @@ function detectCameraIdFromFileName(
 }
 
 
-function getCameraVideoTime(
-  globalFrame,
-  globalFps,
-  camera,
-) {
-  const cameraFps = (
-    camera?.fps
-    || globalFps
-    || 50
-  )
-
-  const offsetFrame = (
-    camera?.offset_frame
-    || 0
-  )
-
-  return Math.max(
-    0,
-    (
-      globalFrame
-      + offsetFrame
-    )
-    / cameraFps,
-  )
-}
 
 
-function getGlobalFrameFromCameraTime(
-  cameraTime,
-  globalFps,
-  camera,
-) {
-  const cameraFps = (
-    camera?.fps
-    || globalFps
-    || 50
-  )
-
-  const offsetFrame = (
-    camera?.offset_frame
-    || 0
-  )
-
-  return Math.max(
-    0,
-    Math.round(
-      cameraTime
-      * cameraFps
-      - offsetFrame,
-    ),
-  )
-}
 
 
-function getNearestTrajectoryPoint(
-  trajectoryMap,
-  frame,
-  radius = 3,
-) {
-  const exact = (
-    trajectoryMap.get(
-      frame
-    )
-  )
-
-  if (exact) {
-    return exact
-  }
-
-  for (
-    let distance = 1;
-    distance <= radius;
-    distance += 1
-  ) {
-    const previous = (
-      trajectoryMap.get(
-        frame - distance
-      )
-    )
-
-    if (previous) {
-      return previous
-    }
-
-    const next = (
-      trajectoryMap.get(
-        frame + distance
-      )
-    )
-
-    if (next) {
-      return next
-    }
-  }
-
-  return null
-}
 
 
-function getObjectContainRect(
-  container,
-  video,
-) {
-  const boxWidth = Math.max(
-    1,
-    Math.round(
-      container?.clientWidth
-      || video?.clientWidth
-      || 0,
-    ),
-  )
-
-  const boxHeight = Math.max(
-    1,
-    Math.round(
-      container?.clientHeight
-      || video?.clientHeight
-      || 0,
-    ),
-  )
-
-  const videoWidth = (
-    video?.videoWidth
-    || 1280
-  )
-
-  const videoHeight = (
-    video?.videoHeight
-    || 800
-  )
-
-  const boxRatio = (
-    boxWidth
-    / boxHeight
-  )
-
-  const videoRatio = (
-    videoWidth
-    / videoHeight
-  )
-
-  let width = boxWidth
-  let height = boxHeight
-  let x = 0
-  let y = 0
-
-  if (boxRatio > videoRatio) {
-    height = boxHeight
-    width = (
-      height
-      * videoRatio
-    )
-    x = (
-      boxWidth
-      - width
-    ) / 2
-  } else {
-    width = boxWidth
-    height = (
-      width
-      / videoRatio
-    )
-    y = (
-      boxHeight
-      - height
-    ) / 2
-  }
-
-  return {
-    boxWidth,
-    boxHeight,
-    x,
-    y,
-    width,
-    height,
-  }
-}
-
-
-function getImagePointFromPointer({
-  event,
-  canvas,
-  container,
-  video,
-  cameraParams,
-}) {
-  if (
-    !event
-    || !canvas
-    || !container
-    || !video
-  ) {
-    return null
-  }
-
-  const rectangle = (
-    getObjectContainRect(
-      container,
-      video,
-    )
-  )
-  const canvasRectangle = (
-    canvas.getBoundingClientRect()
-  )
-  const canvasX = (
-    event.clientX
-    - canvasRectangle.left
-  )
-  const canvasY = (
-    event.clientY
-    - canvasRectangle.top
-  )
-
-  if (
-    canvasX < rectangle.x
-    || canvasX
-      > rectangle.x
-        + rectangle.width
-    || canvasY < rectangle.y
-    || canvasY
-      > rectangle.y
-        + rectangle.height
-  ) {
-    return null
-  }
-
-  const imageWidth = (
-    cameraParams?.imageWidth
-    || video.videoWidth
-    || 1920
-  )
-  const imageHeight = (
-    cameraParams?.imageHeight
-    || video.videoHeight
-    || 1200
-  )
-
-  return {
-    x: (
-      (
-        canvasX
-        - rectangle.x
-      )
-      * imageWidth
-      / rectangle.width
-    ),
-    y: (
-      (
-        canvasY
-        - rectangle.y
-      )
-      * imageHeight
-      / rectangle.height
-    ),
-  }
-}
-
-
-function drawProjectionOverlay({
-  canvas,
-  container,
-  video,
-  cameraParams,
-  trajectoryMap,
-  currentFrame,
-  showProjection,
-  ball2DMap,
-  showBall2D,
-  repair2DMode,
-  repairObservation,
-  repairPreviewPoint,
-  racketTips,
-  showRacketTip,
-  handPoints,
-  showHands,
-  correctionOverlay,
-}) {
-  if (
-    !canvas
-    || !container
-    || !video
-  ) {
-    return
-  }
-
-  const rectangle = (
-    getObjectContainRect(
-      container,
-      video,
-    )
-  )
-
-  const pixelRatio = (
-    window.devicePixelRatio
-    || 1
-  )
-
-  canvas.style.width = (
-    `${rectangle.boxWidth}px`
-  )
-
-  canvas.style.height = (
-    `${rectangle.boxHeight}px`
-  )
-
-  canvas.width = Math.max(
-    1,
-    Math.round(
-      rectangle.boxWidth
-      * pixelRatio,
-    ),
-  )
-
-  canvas.height = Math.max(
-    1,
-    Math.round(
-      rectangle.boxHeight
-      * pixelRatio,
-    ),
-  )
-
-  const context = (
-    canvas.getContext('2d')
-  )
-
-  if (!context) {
-    return
-  }
-
-  context.setTransform(
-    pixelRatio,
-    0,
-    0,
-    pixelRatio,
-    0,
-    0,
-  )
-
-  context.clearRect(
-    0,
-    0,
-    rectangle.boxWidth,
-    rectangle.boxHeight,
-  )
-
-  const drawPoint = ({
-    u,
-    v,
-    imageWidth,
-    imageHeight,
-    fillStyle,
-    radius,
-    strokeStyle = null,
-  }) => {
-    if (
-      !Number.isFinite(Number(u))
-      || !Number.isFinite(Number(v))
-      || !Number.isFinite(Number(imageWidth))
-      || !Number.isFinite(Number(imageHeight))
-      || Number(imageWidth) <= 0
-      || Number(imageHeight) <= 0
-    ) {
-      return
-    }
-
-    const canvasX = (
-      rectangle.x
-      + Number(u)
-      * rectangle.width
-      / Number(imageWidth)
-    )
-    const canvasY = (
-      rectangle.y
-      + Number(v)
-      * rectangle.height
-      / Number(imageHeight)
-    )
-
-    context.save()
-    context.fillStyle = fillStyle
-    context.shadowColor = (
-      'rgba(0, 0, 0, 0.85)'
-    )
-    context.shadowBlur = 4
-    context.beginPath()
-    context.arc(
-      canvasX,
-      canvasY,
-      radius,
-      0,
-      Math.PI * 2,
-    )
-    context.fill()
-
-    if (strokeStyle) {
-      context.strokeStyle = strokeStyle
-      context.lineWidth = 1.5
-      context.stroke()
-    }
-
-    context.restore()
-  }
-
-  if (
-    showProjection
-    && cameraParams
-  ) {
-    const currentPoint = (
-      getNearestTrajectoryPoint(
-        trajectoryMap,
-        currentFrame,
-        3,
-      )
-    )
-    const projection = (
-      currentPoint
-        ? project3DToImage(
-            currentPoint,
-            cameraParams,
-          )
-        : null
-    )
-
-    if (projection) {
-      drawPoint({
-        u: projection.u,
-        v: projection.v,
-        imageWidth: (
-          cameraParams.imageWidth
-          || video.videoWidth
-          || 1920
-        ),
-        imageHeight: (
-          cameraParams.imageHeight
-          || video.videoHeight
-          || 1200
-        ),
-        fillStyle: '#ef4444',
-        radius: 4,
-      })
-    }
-  }
-
-  const drawProjectedPoints = (
-    points,
-    fillStyle,
-  ) => {
-    for (
-      const point
-      of points
-    ) {
-      const projection = (
-        project3DToImage(
-          point,
-          cameraParams,
-        )
-      )
-
-      if (!projection) {
-        continue
-      }
-
-      drawPoint({
-        u: projection.u,
-        v: projection.v,
-        imageWidth: (
-          cameraParams.imageWidth
-          || video.videoWidth
-          || 1920
-        ),
-        imageHeight: (
-          cameraParams.imageHeight
-          || video.videoHeight
-          || 1200
-        ),
-        fillStyle,
-        radius: 4,
-      })
-    }
-  }
-
-  if (
-    showHands
-    && cameraParams
-  ) {
-    drawProjectedPoints(
-      handPoints,
-      '#facc15',
-    )
-  }
-
-  if (
-    showRacketTip
-    && cameraParams
-  ) {
-    drawProjectedPoints(
-      racketTips,
-      '#f97316',
-    )
-  }
-
-  const ball2DPoint = (
-    ball2DMap?.get(currentFrame)
-  )
-
-  if (
-    showBall2D
-    && Number(ball2DPoint?.visibility) === 1
-  ) {
-    drawPoint({
-      u: ball2DPoint.x,
-      v: ball2DPoint.y,
-      imageWidth: (
-        cameraParams?.imageWidth
-        || video.videoWidth
-        || 1920
-      ),
-      imageHeight: (
-        cameraParams?.imageHeight
-        || video.videoHeight
-        || 1200
-      ),
-      fillStyle: '#22d3ee00',
-      strokeStyle: '#22d3ee',
-      radius: 5,
-    })
-  }
-
-  if (
-    repair2DMode
-    && repairObservation
-  ) {
-    drawPoint({
-      u: repairObservation.x,
-      v: repairObservation.y,
-      imageWidth: (
-        cameraParams?.imageWidth
-        || video.videoWidth
-        || 1920
-      ),
-      imageHeight: (
-        cameraParams?.imageHeight
-        || video.videoHeight
-        || 1200
-      ),
-      fillStyle: '#d946ef',
-      strokeStyle: '#fae8ff',
-      radius: 6,
-    })
-  }
-
-  if (
-    repair2DMode
-    && repairPreviewPoint
-    && cameraParams
-  ) {
-    const previewProjection = (
-      project3DToImage(
-        repairPreviewPoint,
-        cameraParams,
-      )
-    )
-
-    if (previewProjection) {
-      drawPoint({
-        u: previewProjection.u,
-        v: previewProjection.v,
-        imageWidth: (
-          cameraParams.imageWidth
-          || video.videoWidth
-          || 1920
-        ),
-        imageHeight: (
-          cameraParams.imageHeight
-          || video.videoHeight
-          || 1200
-        ),
-        fillStyle: '#22c55e',
-        strokeStyle: '#dcfce7',
-        radius: 7,
-      })
-    }
-  }
-
-  // 2D 標註修正：灰圈是原始標註，琥珀色實心點是修正後的位置
-  if (correctionOverlay) {
-    const imageWidth = (
-      cameraParams?.imageWidth
-      || video.videoWidth
-      || 1920
-    )
-    const imageHeight = (
-      cameraParams?.imageHeight
-      || video.videoHeight
-      || 1200
-    )
-    const {
-      original,
-      correction,
-    } = correctionOverlay
-
-    if (Number(original?.visibility) === 1) {
-      drawPoint({
-        u: original.x,
-        v: original.y,
-        imageWidth,
-        imageHeight,
-        fillStyle: 'rgba(0, 0, 0, 0)',
-        strokeStyle: '#a1a1aa',
-        radius: 8,
-      })
-    }
-
-    if (Number(correction?.visibility) === 1) {
-      drawPoint({
-        u: correction.x,
-        v: correction.y,
-        imageWidth,
-        imageHeight,
-        fillStyle: '#f59e0b',
-        strokeStyle: '#fef3c7',
-        radius: 5,
-      })
-    }
-  }
-}
 
 
 export default function VideoPanel() {
@@ -752,13 +145,7 @@ export default function VideoPanel() {
   const videoRef = useRef(null)
   const overlayCanvasRef = useRef(null)
 
-  const syncFromVideoRef = useRef(false)
-
   const previousLocalUrlsRef = useRef({})
-
-  const lastVideoDrivenFrameRef = useRef(
-    null
-  )
 
   const ball2DInflightRef = useRef(
     new Set()
@@ -839,13 +226,8 @@ export default function VideoPanel() {
     state => state.setCurrentFrame
   )
 
-  const setCurrentTime = useAppStore(
-    state => state.setCurrentTime
-  )
-
-  const trajectoryMap = useAppStore(
-    state => state.trajByFrame
-  )
+  // 3D→2D 投影的球和 3D 場景畫同一份（可能是純 2D 補點、平滑過的軌跡）
+  const trajectoryMap = useDisplayTrajectoryLookup()
 
   const upsertTrajPoints = useAppStore(
     state => state.upsertTrajPoints
@@ -861,10 +243,6 @@ export default function VideoPanel() {
 
   const ball2DByCameraFrame = useAppStore(
     state => state.ball2DByCameraFrame
-  )
-
-  const playerKeypointsByPlayer = useAppStore(
-    state => state.playerKeypointsByPlayer
   )
 
   const upsertBall2DPoints = useAppStore(
@@ -935,55 +313,9 @@ export default function VideoPanel() {
     setShowBall2D,
   ] = useState(true)
 
-  // 拍頂、手掌的投影預設關掉，需要時再從工具列打開
-  const [
-    showRacketTip,
-    setShowRacketTip,
-  ] = useState(false)
-
-  const [
-    showHands,
-    setShowHands,
-  ] = useState(false)
-
   const [
     videoReadyIdentity,
     setVideoReadyIdentity,
-  ] = useState(null)
-
-  const [
-    repair2DMode,
-    setRepair2DMode,
-  ] = useState(false)
-
-  const [
-    repair2DFrame,
-    setRepair2DFrame,
-  ] = useState(null)
-
-  const [
-    repair2DObservations,
-    setRepair2DObservations,
-  ] = useState({})
-
-  const [
-    repair2DPreview,
-    setRepair2DPreview,
-  ] = useState(null)
-
-  const [
-    repair2DStatus,
-    setRepair2DStatus,
-  ] = useState('idle')
-
-  const [
-    repair2DError,
-    setRepair2DError,
-  ] = useState('')
-
-  const [
-    lastRepair2DId,
-    setLastRepair2DId,
   ] = useState(null)
 
   const safePlaybackRate = (
@@ -1056,63 +388,45 @@ export default function VideoPanel() {
     ).length
   )
 
-  const repair2DObservationList = (
-    Object.values(
-      repair2DObservations
-      || {},
-    )
-  )
-
-  const activeRepair2DObservation = (
-    repair2DMode
-    && repair2DFrame
-      === currentFrame
-      ? (
-          repair2DObservations[
-            Number(
-              activeCamera?.index
-            )
-          ]
-          || null
-        )
-      : null
-  )
-
-  const repair2DPreviewPoint = (
-    repair2DMode
-    && repair2DPreview?.frame
-      === currentFrame
-      ? (
-          repair2DPreview
-            ?.trajectory_point
-          || null
-        )
-      : null
-  )
-
   const {
-    racketTips,
-    handPoints,
-  } = useMemo(
-    () => {
-      const keypoints = Object.values(
-        playerKeypointsByPlayer
-        || {},
-      )
-
-      return {
-        racketTips: keypoints
-          .map(item => item.racketTip)
-          .filter(Boolean),
-
-        handPoints: keypoints
-          .flatMap(item => item.hands || []),
-      }
+    repair2DMode,
+    repair2DFrame,
+    repair2DObservationList,
+    repair2DPreview,
+    repair2DStatus,
+    repair2DError,
+    lastRepair2DId,
+    activeRepair2DObservation,
+    repair2DPreviewPoint,
+    resetRepair2DWork,
+    toggleRepair2DMode,
+    exitRepair2DMode,
+    handleRepair2DPointerDown,
+    previewRepair2D,
+    confirmRepair2D,
+    undoRepair2D,
+  } = useRepair2D({
+    matchId,
+    currentFrame,
+    playing,
+    setPlaying,
+    activeCamera,
+    activeCameraParams,
+    projectionAvailable,
+    repairCapableCameraCount,
+    overlayCanvasRef,
+    videoWrapRef,
+    videoRef,
+    upsertTrajPoints,
+    removeTrajFrames,
+    upsertBall2DPoints,
+    removeBall2DPoints,
+    setCameraHasBall2D,
+    onEnterMode: () => {
+      setShowProjection(true)
+      exitCorrection2DMode()
     },
-    [
-      playerKeypointsByPlayer,
-    ],
-  )
+  })
 
   const activeBall2DMap = useMemo(
     () => (
@@ -1127,326 +441,45 @@ export default function VideoPanel() {
     ],
   )
 
-  // 2D 標註修正：修正存在獨立的表，原始資料不會被改動
-  const [
+  const {
     correction2DMode,
-    setCorrection2DMode,
-  ] = useState(false)
-
-  const [
     correction2DSaving,
-    setCorrection2DSaving,
-  ] = useState(false)
-
-  const [
     correction2DError,
-    setCorrection2DError,
-  ] = useState('')
-
-  const [
     correction2DAdvance,
     setCorrection2DAdvance,
-  ] = useState(false)
-
-  const ball2DCorrections = useAppStore(
-    state => state.ball2DCorrections
-  )
-
-  const activeCorrectionMap = useMemo(
-    () => (
-      ball2DCorrections.get(
-        Number(activeCamera?.index),
-      )
-      || null
-    ),
-    [
-      ball2DCorrections,
-      activeCamera,
-    ],
-  )
-
-  const activeCorrection = (
-    activeCorrectionMap?.get(currentFrame)
-    || null
-  )
-
-  // 這格的原始標註：有修正時取修正紀錄附的原始值；沒有修正時，
-  // 畫面上的 2D 點不論來源都等於原始值
-  const activeOriginal2D = (
-    activeCorrection
-      ? activeCorrection.original
-      : activeBall2DMap?.get(currentFrame) || null
-  )
-
-  const correctionOverlay = useMemo(
-    () => (
-      correction2DMode
-        ? {
-            original: activeOriginal2D,
-            correction: activeCorrection,
-          }
-        : null
-    ),
-    [
-      correction2DMode,
-      activeOriginal2D,
-      activeCorrection,
-    ],
-  )
-
-  useEffect(
-    () => {
-      if (
-        !correction2DMode
-        || matchId == null
-        || !Number.isInteger(
-          Number(activeCamera?.index),
-        )
-      ) {
-        return undefined
-      }
-
-      const cameraIndex = Number(
-        activeCamera.index,
-      )
-
-      // 存檔 / 清除時 store 已同步更新，換資料集時會清空；
-      // 讀過的相機不用每次打開修正模式都重抓
-      if (
-        useAppStore.getState().ball2DCorrections.has(
-          cameraIndex,
-        )
-      ) {
-        return undefined
-      }
-
-      let cancelled = false
-
-      api.getBall2DCorrections(
-        matchId,
-        cameraIndex,
-      )
-        .then(list => {
-          if (!cancelled) {
-            useAppStore.getState().setBall2DCorrections(
-              cameraIndex,
-              list,
-            )
-          }
-        })
-        .catch(error => {
-          if (!cancelled) {
-            setCorrection2DError(
-              error?.message
-              || String(error)
-            )
-          }
-        })
-
-      return () => {
-        cancelled = true
+    ball2DCorrections,
+    activeCorrectionMap,
+    activeCorrection,
+    activeOriginal2D,
+    correction2DReferenceOptions,
+    correction2DGuideSummary,
+    correctionOverlay,
+    toggleCorrection2DReference,
+    markCorrection2DHidden,
+    clearCorrection2D,
+    handleCorrection2DPointerDown,
+    toggleCorrection2DMode,
+    exitCorrection2DMode,
+  } = useCorrection2D({
+    matchId,
+    currentFrame,
+    setCurrentFrame,
+    setPlaying,
+    activeCamera,
+    activeCameraParams,
+    projectionAvailable,
+    safeCameras,
+    activeBall2DMap,
+    ball2DByCameraFrame,
+    overlayCanvasRef,
+    videoWrapRef,
+    videoRef,
+    onEnterMode: () => {
+      if (repair2DMode) {
+        exitRepair2DMode()
       }
     },
-    [
-      correction2DMode,
-      matchId,
-      activeCamera?.index,
-    ],
-  )
-
-  // 讀的是修正後資料時，畫面上的 2D 點立刻換掉，兩兩重建與品質檢查
-  // 只重算這一格（整個 rally 重算要好幾秒）
-  const applyCorrectionToView = (
-    cameraIndex,
-    frame,
-    point,
-  ) => {
-    const state = useAppStore.getState()
-
-    if (state.ball2DSource !== 'corrected') return
-
-    if (point) {
-      state.upsertBall2DPoints(
-        cameraIndex,
-        [
-          {
-            camera_index: cameraIndex,
-            frame,
-            ...point,
-          },
-        ],
-      )
-    } else {
-      state.removeBall2DPoints(
-        cameraIndex,
-        [frame],
-      )
-    }
-
-    state.notifyBall2DCorrected(frame)
-  }
-
-  const saveCorrection2D = async payload => {
-    if (matchId == null) return
-
-    setCorrection2DSaving(true)
-    setCorrection2DError('')
-
-    try {
-      const result = await api.saveBall2DCorrection(
-        matchId,
-        payload,
-      )
-
-      if (useAppStore.getState().matchId !== matchId) return
-
-      useAppStore.getState().upsertBall2DCorrection(
-        result
-      )
-      applyCorrectionToView(
-        result.camera_index,
-        result.frame,
-        {
-          visibility: result.visibility,
-          x: result.x,
-          y: result.y,
-          corrected: true,
-        },
-      )
-
-      if (correction2DAdvance) {
-        setCurrentFrame(
-          payload.frame + 1
-        )
-      }
-    } catch (error) {
-      console.error(error)
-      setCorrection2DError(
-        error?.message
-        || String(error)
-      )
-    } finally {
-      setCorrection2DSaving(false)
-    }
-  }
-
-  const markCorrection2DHidden = () => {
-    if (
-      !Number.isInteger(
-        Number(activeCamera?.index),
-      )
-    ) {
-      return
-    }
-
-    saveCorrection2D({
-      camera_index: Number(activeCamera.index),
-      frame: currentFrame,
-      visibility: 0,
-      x: 0,
-      y: 0,
-    })
-  }
-
-  const clearCorrection2D = async () => {
-    if (
-      matchId == null
-      || !activeCorrection
-    ) {
-      return
-    }
-
-    setCorrection2DSaving(true)
-    setCorrection2DError('')
-
-    try {
-      const result = await api.deleteBall2DCorrection(
-        matchId,
-        activeCorrection.camera_index,
-        activeCorrection.frame,
-      )
-
-      if (useAppStore.getState().matchId !== matchId) return
-
-      useAppStore.getState().removeBall2DCorrection(
-        result.camera_index,
-        result.frame,
-      )
-      applyCorrectionToView(
-        result.camera_index,
-        result.frame,
-        result.original
-          ? {
-              ...result.original,
-              corrected: false,
-            }
-          : null,
-      )
-    } catch (error) {
-      console.error(error)
-      setCorrection2DError(
-        error?.message
-        || String(error)
-      )
-    } finally {
-      setCorrection2DSaving(false)
-    }
-  }
-
-  const handleCorrection2DPointerDown = event => {
-    if (
-      !correction2DMode
-      || correction2DSaving
-      || !Number.isInteger(
-        Number(activeCamera?.index),
-      )
-    ) {
-      return
-    }
-
-    event.preventDefault()
-    event.stopPropagation()
-    setPlaying(false)
-
-    const point = getImagePointFromPointer({
-      event,
-      canvas: overlayCanvasRef.current,
-      container: videoWrapRef.current,
-      video: videoRef.current,
-      cameraParams: activeCameraParams,
-    })
-
-    if (!point) {
-      setCorrection2DError(
-        '請點在影片畫面範圍內'
-      )
-      return
-    }
-
-    saveCorrection2D({
-      camera_index: Number(activeCamera.index),
-      frame: currentFrame,
-      visibility: 1,
-      x: point.x,
-      y: point.y,
-    })
-  }
-
-  const toggleCorrection2DMode = () => {
-    if (correction2DMode) {
-      setCorrection2DMode(false)
-      return
-    }
-
-    if (repair2DMode) {
-      setRepair2DMode(false)
-      resetRepair2DWork(null)
-    }
-
-    setPlaying(false)
-    setCorrection2DError('')
-    setCorrection2DMode(true)
-  }
+  })
 
   const activeSource = useMemo(
     () => {
@@ -1475,6 +508,16 @@ export default function VideoPanel() {
     && activeSource
       ? `${activeCamera.id}|${activeSource}`
       : null
+  )
+
+  // 影片內容（object-contain 之後）在 videoWrap 裡的範圍，放大鏡用
+  const getVideoContentRect = useCallback(
+    () => (
+      videoWrapRef.current && videoRef.current
+        ? getObjectContainRect(videoWrapRef.current, videoRef.current)
+        : null
+    ),
+    [],
   )
 
   const redrawOverlay = () => {
@@ -1506,10 +549,6 @@ export default function VideoPanel() {
       repairPreviewPoint: (
         repair2DPreviewPoint
       ),
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
       correctionOverlay,
     })
   }
@@ -1550,6 +589,10 @@ export default function VideoPanel() {
     ],
   )
 
+  // ResizeObserver 透過 ref 呼叫最新的 redrawOverlay，就不用每格重新掛一次
+  const redrawOverlayRef = useRef(redrawOverlay)
+  redrawOverlayRef.current = redrawOverlay
+
   useEffect(
     () => {
       redrawOverlay()
@@ -1566,51 +609,11 @@ export default function VideoPanel() {
       repair2DMode,
       activeRepair2DObservation,
       repair2DPreviewPoint,
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
       correctionOverlay,
     ],
   )
 
-  useEffect(
-    () => {
-      const handleResize = () => {
-        redrawOverlay()
-      }
-
-      window.addEventListener(
-        'resize',
-        handleResize,
-      )
-
-      return () => {
-        window.removeEventListener(
-          'resize',
-          handleResize,
-        )
-      }
-    },
-    [
-      activeCameraParams,
-      trajectoryMap,
-      activeBall2DMap,
-      currentFrame,
-      showProjection,
-      showBall2D,
-      ball2DAvailable,
-      repair2DMode,
-      activeRepair2DObservation,
-      repair2DPreviewPoint,
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
-      correctionOverlay,
-    ],
-  )
-
+  // 視窗縮放也會改到這個容器的大小，所以不另外聽 window resize
   useEffect(
     () => {
       const target = (
@@ -1621,12 +624,8 @@ export default function VideoPanel() {
         return undefined
       }
 
-      const observer = (
-        new ResizeObserver(
-          () => {
-            redrawOverlay()
-          },
-        )
+      const observer = new ResizeObserver(
+        () => redrawOverlayRef.current(),
       )
 
       observer.observe(
@@ -1639,90 +638,90 @@ export default function VideoPanel() {
     },
     [
       activeSource,
-      activeCameraParams,
-      trajectoryMap,
-      activeBall2DMap,
-      currentFrame,
-      showProjection,
-      showBall2D,
-      ball2DAvailable,
-      repair2DMode,
-      activeRepair2DObservation,
-      repair2DPreviewPoint,
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
-      correctionOverlay,
     ],
   )
 
   useEffect(
     () => {
       ball2DInflightRef.current = new Set()
-
-      setRepair2DMode(false)
-      setRepair2DFrame(null)
-      setRepair2DObservations({})
-      setRepair2DPreview(null)
-      setRepair2DStatus('idle')
-      setRepair2DError('')
-      setLastRepair2DId(null)
-
-      setCorrection2DMode(false)
-      setCorrection2DError('')
     },
     [
       matchId,
     ],
   )
 
-  useEffect(
-    () => {
-      if (
-        !repair2DMode
-        || lastRepair2DId != null
-      ) {
-        return
-      }
+  // 整台相機的 2D 球點一次抓完
+  const loadBall2DCamera = cameraIndex => {
+    if (
+      hasBall2DCameraLoaded(
+        cameraIndex,
+      )
+    ) {
+      return
+    }
 
-      if (
-        repair2DFrame == null
-        || repair2DFrame
-          !== currentFrame
-      ) {
-        setRepair2DFrame(
-          currentFrame
+    // 同一台相機、同一個 2D 來源只發一次；換來源後舊的請求不擋新的
+    const inflightKey = `${cameraIndex}:${ball2DSource}`
+
+    if (
+      ball2DInflightRef.current.has(
+        inflightKey,
+      )
+    ) {
+      return
+    }
+
+    ball2DInflightRef.current.add(
+      inflightKey,
+    )
+
+    /*
+     * 切換相機時把這台的 2D 球點一次抓完，
+     * 不隨播放位置做滑動視窗。
+     *
+     * 實測單台約 1.6MB / 0.9s，和開場就一次載完的
+     * 3D 軌跡（2.8MB）同一個量級。原本的 ±300 格視窗
+     * 是以 `${matchId}-${cameraIndex}-${start}-${end}` 去重，
+     * 但 start/end 隨播放每格都在變，去重從來沒生效過：
+     * 回應還沒回來就已經每一格再發一次請求。
+     */
+    ;(async () => {
+      try {
+        const points = await api.getTraj2D(
+          matchId,
+          cameraIndex,
+          0,
+          ALL_FRAMES,
+          ball2DSource,
         )
-        setRepair2DObservations({})
-        setRepair2DPreview(null)
-        setRepair2DStatus('idle')
-        setRepair2DError('')
-      }
-    },
-    [
-      currentFrame,
-      repair2DMode,
-      repair2DFrame,
-      lastRepair2DId,
-    ],
-  )
 
-  useEffect(
-    () => {
-      if (
-        repair2DMode
-        && playing
-      ) {
-        setPlaying(false)
+        // 等待期間換了資料集或 2D 來源，這批已經作廢
+        if (
+          useAppStore.getState().matchId
+          !== matchId
+          || useAppStore.getState().ball2DSource
+          !== ball2DSource
+        ) {
+          return
+        }
+
+        upsertBall2DPoints(
+          cameraIndex,
+          points,
+        )
+
+        markBall2DCameraLoaded(
+          cameraIndex,
+        )
+      } catch (error) {
+        console.error(error)
+      } finally {
+        ball2DInflightRef.current.delete(
+          inflightKey,
+        )
       }
-    },
-    [
-      repair2DMode,
-      playing,
-      setPlaying,
-    ],
-  )
+    })()
+  }
 
   useEffect(
     () => {
@@ -1739,79 +738,9 @@ export default function VideoPanel() {
         return
       }
 
-      const cameraIndex = Number(
-        activeCamera.index,
+      loadBall2DCamera(
+        Number(activeCamera.index),
       )
-
-      if (
-        hasBall2DCameraLoaded(
-          cameraIndex,
-        )
-      ) {
-        return
-      }
-
-      // 同一台相機、同一個 2D 來源只發一次；換來源後舊的請求不擋新的
-      const inflightKey = `${cameraIndex}:${ball2DSource}`
-
-      if (
-        ball2DInflightRef.current.has(
-          inflightKey,
-        )
-      ) {
-        return
-      }
-
-      ball2DInflightRef.current.add(
-        inflightKey,
-      )
-
-      /*
-       * 切換相機時把這台的 2D 球點一次抓完，
-       * 不隨播放位置做滑動視窗。
-       *
-       * 實測單台約 1.6MB / 0.9s，和開場就一次載完的
-       * 3D 軌跡（2.8MB）同一個量級。原本的 ±300 格視窗
-       * 是以 `${matchId}-${cameraIndex}-${start}-${end}` 去重，
-       * 但 start/end 隨播放每格都在變，去重從來沒生效過：
-       * 回應還沒回來就已經每一格再發一次請求。
-       */
-      ;(async () => {
-        try {
-          const points = await api.getTraj2D(
-            matchId,
-            cameraIndex,
-            0,
-            ALL_FRAMES,
-            ball2DSource,
-          )
-
-          // 等待期間換了資料集或 2D 來源，這批已經作廢
-          if (
-            useAppStore.getState().matchId
-            !== matchId
-            || useAppStore.getState().ball2DSource
-            !== ball2DSource
-          ) {
-            return
-          }
-
-          upsertBall2DPoints(
-            cameraIndex,
-            points,
-          )
-
-          markBall2DCameraLoaded(
-            cameraIndex,
-          )
-        } catch (error) {
-          console.error(error)
-        } finally {
-          ball2DInflightRef.current.delete(
-            inflightKey,
-          )
-        }
-      })()
     },
     [
       matchId,
@@ -1960,414 +889,23 @@ export default function VideoPanel() {
       cameraId
     )
 
-    lastVideoDrivenFrameRef.current = (
-      null
-    )
+    forgetVideoFrame()
   }
 
-  useEffect(
-    () => {
-      const video = (
-        videoRef.current
-      )
-
-      if (!video) {
-        return
-      }
-
-      try {
-        video.playbackRate = (
-          safePlaybackRate
-        )
-      } catch {
-        // Ignore unsupported playback rate.
-      }
-    },
-    [
-      safePlaybackRate,
-      activeSource,
-      activeCameraId,
-    ],
-  )
-
-  useEffect(
-    () => {
-      const video = (
-        videoRef.current
-      )
-
-      if (!video) {
-        return
-      }
-
-      try {
-        video.playbackRate = (
-          safePlaybackRate
-        )
-      } catch {
-        // Ignore unsupported playback rate.
-      }
-
-      if (
-        playing
-        && activeSource
-      ) {
-        const promise = (
-          video.play()
-        )
-
-        if (
-          promise
-          && typeof promise.catch
-            === 'function'
-        ) {
-          promise.catch(
-            () => {}
-          )
-        }
-      } else {
-        video.pause()
-      }
-    },
-    [
-      playing,
-      activeSource,
-      safePlaybackRate,
-    ],
-  )
-
-  useEffect(
-    () => {
-      const video = (
-        videoRef.current
-      )
-
-      if (
-        !video
-        || !activeCamera
-        || !fps
-      ) {
-        return
-      }
-
-      if (
-        syncFromVideoRef.current
-      ) {
-        return
-      }
-
-      const targetTime = (
-        getCameraVideoTime(
-          currentFrame,
-          fps,
-          activeCamera,
-        )
-      )
-
-      if (
-        !Number.isFinite(
-          targetTime
-        )
-      ) {
-        return
-      }
-
-      const difference = Math.abs(
-        video.currentTime
-        - targetTime
-      )
-
-      const lastVideoFrame = (
-        lastVideoDrivenFrameRef.current
-      )
-
-      const frameDifference = (
-        lastVideoFrame == null
-          ? Infinity
-          : Math.abs(
-              currentFrame
-              - lastVideoFrame
-            )
-      )
-
-      const tolerance = Math.max(
-        2,
-        Math.round(
-          fps * 0.08
-        ),
-      )
-
-      const normalPlaybackUpdate = (
-        playing
-        && frameDifference
-          <= tolerance
-      )
-
-      if (normalPlaybackUpdate) {
-        return
-      }
-
-      const seekThreshold = (
-        playing
-          ? 0.025
-          : 0.015
-      )
-
-      if (
-        difference
-        > seekThreshold
-      ) {
-        try {
-          video.currentTime = (
-            targetTime
-          )
-        } catch {
-          // Ignore invalid seek.
-        }
-      }
-    },
-    [
-      currentFrame,
-      fps,
-      activeCamera,
-      activeSource,
-      playing,
-    ],
-  )
-
-  useEffect(
-    () => {
-      const video = (
-        videoRef.current
-      )
-
-      if (
-        !video
-        || !activeCamera
-        || !fps
-      ) {
-        return undefined
-      }
-
-      let callbackId = null
-      let stopped = false
-
-      const updateFrame = (
-        now,
-        metadata,
-      ) => {
-        if (
-          stopped
-          || !videoRef.current
-        ) {
-          return
-        }
-
-        const mediaTime = (
-          metadata?.mediaTime
-          ?? videoRef.current.currentTime
-        )
-
-        const frame = (
-          getGlobalFrameFromCameraTime(
-            mediaTime,
-            fps,
-            activeCamera,
-          )
-        )
-
-        lastVideoDrivenFrameRef.current = (
-          frame
-        )
-
-        if (
-          !useAppStore.getState().playing
-        ) {
-          if (
-            videoRef.current
-              .requestVideoFrameCallback
-            && !stopped
-          ) {
-            callbackId = (
-              videoRef.current
-              .requestVideoFrameCallback(
-                updateFrame
-              )
-            )
-          }
-
-          return
-        }
-
-        syncFromVideoRef.current = true
-
-        if (
-          previewRange
-          && frame
-            >= previewRange.endFrame
-        ) {
-          const endFrame = (
-            previewRange.endFrame
-          )
-
-          lastVideoDrivenFrameRef.current = (
-            endFrame
-          )
-
-          setCurrentFrame(
-            endFrame
-          )
-
-          setCurrentTime(
-            endFrame / fps
-          )
-
-          setPlaying(false)
-
-          syncFromVideoRef.current = false
-
-          return
-        }
-
-        setCurrentFrame(
-          frame
-        )
-
-        setCurrentTime(
-          frame / fps
-        )
-
-        syncFromVideoRef.current = false
-
-        if (
-          videoRef.current
-            .requestVideoFrameCallback
-          && !stopped
-        ) {
-          callbackId = (
-            videoRef.current
-            .requestVideoFrameCallback(
-              updateFrame
-            )
-          )
-        }
-      }
-
-      if (
-        video
-          .requestVideoFrameCallback
-      ) {
-        callbackId = (
-          video
-          .requestVideoFrameCallback(
-            updateFrame
-          )
-        )
-      }
-
-      return () => {
-        stopped = true
-
-        if (
-          callbackId
-          && video
-            .cancelVideoFrameCallback
-        ) {
-          video.cancelVideoFrameCallback(
-            callbackId
-          )
-        }
-      }
-    },
-    [
-      fps,
-      activeCamera,
-      previewRange,
-      setCurrentFrame,
-      setCurrentTime,
-      setPlaying,
-      activeSource,
-    ],
-  )
-
-  const handleTimeUpdate = () => {
-    const video = (
-      videoRef.current
-    )
-
-    if (
-      !video
-      || !activeCamera
-      || !fps
-    ) {
-      return
-    }
-
-    if (
-      video
-        .requestVideoFrameCallback
-    ) {
-      return
-    }
-
-    const frame = (
-      getGlobalFrameFromCameraTime(
-        video.currentTime,
-        fps,
-        activeCamera,
-      )
-    )
-
-    lastVideoDrivenFrameRef.current = (
-      frame
-    )
-
-    if (
-      !useAppStore.getState().playing
-    ) {
-      return
-    }
-
-    syncFromVideoRef.current = true
-
-    if (
-      previewRange
-      && frame
-        >= previewRange.endFrame
-    ) {
-      const endFrame = (
-        previewRange.endFrame
-      )
-
-      lastVideoDrivenFrameRef.current = (
-        endFrame
-      )
-
-      setCurrentFrame(
-        endFrame
-      )
-
-      setCurrentTime(
-        endFrame / fps
-      )
-
-      setPlaying(false)
-
-      syncFromVideoRef.current = false
-
-      return
-    }
-
-    setCurrentFrame(
-      frame
-    )
-
-    setCurrentTime(
-      frame / fps
-    )
-
-    syncFromVideoRef.current = false
-  }
+  const {
+    handleTimeUpdate,
+    forgetVideoFrame,
+  } = useVideoClock({
+    videoRef,
+    activeCamera,
+    activeCameraId,
+    activeSource,
+    fps,
+    currentFrame,
+    playing,
+    safePlaybackRate,
+    previewRange,
+  })
 
   useEffect(
     () => {
@@ -2495,315 +1033,6 @@ export default function VideoPanel() {
     [],
   )
 
-  const resetRepair2DWork = (
-    frame = currentFrame
-  ) => {
-    setRepair2DFrame(frame)
-    setRepair2DObservations({})
-    setRepair2DPreview(null)
-    setRepair2DStatus('idle')
-    setRepair2DError('')
-    setLastRepair2DId(null)
-  }
-
-  const toggleRepair2DMode = () => {
-    if (repair2DMode) {
-      setRepair2DMode(false)
-      resetRepair2DWork(null)
-      return
-    }
-
-    if (
-      repairCapableCameraCount < 2
-    ) {
-      return
-    }
-
-    setPlaying(false)
-    setShowProjection(true)
-    setCorrection2DMode(false)
-    setRepair2DMode(true)
-    resetRepair2DWork(
-      currentFrame
-    )
-  }
-
-  const handleRepair2DPointerDown = (
-    event
-  ) => {
-    if (
-      !repair2DMode
-      || lastRepair2DId != null
-      || !projectionAvailable
-      || !Number.isInteger(
-        Number(activeCamera?.index)
-      )
-    ) {
-      return
-    }
-
-    event.preventDefault()
-    event.stopPropagation()
-    setPlaying(false)
-
-    const point = (
-      getImagePointFromPointer({
-        event,
-        canvas: (
-          overlayCanvasRef.current
-        ),
-        container: (
-          videoWrapRef.current
-        ),
-        video: (
-          videoRef.current
-        ),
-        cameraParams: (
-          activeCameraParams
-        ),
-      })
-    )
-
-    if (!point) {
-      setRepair2DError(
-        '請點在影片畫面範圍內'
-      )
-      return
-    }
-
-    const cameraIndex = Number(
-      activeCamera.index
-    )
-
-    setRepair2DFrame(
-      currentFrame
-    )
-    setRepair2DObservations(
-      previous => ({
-        ...previous,
-
-        [cameraIndex]: {
-          camera_index: (
-            cameraIndex
-          ),
-          x: point.x,
-          y: point.y,
-        },
-      }),
-    )
-    setRepair2DPreview(null)
-    setRepair2DStatus('idle')
-    setRepair2DError('')
-  }
-
-  const previewRepair2D = async () => {
-    if (
-      matchId == null
-      || repair2DFrame == null
-      || repair2DObservationList.length
-        < 2
-    ) {
-      setRepair2DError(
-        '請先在至少兩個不同相機點選羽球'
-      )
-      return
-    }
-
-    setRepair2DStatus('previewing')
-    setRepair2DError('')
-
-    try {
-      const result = await api.repairTraj2D(
-        matchId,
-        {
-          frame: repair2DFrame,
-          observations: (
-            repair2DObservationList
-          ),
-          confirm: false,
-        },
-      )
-
-      setRepair2DPreview(
-        result
-      )
-      setRepair2DStatus('previewed')
-    } catch (error) {
-      console.error(error)
-      setRepair2DStatus('error')
-      setRepair2DError(
-        error?.message
-        || String(error)
-      )
-    }
-  }
-
-  const confirmRepair2D = async () => {
-    if (
-      matchId == null
-      || repair2DFrame == null
-      || !repair2DPreview
-      || repair2DObservationList.length
-        < 2
-    ) {
-      setRepair2DError(
-        '請先完成 3D 預覽'
-      )
-      return
-    }
-
-    setRepair2DStatus('saving')
-    setRepair2DError('')
-
-    try {
-      const result = await api.repairTraj2D(
-        matchId,
-        {
-          frame: repair2DFrame,
-          observations: (
-            repair2DObservationList
-          ),
-          confirm: true,
-        },
-      )
-
-      if (result?.trajectory_point) {
-        upsertTrajPoints(
-          [
-            result.trajectory_point,
-          ]
-        )
-      }
-
-      for (
-        const point
-        of result?.ball_2d_points
-          || []
-      ) {
-        upsertBall2DPoints(
-          Number(
-            point.camera_index
-          ),
-          [
-            point,
-          ],
-        )
-        setCameraHasBall2D(
-          Number(
-            point.camera_index
-          ),
-          true,
-        )
-      }
-      if (result?.ball_2d_points?.length) {
-        useAppStore.getState().invalidatePairwisePoints()
-      }
-
-      setRepair2DPreview(
-        result
-      )
-      setLastRepair2DId(
-        result.repair_id
-      )
-      setRepair2DStatus('saved')
-    } catch (error) {
-      console.error(error)
-      setRepair2DStatus('error')
-      setRepair2DError(
-        error?.message
-        || String(error)
-      )
-    }
-  }
-
-  const undoRepair2D = async () => {
-    if (
-      matchId == null
-      || lastRepair2DId == null
-    ) {
-      return
-    }
-
-    setRepair2DStatus('undoing')
-    setRepair2DError('')
-
-    try {
-      const result = (
-        await api.undoTraj2DRepair(
-          matchId,
-          lastRepair2DId,
-        )
-      )
-
-      if (result?.trajectory_point) {
-        upsertTrajPoints(
-          [
-            result.trajectory_point,
-          ]
-        )
-      } else if (
-        result?.trajectory_deleted
-      ) {
-        removeTrajFrames(
-          [
-            result.frame,
-          ]
-        )
-      }
-
-      for (
-        const point
-        of result?.ball_2d_points
-          || []
-      ) {
-        const cameraIndex = Number(
-          point.camera_index
-        )
-
-        if (point.deleted) {
-          removeBall2DPoints(
-            cameraIndex,
-            [
-              point.frame,
-            ],
-          )
-        } else {
-          upsertBall2DPoints(
-            cameraIndex,
-            [
-              point,
-            ],
-          )
-        }
-
-        if (
-          typeof point.has_ball_2d
-          !== 'undefined'
-        ) {
-          setCameraHasBall2D(
-            cameraIndex,
-            point.has_ball_2d,
-          )
-        }
-      }
-      if (result?.ball_2d_points?.length) {
-        useAppStore.getState().invalidatePairwisePoints()
-      }
-
-      setLastRepair2DId(null)
-      setRepair2DPreview(null)
-      setRepair2DObservations({})
-      setRepair2DStatus('undone')
-    } catch (error) {
-      console.error(error)
-      setRepair2DStatus('error')
-      setRepair2DError(
-        error?.message
-        || String(error)
-      )
-    }
-  }
-
   return (
     <div
       className="
@@ -2869,13 +1098,23 @@ export default function VideoPanel() {
               )
 
               // 目前這格這台相機有看得見的 2D 標註；播放中每格都在變，
-              // 只在停下來時標示
+              // 只在停下來時標示。有 2D 修正就照修正（標成看不見就不算），
+              // 2D 來源是原始資料時修正不會反映在 camerasWith2DByFrame 裡
+              const frameCorrection = (
+                ball2DCorrections
+                  .get(Number(camera.index))
+                  ?.get(currentFrame)
+              )
               const has2DAtFrame = (
                 !playing
-                && Boolean(
-                  camerasWith2DByFrame
-                    .get(currentFrame)
-                    ?.has(Number(camera.index))
+                && (
+                  frameCorrection
+                    ? Number(frameCorrection.visibility) === 1
+                    : Boolean(
+                        camerasWith2DByFrame
+                          .get(currentFrame)
+                          ?.has(Number(camera.index))
+                      )
                 )
               )
 
@@ -3007,7 +1246,7 @@ export default function VideoPanel() {
                 className={overlayButtonClass(projectionAvailable, showProjection)}
                 title={
                   projectionAvailable
-                    ? '顯示或隱藏 3D 球點投影'
+                    ? '顯示或隱藏 3D 球點投影，和 3D 場景用同一份軌跡（純 2D 或 ball_traj）'
                     : '此視角沒有 camera params'
                 }
               >
@@ -3030,35 +1269,6 @@ export default function VideoPanel() {
                 2D 標註
               </button>
 
-              <button
-                type="button"
-                disabled={!projectionAvailable}
-                onClick={() => setShowRacketTip(value => !value)}
-                className={overlayButtonClass(projectionAvailable, showRacketTip)}
-                title={
-                  projectionAvailable
-                    ? '顯示或隱藏 3D 球拍拍頂的投影'
-                    : '此視角沒有 camera params'
-                }
-              >
-                <OverlayDot color="#f97316" active={projectionAvailable && showRacketTip} />
-                拍頂
-              </button>
-
-              <button
-                type="button"
-                disabled={!projectionAvailable}
-                onClick={() => setShowHands(value => !value)}
-                className={overlayButtonClass(projectionAvailable, showHands)}
-                title={
-                  projectionAvailable
-                    ? '顯示或隱藏 SMPL 雙手掌心的投影'
-                    : '此視角沒有 camera params'
-                }
-              >
-                <OverlayDot color="#facc15" active={projectionAvailable && showHands} />
-                手掌
-              </button>
             </div>
 
             {/* 在影片上點選的編輯模式 */}
@@ -3219,7 +1429,7 @@ export default function VideoPanel() {
                       === 'function'
                   ) {
                     promise.catch(
-                      () => {}
+                      () => useAppStore.getState().setVideoClockActive(false)
                     )
                   }
                 }
@@ -3267,6 +1477,14 @@ export default function VideoPanel() {
                       'pointer-events-none'
                     ),
               ].join(' ')}
+            />
+
+            <Magnifier
+              active={correction2DMode}
+              videoRef={videoRef}
+              overlayCanvasRef={overlayCanvasRef}
+              containerRef={videoWrapRef}
+              getContentRect={getVideoContentRect}
             />
           </div>
         )}
@@ -3738,6 +1956,9 @@ export default function VideoPanel() {
             onMarkHidden={markCorrection2DHidden}
             onClear={clearCorrection2D}
             onClose={toggleCorrection2DMode}
+            referenceOptions={correction2DReferenceOptions}
+            onToggleReference={toggleCorrection2DReference}
+            guideSummary={correction2DGuideSummary}
           />
         )}
     </div>

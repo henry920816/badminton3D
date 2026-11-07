@@ -5,6 +5,7 @@ import './styles.css'
 
 import App from './App.jsx'
 import DatasetBootstrap from './components/DatasetBootstrap.jsx'
+import { RallyBallDataProvider } from './utils/useRallyBallData.js'
 
 
 const rootElement = document.getElementById(
@@ -17,7 +18,9 @@ ReactDOM.createRoot(
 ).render(
   <React.StrictMode>
     <DatasetBootstrap>
-      <App />
+      <RallyBallDataProvider>
+        <App />
+      </RallyBallDataProvider>
     </DatasetBootstrap>
   </React.StrictMode>,
 )
