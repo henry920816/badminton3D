@@ -133,6 +133,86 @@ export function getObjectContainRect(
 }
 
 
+export function getImagePointFromPointer({
+  event,
+  canvas,
+  container,
+  video,
+  cameraParams,
+}) {
+  if (
+    !event
+    || !canvas
+    || !container
+    || !video
+  ) {
+    return null
+  }
+
+  const rectangle = (
+    getObjectContainRect(
+      container,
+      video,
+    )
+  )
+  const canvasRectangle = (
+    canvas.getBoundingClientRect()
+  )
+  const canvasX = (
+    event.clientX
+    - canvasRectangle.left
+  )
+  const canvasY = (
+    event.clientY
+    - canvasRectangle.top
+  )
+
+  if (
+    canvasX < rectangle.x
+    || canvasX
+      > rectangle.x
+        + rectangle.width
+    || canvasY < rectangle.y
+    || canvasY
+      > rectangle.y
+        + rectangle.height
+  ) {
+    return null
+  }
+
+  const imageWidth = (
+    cameraParams?.imageWidth
+    || video.videoWidth
+    || 1920
+  )
+  const imageHeight = (
+    cameraParams?.imageHeight
+    || video.videoHeight
+    || 1200
+  )
+
+  return {
+    x: (
+      (
+        canvasX
+        - rectangle.x
+      )
+      * imageWidth
+      / rectangle.width
+    ),
+    y: (
+      (
+        canvasY
+        - rectangle.y
+      )
+      * imageHeight
+      / rectangle.height
+    ),
+  }
+}
+
+
+
 export function drawProjectionOverlay({
   canvas,
   container,
