@@ -400,10 +400,6 @@ function drawProjectionOverlay({
   repair2DMode,
   repairObservation,
   repairPreviewPoint,
-  racketTips,
-  showRacketTip,
-  handPoints,
-  showHands,
   correctionOverlay,
 }) {
   if (
@@ -434,21 +430,13 @@ function drawProjectionOverlay({
     `${rectangle.boxHeight}px`
   )
 
-  canvas.width = Math.max(
-    1,
-    Math.round(
-      rectangle.boxWidth
-      * pixelRatio,
-    ),
-  )
+  // 重設 width/height 會重新配置整塊畫布，只在大小真的變了才做；
+  // 下面本來就會 clearRect
+  const pixelWidth = Math.max(1, Math.round(rectangle.boxWidth * pixelRatio))
+  const pixelHeight = Math.max(1, Math.round(rectangle.boxHeight * pixelRatio))
 
-  canvas.height = Math.max(
-    1,
-    Math.round(
-      rectangle.boxHeight
-      * pixelRatio,
-    ),
-  )
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight
 
   const context = (
     canvas.getContext('2d')
@@ -574,64 +562,6 @@ function drawProjectionOverlay({
         radius: 4,
       })
     }
-  }
-
-  const drawProjectedPoints = (
-    points,
-    fillStyle,
-  ) => {
-    for (
-      const point
-      of points
-    ) {
-      const projection = (
-        project3DToImage(
-          point,
-          cameraParams,
-        )
-      )
-
-      if (!projection) {
-        continue
-      }
-
-      drawPoint({
-        u: projection.u,
-        v: projection.v,
-        imageWidth: (
-          cameraParams.imageWidth
-          || video.videoWidth
-          || 1920
-        ),
-        imageHeight: (
-          cameraParams.imageHeight
-          || video.videoHeight
-          || 1200
-        ),
-        fillStyle,
-        radius: 4,
-      })
-    }
-  }
-
-  if (
-    showHands
-    && cameraParams
-  ) {
-    drawProjectedPoints(
-      handPoints,
-      '#facc15',
-    )
-  }
-
-  if (
-    showRacketTip
-    && cameraParams
-  ) {
-    drawProjectedPoints(
-      racketTips,
-      '#f97316',
-    )
   }
 
   const ball2DPoint = (
@@ -828,6 +758,44 @@ function drawProjectionOverlay({
 }
 
 
+// 播放中影片播到某一格時，把播放時間推到那一格。影片是播放時唯一的時鐘
+// （見 Scene3D 的 PlaybackController），所以預覽範圍、in/out 循環和
+// 播到結尾停下也都在這裡處理。
+// 回傳 true 表示時間被拉到別處（循環回 in 點），呼叫端不能把它當成
+// 「跟著影片走」，好讓 seek effect 把影片跳過去。
+function advanceClockFromVideo(frame, fps, previewRange) {
+  const {
+    selection,
+    durationSec,
+    setCurrentFrame,
+    setCurrentTime,
+    setPlaying,
+  } = useAppStore.getState()
+
+  if (previewRange && frame >= previewRange.endFrame) {
+    setCurrentFrame(previewRange.endFrame)
+    setPlaying(false)
+    return false
+  }
+
+  const time = frame / fps
+
+  if (selection.inTime != null && selection.outTime != null) {
+    if (time > selection.outTime || time < selection.inTime) {
+      setCurrentTime(selection.inTime)
+      return true
+    }
+  } else if (durationSec && time >= durationSec) {
+    setCurrentTime(durationSec)
+    setPlaying(false)
+    return false
+  }
+
+  setCurrentFrame(frame)
+  return false
+}
+
+
 export default function VideoPanel() {
   const videoWrapRef = useRef(null)
   const videoRef = useRef(null)
@@ -920,10 +888,6 @@ export default function VideoPanel() {
     state => state.setCurrentFrame
   )
 
-  const setCurrentTime = useAppStore(
-    state => state.setCurrentTime
-  )
-
   // 3D→2D 投影的球和 3D 場景畫同一份（可能是純 2D 補點、平滑過的軌跡）
   const trajectoryMap = useDisplayTrajectoryLookup()
 
@@ -941,10 +905,6 @@ export default function VideoPanel() {
 
   const ball2DByCameraFrame = useAppStore(
     state => state.ball2DByCameraFrame
-  )
-
-  const playerKeypointsByPlayer = useAppStore(
-    state => state.playerKeypointsByPlayer
   )
 
   const upsertBall2DPoints = useAppStore(
@@ -1014,17 +974,6 @@ export default function VideoPanel() {
     showBall2D,
     setShowBall2D,
   ] = useState(true)
-
-  // 拍頂、手掌的投影預設關掉，需要時再從工具列打開
-  const [
-    showRacketTip,
-    setShowRacketTip,
-  ] = useState(false)
-
-  const [
-    showHands,
-    setShowHands,
-  ] = useState(false)
 
   const [
     videoReadyIdentity,
@@ -1168,30 +1117,6 @@ export default function VideoPanel() {
           || null
         )
       : null
-  )
-
-  const {
-    racketTips,
-    handPoints,
-  } = useMemo(
-    () => {
-      const keypoints = Object.values(
-        playerKeypointsByPlayer
-        || {},
-      )
-
-      return {
-        racketTips: keypoints
-          .map(item => item.racketTip)
-          .filter(Boolean),
-
-        handPoints: keypoints
-          .flatMap(item => item.hands || []),
-      }
-    },
-    [
-      playerKeypointsByPlayer,
-    ],
   )
 
   const activeBall2DMap = useMemo(
@@ -1802,10 +1727,6 @@ export default function VideoPanel() {
       repairPreviewPoint: (
         repair2DPreviewPoint
       ),
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
       correctionOverlay,
     })
   }
@@ -1846,6 +1767,10 @@ export default function VideoPanel() {
     ],
   )
 
+  // ResizeObserver 透過 ref 呼叫最新的 redrawOverlay，就不用每格重新掛一次
+  const redrawOverlayRef = useRef(redrawOverlay)
+  redrawOverlayRef.current = redrawOverlay
+
   useEffect(
     () => {
       redrawOverlay()
@@ -1862,51 +1787,11 @@ export default function VideoPanel() {
       repair2DMode,
       activeRepair2DObservation,
       repair2DPreviewPoint,
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
       correctionOverlay,
     ],
   )
 
-  useEffect(
-    () => {
-      const handleResize = () => {
-        redrawOverlay()
-      }
-
-      window.addEventListener(
-        'resize',
-        handleResize,
-      )
-
-      return () => {
-        window.removeEventListener(
-          'resize',
-          handleResize,
-        )
-      }
-    },
-    [
-      activeCameraParams,
-      trajectoryMap,
-      activeBall2DMap,
-      currentFrame,
-      showProjection,
-      showBall2D,
-      ball2DAvailable,
-      repair2DMode,
-      activeRepair2DObservation,
-      repair2DPreviewPoint,
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
-      correctionOverlay,
-    ],
-  )
-
+  // 視窗縮放也會改到這個容器的大小，所以不另外聽 window resize
   useEffect(
     () => {
       const target = (
@@ -1917,12 +1802,8 @@ export default function VideoPanel() {
         return undefined
       }
 
-      const observer = (
-        new ResizeObserver(
-          () => {
-            redrawOverlay()
-          },
-        )
+      const observer = new ResizeObserver(
+        () => redrawOverlayRef.current(),
       )
 
       observer.observe(
@@ -1935,21 +1816,6 @@ export default function VideoPanel() {
     },
     [
       activeSource,
-      activeCameraParams,
-      trajectoryMap,
-      activeBall2DMap,
-      currentFrame,
-      showProjection,
-      showBall2D,
-      ball2DAvailable,
-      repair2DMode,
-      activeRepair2DObservation,
-      repair2DPreviewPoint,
-      racketTips,
-      showRacketTip,
-      handPoints,
-      showHands,
-      correctionOverlay,
     ],
   )
 
@@ -2321,8 +2187,10 @@ export default function VideoPanel() {
           && typeof promise.catch
             === 'function'
         ) {
+          // 瀏覽器擋掉播放（例如沒有使用者操作的有聲自動播放）時，
+          // 影片不會前進，改由 3D 場景推進時間
           promise.catch(
-            () => {}
+            () => useAppStore.getState().setVideoClockActive(false)
           )
         }
       } else {
@@ -2333,6 +2201,46 @@ export default function VideoPanel() {
       playing,
       activeSource,
       safePlaybackRate,
+    ],
+  )
+
+  // 影片載入好（有 metadata）就由影片當播放時鐘；載入失敗、換來源或
+  // 卸載時交還給 3D 場景。緩衝中仍算影片的：時間停著等影片，不讓 3D
+  // 先跑走、回頭又把影片 seek 過去
+  useEffect(
+    () => {
+      const video = videoRef.current
+      const { setVideoClockActive, setPlaying: stopPlaying } = useAppStore.getState()
+
+      if (!video || !activeSource) {
+        setVideoClockActive(false)
+        return undefined
+      }
+
+      const activate = () => setVideoClockActive(true)
+      const deactivate = () => setVideoClockActive(false)
+      const handleEnded = () => stopPlaying(false)
+
+      if (video.readyState >= 1 && !video.error) activate()
+
+      video.addEventListener('loadedmetadata', activate)
+      video.addEventListener('playing', activate)
+      video.addEventListener('error', deactivate)
+      video.addEventListener('emptied', deactivate)
+      video.addEventListener('ended', handleEnded)
+
+      return () => {
+        video.removeEventListener('loadedmetadata', activate)
+        video.removeEventListener('playing', activate)
+        video.removeEventListener('error', deactivate)
+        video.removeEventListener('emptied', deactivate)
+        video.removeEventListener('ended', handleEnded)
+        deactivate()
+      }
+    },
+    [
+      activeSource,
+      activeCamera?.id,
     ],
   )
 
@@ -2500,43 +2408,7 @@ export default function VideoPanel() {
         }
 
         syncFromVideoRef.current = true
-
-        if (
-          previewRange
-          && frame
-            >= previewRange.endFrame
-        ) {
-          const endFrame = (
-            previewRange.endFrame
-          )
-
-          lastVideoDrivenFrameRef.current = (
-            endFrame
-          )
-
-          setCurrentFrame(
-            endFrame
-          )
-
-          setCurrentTime(
-            endFrame / fps
-          )
-
-          setPlaying(false)
-
-          syncFromVideoRef.current = false
-
-          return
-        }
-
-        setCurrentFrame(
-          frame
-        )
-
-        setCurrentTime(
-          frame / fps
-        )
-
+        advanceClockFromVideo(frame, fps, previewRange)
         syncFromVideoRef.current = false
 
         if (
@@ -2583,9 +2455,6 @@ export default function VideoPanel() {
       fps,
       activeCamera,
       previewRange,
-      setCurrentFrame,
-      setCurrentTime,
-      setPlaying,
       activeSource,
     ],
   )
@@ -2629,43 +2498,7 @@ export default function VideoPanel() {
     }
 
     syncFromVideoRef.current = true
-
-    if (
-      previewRange
-      && frame
-        >= previewRange.endFrame
-    ) {
-      const endFrame = (
-        previewRange.endFrame
-      )
-
-      lastVideoDrivenFrameRef.current = (
-        endFrame
-      )
-
-      setCurrentFrame(
-        endFrame
-      )
-
-      setCurrentTime(
-        endFrame / fps
-      )
-
-      setPlaying(false)
-
-      syncFromVideoRef.current = false
-
-      return
-    }
-
-    setCurrentFrame(
-      frame
-    )
-
-    setCurrentTime(
-      frame / fps
-    )
-
+    advanceClockFromVideo(frame, fps, previewRange)
     syncFromVideoRef.current = false
   }
 
@@ -3340,36 +3173,6 @@ export default function VideoPanel() {
                 2D 標註
               </button>
 
-              <button
-                type="button"
-                disabled={!projectionAvailable}
-                onClick={() => setShowRacketTip(value => !value)}
-                className={overlayButtonClass(projectionAvailable, showRacketTip)}
-                title={
-                  projectionAvailable
-                    ? '顯示或隱藏 3D 球拍拍頂的投影'
-                    : '此視角沒有 camera params'
-                }
-              >
-                <OverlayDot color="#f97316" active={projectionAvailable && showRacketTip} />
-                拍頂
-              </button>
-
-              <button
-                type="button"
-                disabled={!projectionAvailable}
-                onClick={() => setShowHands(value => !value)}
-                className={overlayButtonClass(projectionAvailable, showHands)}
-                title={
-                  projectionAvailable
-                    ? '顯示或隱藏 SMPL 雙手掌心的投影'
-                    : '此視角沒有 camera params'
-                }
-              >
-                <OverlayDot color="#facc15" active={projectionAvailable && showHands} />
-                手掌
-              </button>
-
             </div>
 
             {/* 在影片上點選的編輯模式 */}
@@ -3530,7 +3333,7 @@ export default function VideoPanel() {
                       === 'function'
                   ) {
                     promise.catch(
-                      () => {}
+                      () => useAppStore.getState().setVideoClockActive(false)
                     )
                   }
                 }

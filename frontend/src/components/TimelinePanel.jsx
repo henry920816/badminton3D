@@ -737,7 +737,14 @@ export default function TimelinePanel() {
     }
   }, [currentTime, playing, isScrubbing, draggingHit, isPanning, scrollLeft, pxPerSec, dimensions.width])
 
-  useEffect(() => {
+  // 播放時播放線固定在中間、內容跟著捲，所以每格都得重畫；但同一格裡
+  // currentTime 變了之後 scrollLeft 也會跟著變（見上面的 effect），直接
+  // 在 effect 裡畫會一格畫兩次。改成排進 requestAnimationFrame，一格最多
+  // 畫一次，畫的時候用最新一次 render 的值（drawTimelineRef）
+  const drawTimelineRef = useRef(null)
+  const drawFrameIdRef = useRef(null)
+
+  drawTimelineRef.current = () => {
     const canvas = canvasRef.current
     if (!canvas || dimensions.width === 0 || dimensions.height === 0) return
 
@@ -746,8 +753,10 @@ export default function TimelinePanel() {
     const w = dimensions.width
     const h = canvasHeight
 
-    canvas.width = w * scale
-    canvas.height = h * scale
+    // 重設 width/height 會重新配置整塊畫布，只在大小變了才做；
+    // 下面會整塊塗底色，不用另外清
+    if (canvas.width !== Math.round(w * scale)) canvas.width = Math.round(w * scale)
+    if (canvas.height !== Math.round(h * scale)) canvas.height = Math.round(h * scale)
     ctx.setTransform(scale, 0, 0, scale, 0, 0)
 
     ctx.fillStyle = '#09090b'
@@ -1338,6 +1347,24 @@ export default function TimelinePanel() {
         )
       }
     }
+  }
+
+  // 取消時要把 id 清掉：開發模式的 StrictMode 會掛載、卸載、再掛載一次，
+  // 留著舊 id 的話下面會以為已經排好，之後就再也不畫
+  useEffect(() => () => {
+    if (drawFrameIdRef.current != null) {
+      cancelAnimationFrame(drawFrameIdRef.current)
+      drawFrameIdRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (drawFrameIdRef.current != null) return
+
+    drawFrameIdRef.current = requestAnimationFrame(() => {
+      drawFrameIdRef.current = null
+      drawTimelineRef.current()
+    })
   }, [
     dimensions,
     canvasHeight,

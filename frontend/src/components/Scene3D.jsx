@@ -246,17 +246,24 @@ function PairwiseTrajectory({ points }) {
   )
 }
 
+// 沒有影片可以當時鐘時（還沒載入、載入失敗、這台沒有影片），由 3D 場景
+// 推進播放時間。影片載入好時改由 VideoPanel 依影片實際播到的那格推進，
+// 這裡就不動，免得兩個時鐘互相拉扯、播放線來回跳格。
+// 直接在 useFrame 裡讀 store，不訂閱 currentTime：這個元件不用每格重新 render
 function PlaybackController() {
-  const playing = useAppStore(s => s.playing)
-  const setPlaying = useAppStore(s => s.setPlaying)
-  const playbackRate = useAppStore(s => s.playbackRate)
-  const currentTime = useAppStore(s => s.currentTime)
-  const setCurrentTime = useAppStore(s => s.setCurrentTime)
-  const selection = useAppStore(s => s.selection)
-  const durationSec = useAppStore(s => s.durationSec)
-
   useFrame((state, delta) => {
-    if (!playing) return
+    const {
+      playing,
+      videoClockActive,
+      playbackRate,
+      currentTime,
+      selection,
+      durationSec,
+      setPlaying,
+      setCurrentTime,
+    } = useAppStore.getState()
+
+    if (!playing || videoClockActive) return
 
     let nextTime = currentTime + delta * playbackRate
 
@@ -313,7 +320,7 @@ const SMPL_JOINT_COUNT = 24
 const SMPL_POSE_FEATURE_COUNT = 207
 const SMPL_POSEDIRS_TEXTURE_WIDTH = 2048
 // 帶貼圖的球拍（由 badminton_dataset/body_models/racket/build_textured_racket.py 產生），
-// 頂點座標與 racket.obj 完全相同，下面的拍面 / 拍頂常數照樣適用
+// 頂點座標與 racket.obj 完全相同，下面的拍面常數照樣適用
 const RACKET_GLB_URL = '/models/racket/racket_textured.glb'
 const RACKET_SCALE = 1
 const RACKET_PIVOT = new THREE.Vector3(0, 0, 0)
@@ -325,12 +332,6 @@ const RACKET_FACE_NORMAL = new THREE.Vector3(0, 1, 0)
 
 // 拍面中心在 local 座標的位置，用來判斷這一拍是不是這位球員打的
 const RACKET_FACE_CENTER = new THREE.Vector3(-0.545, 0, 0)
-
-// 拍頂（拍框最遠端）在 local 座標的位置，racket.obj 的 x 最小值
-const RACKET_TIP = new THREE.Vector3(-0.674, 0, 0)
-
-// 拍頂移動小於這個距離(公尺)就不寫回 store，避免每個 render frame 都觸發更新
-const RACKET_TIP_EPSILON = 1e-4
 
 // 拍面離擊球點超過這個距離(公尺)就當作是對手那一拍，不套用
 const RACKET_AIM_MAX_DISTANCE = 0.75
@@ -354,7 +355,6 @@ const racketAimScratch = {
   correction: new THREE.Quaternion(),
   roll: new THREE.Quaternion(),
   blended: new THREE.Quaternion(),
-  tip: new THREE.Vector3(),
 }
 
 let racketObjectPromise = null
@@ -499,26 +499,6 @@ function applyRacketAim(racket, baseMatrix, contacts, frame, enabled) {
 }
 
 
-// 取目前顯示中球拍的拍頂，轉回軌跡點用的 raw 座標（three 座標的 y、z 反號）
-function getRacketTipPoint(racket) {
-  if (!racket?.visible) return null
-
-  const tip = racketAimScratch.tip.copy(RACKET_TIP).applyMatrix4(racket.matrix)
-
-  return { x: tip.x, y: -tip.y, z: -tip.z }
-}
-
-
-function isSameRacketTip(first, second) {
-  if (!first || !second) return first === second
-
-  return (
-    Math.abs(first.x - second.x) < RACKET_TIP_EPSILON
-    && Math.abs(first.y - second.y) < RACKET_TIP_EPSILON
-    && Math.abs(first.z - second.z) < RACKET_TIP_EPSILON
-  )
-}
-
 function createSmplPoseDirectionsTexture(posedirs) {
   const scalarCount = posedirs.length
   const height = Math.ceil(scalarCount / (SMPL_POSEDIRS_TEXTURE_WIDTH * 4))
@@ -638,10 +618,6 @@ function loadRacketObject() {
 function SmplForwardAvatar({ playerReplay, ballContacts }) {
   const currentFrame = useAppStore(s => s.currentFrame)
   const racketAimEnabled = useAppStore(s => s.racketAimEnabled)
-  const setPlayerKeypoints = useAppStore(s => s.setPlayerKeypoints)
-  const keypointsKey = playerReplay.id
-  const publishedKeypointsRef = useRef(null)
-  const handPointsRef = useRef(null)
   const racketRef = useRef(null)
   const baseRacketMatrixRef = useRef(null)
   const ballContactsRef = useRef(ballContacts)
@@ -691,7 +667,6 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
     requestIdRef.current += 1
     setHasAppliedFrame(false)
     baseRacketMatrixRef.current = null
-    handPointsRef.current = null
     if (racketRef.current) racketRef.current.visible = false
   }, [playerReplay?.start_frame, playerReplay?.frame_count])
 
@@ -780,7 +755,6 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
         }
         uniforms.smplPoseFeatures.value.set(message.poseFeature)
         uniforms.smplTranslation.value.fromArray(message.trans || [0, 0, 0])
-        handPointsRef.current = message.handPoints || null
         setHasAppliedFrame(true)
 
         if (racketRef.current && Array.isArray(message.racketMatrix)) {
@@ -830,37 +804,11 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
     }
   }, [model, material, playerReplay.beta])
 
-  // 影片面板投影的拍頂、手掌要和 3D 畫面上的一致，只在位置變了才寫回 store。
-  // 手掌只在 worker 回覆時換成新陣列，所以比對參照就夠了
-  const publishKeypoints = (posed) => {
-    const racketTip = getRacketTipPoint(racketRef.current)
-    const hands = posed ? handPointsRef.current : null
-    const published = publishedKeypointsRef.current
-
-    if (
-      published
-      && isSameRacketTip(racketTip, published.racketTip)
-      && hands === published.hands
-    ) return
-
-    publishedKeypointsRef.current = { racketTip, hands }
-    setPlayerKeypoints(
-      keypointsKey,
-      racketTip || hands ? { racketTip, hands } : null,
-    )
-  }
-
-  useEffect(() => () => {
-    publishedKeypointsRef.current = null
-    setPlayerKeypoints(keypointsKey, null)
-  }, [keypointsKey, setPlayerKeypoints])
-
   useFrame((state) => {
     if (!ready || !workerRef.current || !geometry) return
     const poseFrame = getLocalPoseFrame(playerReplay, currentFrame)
     if (!poseFrame || poseFrame.valid === false) {
       if (racketRef.current) racketRef.current.visible = false
-      publishKeypoints(false)
       return
     }
 
@@ -873,8 +821,6 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
       currentFrame,
       racketAimEnabled,
     )
-
-    publishKeypoints(true)
 
     if (lastSentFrameRef.current === poseFrame.frame) return
 

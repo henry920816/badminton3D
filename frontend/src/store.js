@@ -160,6 +160,9 @@ export const useAppStore = create(
     currentFrame: 0,
     playing: false,
     playbackRate: 1.0,
+    // 影片載入好時由影片推進時間（VideoPanel），3D 場景就不再自己推，
+    // 免得兩個時鐘互相拉扯、播放線來回跳格
+    videoClockActive: false,
 
     selection: {
       inTime: null,
@@ -277,11 +280,6 @@ export const useAppStore = create(
 
     // 3D 場景下方的「這一格的位置怎麼決定的」說明列，預設關
     showBallProvenance: false,
-
-    // 每位球員目前畫面上的關鍵點世界座標（與軌跡點同一套 raw 座標），
-    // 由 3D 場景寫入、影片面板拿去投影。key 是 playerReplay.id，
-    // 值是 { racketTip, hands }
-    playerKeypointsByPlayer: {},
 
     pxPerSec: 100,
     scrollLeft: 0,
@@ -459,6 +457,10 @@ export const useAppStore = create(
           ),
         }),
       )
+    },
+
+    setVideoClockActive: value => {
+      set({ videoClockActive: Boolean(value) })
     },
 
     setPlaybackRate: rate => {
@@ -1018,22 +1020,6 @@ export const useAppStore = create(
         state => ({
           racketAimEnabled: !state.racketAimEnabled,
         }),
-      )
-    },
-
-    setPlayerKeypoints: (playerKey, keypoints) => {
-      set(
-        state => {
-          if (!keypoints && !(playerKey in state.playerKeypointsByPlayer)) return {}
-
-          const next = { ...state.playerKeypointsByPlayer }
-          if (keypoints) next[playerKey] = keypoints
-          else delete next[playerKey]
-
-          return {
-            playerKeypointsByPlayer: next,
-          }
-        },
       )
     },
 

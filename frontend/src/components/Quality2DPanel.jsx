@@ -1354,42 +1354,8 @@ export default function Quality2DPanel() {
       )
 
 
-      if (
-        currentFrame
-          >= startFrame
-        && currentFrame
-          <= endFrame
-      ) {
-        const px = (
-          (
-            currentFrame
-            - startFrame
-          )
-          * pxPerFrame
-        )
-
-        ctx.strokeStyle = (
-          '#38bdf8'
-        )
-
-        ctx.lineWidth = (
-          1.5
-        )
-
-        ctx.beginPath()
-
-        ctx.moveTo(
-          px,
-          0,
-        )
-
-        ctx.lineTo(
-          px,
-          height,
-        )
-
-        ctx.stroke()
-      }
+      // 播放線不畫在這裡，是疊在 canvas 上的 div（見 render）：
+      // 播放時每格只需要移動那條線，不用整張格子重畫
 
 
       ctx.strokeStyle = (
@@ -1432,7 +1398,6 @@ export default function Quality2DPanel() {
       statusByFrame,
       lowCoverageByFrame,
       dataReady,
-      currentFrame,
       currentRally,
       viewStartFrame,
       viewEndFrame,
@@ -2362,6 +2327,19 @@ export default function Quality2DPanel() {
                           'none',
                       }}
                     />
+
+                    {currentRally
+                      && currentFrame >= viewStartFrame
+                      && currentFrame <= viewEndFrame && (
+                      <div
+                        className="absolute top-0 pointer-events-none bg-sky-400"
+                        style={{
+                          left: `${((currentFrame - viewStartFrame) / viewFrameCount) * 100}%`,
+                          width: 1.5,
+                          height: rowHeight * totalRows,
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
 
