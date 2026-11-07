@@ -9,6 +9,7 @@ import { useAppStore } from '../store.js'
 import { loadSmplForwardModel } from '../utils/smplForwardAssets.js'
 import { MAX_FRAME_GAP, toThreeVector } from '../utils/ballPath.js'
 import { useRallyBallData } from '../utils/useRallyBallData.js'
+import { scoreAtFrame } from '../utils/matchScore.js'
 import TrajectorySettingsPanel from './TrajectorySettingsPanel.jsx'
 import { formatPairwiseExplanation, usePairwiseExplanation } from '../utils/pairwiseExplanation.js'
 
@@ -1216,6 +1217,43 @@ function BallProvenanceContent() {
 }
 
 
+// 左上角的記分板：目前第幾局、兩隊已贏局數與這局比分（規則見 scoreAtFrame）。
+// 沒有比分資料的比賽不顯示。
+// 放在 App 疊在左上角的「3D 場景 / 專注」標籤下面（top-11），不要蓋住它
+function MatchScoreboard() {
+  const rallies = useAppStore(s => s.rallies)
+  const currentFrame = useAppStore(s => s.currentFrame)
+
+  const sortedRallies = useMemo(
+    () => [...(rallies || [])].sort((a, b) => a.start_frame - b.start_frame),
+    [rallies],
+  )
+  const score = useMemo(
+    () => scoreAtFrame(sortedRallies, currentFrame),
+    [sortedRallies, currentFrame],
+  )
+
+  if (!score) return null
+
+  return (
+    <div className="absolute top-11 left-2 z-20 pointer-events-none select-none rounded border border-zinc-800 bg-zinc-900/75 px-2.5 py-1.5 shadow-lg backdrop-blur-md">
+      <div className="mb-0.5 text-[10px] text-zinc-500">第 {score.gameIndex} 局</div>
+      <table className="text-xs tabular-nums">
+        <tbody>
+          {score.teams.map(team => (
+            <tr key={team.team}>
+              <td className="max-w-[10rem] truncate pr-3 text-zinc-300">{team.name}</td>
+              <td className="pr-2 text-right text-zinc-500">{team.games}</td>
+              <td className="min-w-[1.5rem] text-right font-semibold text-zinc-100">{team.points}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+
 export default function Scene3D() {
   const matchId = useAppStore(s => s.matchId)
   const currentFrame = useAppStore(s => s.currentFrame)
@@ -1389,6 +1427,8 @@ export default function Scene3D() {
           )}
         </div>
       </div>
+
+      <MatchScoreboard />
 
       <Canvas camera={{ position: [8, 5, 8], fov: 55 }}>
         <ambientLight intensity={0.5} />
