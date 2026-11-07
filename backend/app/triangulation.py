@@ -808,7 +808,8 @@ QUALITY_REPROJECTION_THRESHOLD_PX = 12.0
 QUALITY_MIN_RAY_ANGLE_DEGREES = 1.0
 
 
-def _quality_pair_stable(cameras, pair):
+def _pair_ray_angle(cameras, pair) -> float | None:
+    """兩台相機看同一個 2D 點的兩條視線夾角（度）；相機重疊時回傳 None。"""
     rays = []
     centers = []
     for observation in pair:
@@ -820,23 +821,21 @@ def _quality_pair_stable(cameras, pair):
         rays.append(ray)
         centers.append(np.linalg.solve(matrix[:, :3], -matrix[:, 3]))
     if np.linalg.norm(centers[0] - centers[1]) < 1e-8:
-        return False
-    angle = math.degrees(math.acos(float(np.clip(abs(np.dot(*rays)), 0.0, 1.0))))
-    return angle >= QUALITY_MIN_RAY_ANGLE_DEGREES
+        return None
+    return math.degrees(math.acos(float(np.clip(abs(np.dot(*rays)), 0.0, 1.0))))
 
 
-def pairwise_consensus_point(
-    cameras_by_index: dict[int, dict],
-    observations: list[dict],
-    reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
-) -> dict | None:
-    """Reconstruct a frame from pairs supported by the other views.
+def _quality_pair_stable(cameras, pair):
+    angle = _pair_ray_angle(cameras, pair)
+    return angle is not None and angle >= QUALITY_MIN_RAY_ANGLE_DEGREES
 
-    A pair containing an incorrect label can outnumber the correct pairs
-    when only three cameras are available. Require a third agreeing view
-    whenever there are at least three observations, and only use candidates
-    with the largest camera support for the median.
-    """
+
+def _camera_center(camera: dict) -> np.ndarray:
+    matrix = _projection_from_camera(camera)["raw_extrinsic"]
+    return np.linalg.solve(matrix[:, :3], -matrix[:, 3])
+
+
+def _valid_observations(cameras_by_index: dict[int, dict], observations: list[dict]) -> dict[int, dict]:
     observations_by_camera: dict[int, dict] = {}
 
     for observation in observations:
@@ -852,23 +851,70 @@ def pairwise_consensus_point(
         except ValueError:
             continue
 
-    candidates = []
+    return observations_by_camera
+
+
+def _evaluate_pairs(
+    cameras_by_index: dict[int, dict],
+    observations_by_camera: dict[int, dict],
+    reprojection_threshold_px: float,
+) -> list[dict]:
+    """每一組相機配對各自重建，記下這組有沒有通過、沒通過的原因。
+
+    status：
+      ok            通過，可以拿來算共識點
+      parallel      兩條視線夾角太小（< QUALITY_MIN_RAY_ANGLE_DEGREES），深度不穩
+      failed        重建本身失敗（數值問題）
+      reprojection  重建點投影回這兩台，有一台差超過門檻
+      support       這兩台以外，同意這個點（投影在門檻內）的相機不夠多
+    supporters 是同意這個點的相機（含這兩台）；camera_errors 是這個點投影到
+    每台有標註的相機、和標註差幾個像素（[{camera, px}]，說明是哪一台對不上用）。
+    """
+    required = min(3, len(observations_by_camera))
+    records = []
 
     for pair in combinations(
         [observations_by_camera[index] for index in sorted(observations_by_camera)],
         2,
     ):
+        record = {
+            "cameras": [observation["camera_index"] for observation in pair],
+            "angle_deg": None,
+            "max_error_px": None,
+            "supporters": [],
+            "camera_errors": [],
+            "point": None,
+            "status": "failed",
+        }
+        records.append(record)
+
         try:
-            # 兩條視線幾乎平行時，深度方向會被雜訊放大到幾公尺
-            if not _quality_pair_stable(cameras_by_index, pair):
-                continue
+            angle = _pair_ray_angle(cameras_by_index, pair)
+        except (ValueError, np.linalg.LinAlgError, OverflowError, FloatingPointError):
+            continue
+
+        record["angle_deg"] = angle
+
+        # 兩條視線幾乎平行時，深度方向會被雜訊放大到幾公尺
+        if angle is None or angle < QUALITY_MIN_RAY_ANGLE_DEGREES:
+            record["status"] = "parallel"
+            continue
+
+        try:
             result = triangulate_observations(cameras_by_index, list(pair))
         except (ValueError, np.linalg.LinAlgError, OverflowError, FloatingPointError):
             continue
+
+        record["max_error_px"] = result["max_error"]
+
         if result["max_error"] > reprojection_threshold_px:
+            record["status"] = "reprojection"
             continue
+
         point = result["point"]
-        support = 0
+        supporters = []
+        camera_errors = []
+
         for observation in observations_by_camera.values():
             try:
                 projected = project_raw_point(
@@ -877,20 +923,33 @@ def pairwise_consensus_point(
                 )
             except (ValueError, np.linalg.LinAlgError, OverflowError):
                 continue
-            if projected is not None and math.hypot(
+            if projected is None:
+                continue
+            error = math.hypot(
                 projected["x"] - observation["x"],
                 projected["y"] - observation["y"],
-            ) <= reprojection_threshold_px:
-                support += 1
-        if support >= min(3, len(observations_by_camera)):
-            candidates.append((support, [point[axis] for axis in ("x", "y", "z")]))
+            )
+            camera_errors.append({"camera": observation["camera_index"], "px": float(error)})
+            if error <= reprojection_threshold_px:
+                supporters.append(observation["camera_index"])
+
+        record["supporters"] = sorted(supporters)
+        record["camera_errors"] = sorted(camera_errors, key=lambda item: item["camera"])
+        record["point"] = [point[axis] for axis in ("x", "y", "z")]
+        record["status"] = "ok" if len(supporters) >= required else "support"
+
+    return records
+
+
+def _consensus_from_records(records: list[dict], observations_by_camera: dict[int, dict]) -> dict | None:
+    candidates = [record for record in records if record["status"] == "ok"]
 
     if not candidates:
         return None
 
-    strongest_support = max(support for support, _ in candidates)
-    points = [point for support, point in candidates if support == strongest_support]
-    consensus = np.median(np.asarray(points, dtype=np.float64), axis=0)
+    strongest_support = max(len(record["supporters"]) for record in candidates)
+    strongest = [record for record in candidates if len(record["supporters"]) == strongest_support]
+    consensus = np.median(np.asarray([record["point"] for record in strongest], dtype=np.float64), axis=0)
 
     return {
         "point": {
@@ -898,7 +957,142 @@ def pairwise_consensus_point(
             "y": float(consensus[1]),
             "z": float(consensus[2]),
         },
-        "pair_count": len(points),
+        "pair_count": len(strongest),
+        # 這一格有標註的相機數：2 台時最多只配得出 1 組，前端要分得出
+        # 「只有 2 台拍到」和「3 台以上卻只有 1 組互相同意」
+        "camera_count": len(observations_by_camera),
+        # 實際拿來重建的相機（同意度最高的那些配對用到的）
+        "used_cameras": sorted({index for record in strongest for index in record["cameras"]}),
+    }
+
+
+def _consensus_with_trace(
+    cameras_by_index: dict[int, dict],
+    observations: list[dict],
+    reprojection_threshold_px: float,
+    camera_max_distance: dict[int, float] | None,
+) -> tuple[dict | None, dict]:
+    """pairwise_consensus_point 的本體，另外回傳每一步的紀錄（explain 用）。"""
+    observations_by_camera = _valid_observations(cameras_by_index, observations)
+    records = _evaluate_pairs(cameras_by_index, observations_by_camera, reprojection_threshold_px)
+    trace = {
+        "cameras": sorted(observations_by_camera),
+        "required_support": min(3, len(observations_by_camera)),
+        "pairs": records,
+        "limited": [],
+        "retry": None,
+    }
+    result = _consensus_from_records(records, observations_by_camera)
+
+    limits = camera_max_distance or {}
+    limited = [index for index in sorted(observations_by_camera) if index in limits]
+
+    if not limited:
+        return result, trace
+
+    if result is None:
+        drop = set(limited)
+        trace["limited"] = [
+            {"camera": index, "limit": limits[index], "distance": None, "dropped": True}
+            for index in limited
+        ]
+        reason = "blocked"
+    else:
+        point = np.asarray([result["point"][axis] for axis in ("x", "y", "z")])
+        drop = set()
+
+        for index in limited:
+            distance = float(np.linalg.norm(_camera_center(cameras_by_index[index]) - point))
+            too_far = distance > limits[index]
+            trace["limited"].append(
+                {"camera": index, "limit": limits[index], "distance": distance, "dropped": too_far}
+            )
+            if too_far:
+                drop.add(index)
+
+        if not drop:
+            return result, trace
+
+        reason = "too_far"
+
+    remaining = {
+        index: observation
+        for index, observation in observations_by_camera.items()
+        if index not in drop
+    }
+    retry_records = _evaluate_pairs(cameras_by_index, remaining, reprojection_threshold_px)
+    trace["retry"] = {
+        "reason": reason,
+        "cameras": sorted(remaining),
+        "required_support": min(3, len(remaining)),
+        "pairs": retry_records,
+    }
+
+    return _consensus_from_records(retry_records, remaining), trace
+
+
+def pairwise_consensus_point(
+    cameras_by_index: dict[int, dict],
+    observations: list[dict],
+    reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
+    camera_max_distance: dict[int, float] | None = None,
+) -> dict | None:
+    """Reconstruct a frame from pairs supported by the other views.
+
+    A pair containing an incorrect label can outnumber the correct pairs
+    when only three cameras are available. Require a third agreeing view
+    whenever there are at least three observations, and only use candidates
+    with the largest camera support for the median.
+
+    camera_max_distance limits some cameras to balls within that many
+    metres of them (their labels are only accurate up close). The ball's
+    position is not known beforehand, so reconstruct with every camera
+    first; when a limited camera turns out too far from the result, drop it
+    and reconstruct again. If no reconstruction exists with every camera
+    (a limited camera can block the support check), retry without the
+    limited cameras, which cannot be validated then.
+    """
+    result, _ = _consensus_with_trace(
+        cameras_by_index,
+        observations,
+        reprojection_threshold_px,
+        camera_max_distance,
+    )
+    return result
+
+
+def explain_pairwise_frame(
+    cameras_by_index: dict[int, dict],
+    observations: list[dict],
+    reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
+    camera_max_distance: dict[int, float] | None = None,
+) -> dict:
+    """說明一格為什麼重建得出來或重建不出來：哪幾台有標註、每一組配對
+    通過與否（沒通過的原因）、受距離限制的相機有沒有被拿掉，以及最後
+    用了哪些相機。"""
+    result, trace = _consensus_with_trace(
+        cameras_by_index,
+        observations,
+        reprojection_threshold_px,
+        camera_max_distance,
+    )
+
+    def public(records):
+        return [{key: value for key, value in record.items() if key != "point"} for record in records]
+
+    trace["pairs"] = public(trace["pairs"])
+    if trace["retry"]:
+        trace["retry"]["pairs"] = public(trace["retry"]["pairs"])
+
+    return {
+        **trace,
+        "reprojection_threshold_px": reprojection_threshold_px,
+        "min_ray_angle_deg": QUALITY_MIN_RAY_ANGLE_DEGREES,
+        "result": None if result is None else {
+            "pair_count": result["pair_count"],
+            "camera_count": result["camera_count"],
+            "used_cameras": result["used_cameras"],
+        },
     }
 
 

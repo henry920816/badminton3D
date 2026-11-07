@@ -1,3 +1,5 @@
+import * as THREE from 'three'
+
 const DEFAULT_COORDINATE_MODE = 'raw'
 
 const DEFAULT_USE_LENS_DISTORTION = true
@@ -690,4 +692,106 @@ export function projectCourtLines(
       },
     )
     .filter(Boolean)
+}
+
+/**
+ * project3DToImage 的反運算：影像上 (u, v) 這個像素對應的視線，
+ * 回傳 { origin, direction }（direction 是單位向量），座標和傳給
+ * project3DToImage 的點同一套。視線上的點投影回來都落在 (u, v)。
+ *
+ * 鏡頭畸變用迭代反算，和後端 _undistort_normalized 一樣。迭代不一定
+ * 收斂（畸變強的相機在畫面邊緣，多項式會把視野外的點折回畫面內），
+ * 所以最後把視線上的點投影回去檢查，差超過 RAY_MAX_REPROJECTION_PX
+ * 就回傳 null。座標模式都是正負號翻轉，自己就是自己的反函數。
+ */
+// imagePointToRay 反算出來的視線投影回去和原像素差超過這個值就不用
+const RAY_MAX_REPROJECTION_PX = 1
+
+
+export function imagePointToRay(u, v, cameraParams, options = {}) {
+  if (
+    !cameraParams
+    || !Array.isArray(cameraParams.intrinsic)
+    || !Array.isArray(cameraParams.extrinsic)
+    || !Number.isFinite(u)
+    || !Number.isFinite(v)
+  ) {
+    return null
+  }
+
+  const coordinateMode = (
+    options.coordinateMode
+    ?? cameraParams.coordinateMode
+    ?? DEFAULT_COORDINATE_MODE
+  )
+
+  const useLensDistortion = (
+    options.useLensDistortion
+    ?? cameraParams.useLensDistortion
+    ?? DEFAULT_USE_LENS_DISTORTION
+  )
+
+  const [
+    focalX,
+    focalY,
+    centerX,
+    centerY,
+    radial1 = 0,
+    radial2 = 0,
+    tangential1 = 0,
+    tangential2 = 0,
+    radial3 = 0,
+  ] = cameraParams.intrinsic
+
+  const distortedX = (u - centerX - (cameraParams.uOffset || 0)) / focalX
+  const distortedY = (v - centerY - (cameraParams.vOffset || 0)) / focalY
+
+  let x = distortedX
+  let y = distortedY
+
+  if (useLensDistortion) {
+    for (let iteration = 0; iteration < 12; iteration += 1) {
+      const r2 = x * x + y * y
+      const radial = 1 + radial1 * r2 + radial2 * r2 * r2 + radial3 * r2 * r2 * r2
+
+      if (Math.abs(radial) <= 1e-12) return null
+
+      const deltaX = 2 * tangential1 * x * y + tangential2 * (r2 + 2 * x * x)
+      const deltaY = tangential1 * (r2 + 2 * y * y) + 2 * tangential2 * x * y
+
+      x = (distortedX - deltaX) / radial
+      y = (distortedY - deltaY) / radial
+    }
+  }
+
+  if (![x, y].every(Number.isFinite)) return null
+
+  // 外參的旋轉部分不一定是正交矩陣，和後端一樣用一般反矩陣
+  const extrinsic = cameraParams.extrinsic
+  const rotation = new THREE.Matrix3().set(...extrinsic.flatMap(row => row.slice(0, 3)))
+
+  if (Math.abs(rotation.determinant()) < 1e-12) return null
+
+  rotation.invert()
+
+  const translation = new THREE.Vector3(...extrinsic.map(row => row[3]))
+  const origin = translation.clone().negate().applyMatrix3(rotation)
+  const direction = new THREE.Vector3(x, y, 1).sub(translation).applyMatrix3(rotation).sub(origin)
+
+  if (!(direction.length() > 0)) return null
+
+  direction.normalize()
+
+  const ray = {
+    origin: applyProjectionCoordinateTransform(origin.toArray(), coordinateMode),
+    direction: applyProjectionCoordinateTransform(direction.toArray(), coordinateMode),
+  }
+
+  // 視線上離相機 10 公尺的點投影回去要落在 (u, v)
+  const probe = ray.origin.map((value, axis) => value + ray.direction[axis] * 10)
+  const back = project3DToImage(probe, cameraParams, options)
+
+  if (!back || Math.hypot(back.u - u, back.v - v) > RAY_MAX_REPROJECTION_PX) return null
+
+  return ray
 }

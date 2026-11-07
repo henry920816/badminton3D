@@ -193,11 +193,21 @@ class Repair2DApiTest(unittest.TestCase):
         self.assertEqual([row["frame"] for row in rows], [100, 101])
         for row in rows:
             self.assertEqual(row["pair_count"], 1)
+            self.assertEqual(row["camera_count"], len(self.cameras))
             for axis in ("x", "y", "z"):
                 self.assertAlmostEqual(row[axis], target[axis], places=6)
 
         with self.assertRaises(HTTPException):
             get_traj_2d_pairwise(self.match_id, 150, 100, self.db)
+
+        # 排除一台後只剩一台，沒辦法重建
+        self.assertEqual(
+            get_traj_2d_pairwise(self.match_id, 100, 150, self.db, exclude_cameras="1"),
+            [],
+        )
+
+        with self.assertRaises(HTTPException):
+            get_traj_2d_pairwise(self.match_id, 100, 150, self.db, exclude_cameras="a")
 
     def test_preview_does_not_write(self):
         result = repair_traj_from_2d(

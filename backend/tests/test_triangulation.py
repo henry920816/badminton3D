@@ -1,6 +1,7 @@
 import unittest
 
 from app.triangulation import (
+    explain_pairwise_frame,
     pairwise_consensus_point,
     per_view_pairwise_points,
     project_raw_point,
@@ -305,6 +306,67 @@ class TriangulationTest(unittest.TestCase):
         observations[2]["x"] += 40.0
 
         self.assertIsNone(pairwise_consensus_point(cameras, observations))
+
+    def test_pairwise_consensus_camera_max_distance(self):
+        cameras = {
+            index: camera(index, offset)
+            for index, offset in enumerate((0.0, -1.0, 0.8))
+        }
+        expected = {"x": 0.3, "y": -0.2, "z": 5.0}
+        observations = [
+            {"camera_index": index, **project_raw_point(expected, item)}
+            for index, item in cameras.items()
+        ]
+
+        # 球離 cam 2 約 5 公尺：上限 10 公尺時照用
+        near = pairwise_consensus_point(cameras, observations, camera_max_distance={2: 10.0})
+        self.assertEqual(near["used_cameras"], [0, 1, 2])
+        self.assertEqual(near["camera_count"], 3)
+
+        # 上限 1 公尺時拿掉 cam 2 再重建
+        far = pairwise_consensus_point(cameras, observations, camera_max_distance={2: 1.0})
+        self.assertEqual(far["used_cameras"], [0, 1])
+        self.assertEqual(far["camera_count"], 2)
+        self.assert_point_close(far["point"], expected, places=4)
+
+        # 受限的相機標錯、讓三台都通不過時，不用它再試一次
+        observations[2]["x"] += 40.0
+        blocked = pairwise_consensus_point(cameras, observations, camera_max_distance={2: 10.0})
+        self.assertEqual(blocked["used_cameras"], [0, 1])
+        self.assert_point_close(blocked["point"], expected, places=4)
+
+    def test_explain_pairwise_frame(self):
+        cameras = {
+            index: camera(index, offset)
+            for index, offset in enumerate((0.0, -1.0, 0.8))
+        }
+        expected = {"x": 0.3, "y": -0.2, "z": 5.0}
+        observations = [
+            {"camera_index": index, **project_raw_point(expected, item)}
+            for index, item in cameras.items()
+        ]
+        # cam 2 標錯 40 px：三組都通不過（含 cam 2 的重建點投影誤差太大，
+        # 0-1 那組只有兩台同意，不到要求的 3 台）
+        observations[2]["x"] += 40.0
+
+        explained = explain_pairwise_frame(cameras, observations)
+
+        self.assertEqual(explained["cameras"], [0, 1, 2])
+        self.assertEqual(explained["required_support"], 3)
+        self.assertIsNone(explained["result"])
+        statuses = {tuple(pair["cameras"]): pair["status"] for pair in explained["pairs"]}
+        self.assertEqual(statuses[(0, 1)], "support")
+        self.assertEqual(
+            next(pair for pair in explained["pairs"] if pair["cameras"] == [0, 1])["supporters"],
+            [0, 1],
+        )
+        self.assertIn(statuses[(0, 2)], ("reprojection", "support"))
+        self.assertNotIn("point", explained["pairs"][0])
+
+        # cam 2 受距離限制時，拿掉它重試會成功，並記在 retry
+        limited = explain_pairwise_frame(cameras, observations, camera_max_distance={2: 10.0})
+        self.assertEqual(limited["retry"]["reason"], "blocked")
+        self.assertEqual(limited["result"]["used_cameras"], [0, 1])
 
     def test_pairwise_consensus_without_pairs(self):
         cameras = {

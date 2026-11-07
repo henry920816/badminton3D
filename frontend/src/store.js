@@ -251,6 +251,33 @@ export const useAppStore = create(
     // 另外畫一條 2D 標註兩兩重建的 3D 軌跡，和 ball_traj 的灰線比對用
     showPairwiseTrajectory: false,
 
+    // 3D 場景的球與軌跡線用哪一份：
+    //   'ball_traj' 原本的軌跡
+    //   'pure2d'    只用 2D 重建與物理擬合，完全不參考 ball_traj；
+    //               兩者都沒有的格子不顯示
+    trajectoryDisplaySource: 'ball_traj',
+
+    // 純 2D 軌跡的平滑強度，是 SMOOTHING_LEVELS 的 index（0 關、1 弱、
+    // 2 中、3 強）。重建點在球快的地方會抖，逐段擬合去掉抖動（不跨過擊球）
+    displaySmoothingLevel: 2,
+
+    // 純 2D 軌跡要不要也用 2 台、1 台相機拍到的格子，是 EXTRA_VIEW_LEVELS
+    // 的 index（0 關、1 加 2 台、2 再加 1 台）
+    extraViewLevel: 2,
+
+    // 純 2D 的物理模型，一個開關管這些（見 buildPure2DTrace）：
+    //   補空格  物理擬合、內插、盡量模擬，補沒有重建點的格子；1 台相機
+    //           的格子拿補出來的位置當先驗移到視線上
+    //   鉛直面  每段飛行（兩次擊球之間）用重建點擬合鉛直面，把軌跡移到
+    //           面上，1 台相機的格子改用視線和面的交點（見 fitFlightPlanes）
+    //   不回飛  兩次擊球之間球在水平面上不往回飛（見 enforceForwardFlight）
+    //   去閃電  一兩格跳出去又回來的換成前後接起來的位置（見 removeSpikes）
+    // 關掉時只畫通過檢查的重建點（平滑另外設定）
+    usePhysicsModel: true,
+
+    // 3D 場景下方的「這一格的位置怎麼決定的」說明列，預設關
+    showBallProvenance: false,
+
     // 每位球員目前畫面上的關鍵點世界座標（與軌跡點同一套 raw 座標），
     // 由 3D 場景寫入、影片面板拿去投影。key 是 playerReplay.id，
     // 值是 { racketTip, hands }
@@ -953,6 +980,37 @@ export const useAppStore = create(
           showPairwiseTrajectory: !state.showPairwiseTrajectory,
         }),
       )
+    },
+
+    // 'pure2d' | 'ball_traj'
+    setTrajectoryDisplaySource: (source) => {
+      set({ trajectoryDisplaySource: source })
+    },
+
+    // SMOOTHING_LEVELS 的 index
+    setDisplaySmoothingLevel: (level) => {
+      set({ displaySmoothingLevel: level })
+    },
+
+    toggleBallProvenance: () => {
+      set(
+        state => ({
+          showBallProvenance: !state.showBallProvenance,
+        }),
+      )
+    },
+
+    togglePhysicsModel: () => {
+      set(
+        state => ({
+          usePhysicsModel: !state.usePhysicsModel,
+        }),
+      )
+    },
+
+    // EXTRA_VIEW_LEVELS 的 index
+    setExtraViewLevel: (level) => {
+      set({ extraViewLevel: level })
     },
 
     toggleRacketAim: () => {

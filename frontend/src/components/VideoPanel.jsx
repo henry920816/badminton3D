@@ -1,4 +1,5 @@
 import React, {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -22,13 +23,22 @@ import {
 } from '../api.js'
 
 import {
+  useDisplayTrajectoryLookup,
   useRallyBallData,
+  useRallyFrameRange,
 } from '../utils/useRallyBallData.js'
 import {
+  RECONSTRUCTION_AGREEMENT_PX,
+  useBall2DRangeLabels,
   useBall2DVisibleRows,
 } from '../utils/usePairwiseBallPoints.js'
 
 import Ball2DCorrectionPanel from './Ball2DCorrectionPanel.jsx'
+import Magnifier from './Magnifier.jsx'
+import {
+  computeEpipolarGuide,
+  evaluateGuideError,
+} from '../utils/epipolarGuide.js'
 
 
 // 後端 get_traj2d 的 end 預設值，代表「這台相機全部」
@@ -472,6 +482,8 @@ function drawProjectionOverlay({
     fillStyle,
     radius,
     strokeStyle = null,
+    // 給了就以影像像素為單位（跟著畫面縮放），否則 radius 是畫布像素
+    imageRadius = null,
   }) => {
     if (
       !Number.isFinite(Number(u))
@@ -507,7 +519,9 @@ function drawProjectionOverlay({
     context.arc(
       canvasX,
       canvasY,
-      radius,
+      imageRadius != null
+        ? Math.max(3, imageRadius * rectangle.width / Number(imageWidth))
+        : radius,
       0,
       Math.PI * 2,
     )
@@ -515,7 +529,7 @@ function drawProjectionOverlay({
 
     if (strokeStyle) {
       context.strokeStyle = strokeStyle
-      context.lineWidth = 1.5
+      context.lineWidth = 2
       context.stroke()
     }
 
@@ -641,9 +655,11 @@ function drawProjectionOverlay({
         || video.videoHeight
         || 1200
       ),
+      // 半徑是兩兩重建「同意」的門檻：3D→2D 的紅點落在圈裡，這台就算同意
       fillStyle: '#22d3ee00',
       strokeStyle: '#22d3ee',
       radius: 5,
+      imageRadius: RECONSTRUCTION_AGREEMENT_PX,
     })
   }
 
@@ -664,8 +680,9 @@ function drawProjectionOverlay({
         || video.videoHeight
         || 1200
       ),
-      fillStyle: '#d946ef',
-      strokeStyle: '#fae8ff',
+      // 空心，才看得到底下的羽球
+      fillStyle: 'rgba(0, 0, 0, 0)',
+      strokeStyle: '#d946ef',
       radius: 6,
     })
   }
@@ -703,7 +720,7 @@ function drawProjectionOverlay({
     }
   }
 
-  // 2D 標註修正：灰圈是原始標註，琥珀色實心點是修正後的位置
+  // 2D 標註修正：琥珀色圈是修正後的位置（空心，才看得到底下的羽球）
   if (correctionOverlay) {
     const imageWidth = (
       cameraParams?.imageWidth
@@ -718,18 +735,82 @@ function drawProjectionOverlay({
     const {
       original,
       correction,
+      guide,
     } = correctionOverlay
 
-    if (Number(original?.visibility) === 1) {
-      drawPoint({
-        u: original.x,
-        v: original.y,
-        imageWidth,
-        imageHeight,
-        fillStyle: 'rgba(0, 0, 0, 0)',
-        strokeStyle: '#a1a1aa',
-        radius: 8,
+    // 參考視角導引：極線細白線，線上標相機編號。畫在修正的圈圈底下
+    if (guide) {
+      const toCanvas = point => ({
+        x: rectangle.x + point.u * rectangle.width / imageWidth,
+        y: rectangle.y + point.v * rectangle.height / imageHeight,
       })
+
+      context.save()
+      context.lineWidth = 1
+      context.strokeStyle = 'rgba(255, 255, 255, 0.55)'
+
+      for (const { points } of guide.lines) {
+        context.beginPath()
+        points.forEach((point, index) => {
+          const { x, y } = toCanvas(point)
+          if (index === 0) context.moveTo(x, y)
+          else context.lineTo(x, y)
+        })
+        context.stroke()
+      }
+
+      // 編號放在離羽球遠的那一端（交會處附近擠不下），和已經放好的
+      // 編號太近就沿著線往內挪
+      const anchorPoint = (
+        guide.minimum
+        || (Number(correction?.visibility) === 1 ? { u: correction.x, v: correction.y } : null)
+        || (Number(original?.visibility) === 1 ? { u: original.x, v: original.y } : null)
+      )
+      const labelled = new Set()
+      const placed = []
+      const LABEL_MIN_GAP = 18
+
+      context.font = '600 11px ui-monospace, SFMono-Regular, Consolas, monospace'
+      context.textAlign = 'center'
+      context.textBaseline = 'middle'
+
+      for (const { cameraIndex, points } of guide.lines) {
+        // 斷成好幾段的極線只標一次
+        if (labelled.has(cameraIndex)) continue
+        labelled.add(cameraIndex)
+
+        const ordered = (
+          anchorPoint
+          && Math.hypot(points[0].u - anchorPoint.u, points[0].v - anchorPoint.v)
+            < Math.hypot(points.at(-1).u - anchorPoint.u, points.at(-1).v - anchorPoint.v)
+            ? [...points].reverse()
+            : points
+        )
+
+        let position = null
+
+        for (let step = 0; step < 10; step += 1) {
+          const candidate = toCanvas(ordered[Math.floor((ordered.length - 1) * step * 0.05)])
+          const x = Math.min(rectangle.x + rectangle.width - 10, Math.max(rectangle.x + 10, candidate.x))
+          const y = Math.min(rectangle.y + rectangle.height - 10, Math.max(rectangle.y + 10, candidate.y))
+          position = { x, y }
+          if (placed.every(other => Math.hypot(other.x - x, other.y - y) >= LABEL_MIN_GAP)) break
+        }
+
+        placed.push(position)
+
+        const text = String(cameraIndex)
+        const width = context.measureText(text).width + 8
+
+        context.fillStyle = 'rgba(0, 0, 0, 0.7)'
+        context.beginPath()
+        context.roundRect(position.x - width / 2, position.y - 7, width, 14, 3)
+        context.fill()
+        context.fillStyle = 'rgba(255, 255, 255, 0.95)'
+        context.fillText(text, position.x, position.y + 0.5)
+      }
+
+      context.restore()
     }
 
     if (Number(correction?.visibility) === 1) {
@@ -738,8 +819,8 @@ function drawProjectionOverlay({
         v: correction.y,
         imageWidth,
         imageHeight,
-        fillStyle: '#f59e0b',
-        strokeStyle: '#fef3c7',
+        fillStyle: 'rgba(0, 0, 0, 0)',
+        strokeStyle: '#f59e0b',
         radius: 5,
       })
     }
@@ -843,9 +924,8 @@ export default function VideoPanel() {
     state => state.setCurrentTime
   )
 
-  const trajectoryMap = useAppStore(
-    state => state.trajByFrame
-  )
+  // 3D→2D 投影的球和 3D 場景畫同一份（可能是純 2D 補點、平滑過的軌跡）
+  const trajectoryMap = useDisplayTrajectoryLookup()
 
   const upsertTrajPoints = useAppStore(
     state => state.upsertTrajPoints
@@ -1178,12 +1258,216 @@ export default function VideoPanel() {
       : activeBall2DMap?.get(currentFrame) || null
   )
 
+  // 2D 修正的參考視角：其他相機在這格有標註就預設拿來畫極線，
+  // 使用者覺得哪台標錯就點掉（存的是排除的相機編號）
+  const [
+    correction2DExcludedIndices,
+    setCorrection2DExcludedIndices,
+  ] = useState([])
+
+  const toggleCorrection2DReference = cameraIndex => {
+    setCorrection2DExcludedIndices(
+      previous => (
+        previous.includes(cameraIndex)
+          ? previous.filter(index => index !== cameraIndex)
+          : [...previous, cameraIndex]
+      ),
+    )
+  }
+
+  // 這段 rally 所有相機的標註（時間軸的標註一致軌道也用同一份快取）
+  const {
+    startFrame: correctionRangeStart,
+    endFrame: correctionRangeEnd,
+  } = useRallyFrameRange()
+
+  const correctionRangeLabels = useBall2DRangeLabels(
+    correction2DMode ? matchId : null,
+    correctionRangeStart,
+    correctionRangeEnd,
+  )
+
+  // 這份只留看得見的標註、沒有 visibility 欄位，補上才和其他來源一致
+  const correctionRangeLabelByKey = useMemo(
+    () => new Map(
+      (correctionRangeLabels.points || []).map(point => [
+        `${point.frame}:${Number(point.camera_index)}`,
+        { ...point, visibility: 1 },
+      ]),
+    ),
+    [
+      correctionRangeLabels.points,
+    ],
+  )
+
+  // 每台相機在這格能不能當參考：參考點是那台的修正值，沒修正就用原始標註
+  const correction2DReferenceOptions = useMemo(
+    () => {
+      if (!correction2DMode) return []
+
+      const activeIndex = Number(activeCamera?.index)
+
+      return safeCameras
+        .filter(camera => (
+          Number.isInteger(Number(camera.index))
+          && Number(camera.index) !== activeIndex
+          && camera.has_ball_2d
+        ))
+        .map(camera => {
+          const cameraIndex = Number(camera.index)
+          const selected = !correction2DExcludedIndices.includes(cameraIndex)
+          const params = camera.projection
+          const correction = ball2DCorrections.get(cameraIndex)?.get(currentFrame) || null
+          const point = (
+            correction
+            || correctionRangeLabelByKey.get(`${currentFrame}:${cameraIndex}`)
+            || ball2DByCameraFrame.get(cameraIndex)?.get(currentFrame)
+            || null
+          )
+
+          let status = 'ok'
+
+          if (!params?.intrinsic || !params?.extrinsic) status = 'noParams'
+          else if (!point && correctionRangeLabels.status === 'loading') status = 'loading'
+          else if (!point) status = 'none'
+          else if (Number(point.visibility) !== 1) status = 'hidden'
+
+          return {
+            cameraIndex,
+            label: camera.label || camera.id,
+            selected,
+            status,
+            corrected: Boolean(correction),
+            reference: (
+              status === 'ok'
+                ? { cameraIndex, params, u: Number(point.x), v: Number(point.y) }
+                : null
+            ),
+          }
+        })
+    },
+    [
+      correction2DMode,
+      activeCamera,
+      safeCameras,
+      correction2DExcludedIndices,
+      ball2DCorrections,
+      correctionRangeLabelByKey,
+      correctionRangeLabels.status,
+      ball2DByCameraFrame,
+      currentFrame,
+    ],
+  )
+
+  // 參考點優先用修正值，所以每台相機的修正都要載入
+  useEffect(
+    () => {
+      if (
+        !correction2DMode
+        || matchId == null
+      ) {
+        return undefined
+      }
+
+      let cancelled = false
+
+      for (const camera of safeCameras) {
+        const cameraIndex = Number(camera.index)
+
+        if (
+          !camera.has_ball_2d
+          || !Number.isInteger(cameraIndex)
+          || useAppStore.getState().ball2DCorrections.has(cameraIndex)
+        ) {
+          continue
+        }
+
+        api.getBall2DCorrections(matchId, cameraIndex)
+          .then(list => {
+            if (!cancelled) {
+              useAppStore.getState().setBall2DCorrections(cameraIndex, list)
+            }
+          })
+          .catch(error => {
+            if (!cancelled) setCorrection2DError(error?.message || String(error))
+          })
+      }
+
+      return () => {
+        cancelled = true
+      }
+    },
+    [
+      correction2DMode,
+      matchId,
+      safeCameras,
+    ],
+  )
+
+  const correction2DReferences = useMemo(
+    () => (
+      correction2DReferenceOptions
+        .filter(option => option.selected && option.reference)
+        .map(option => option.reference)
+    ),
+    [
+      correction2DReferenceOptions,
+    ],
+  )
+
+  const correction2DGuide = useMemo(
+    () => (
+      correction2DMode
+      && projectionAvailable
+      && correction2DReferences.length > 0
+        ? computeEpipolarGuide({
+            targetParams: activeCameraParams,
+            references: correction2DReferences,
+          })
+        : null
+    ),
+    [
+      correction2DMode,
+      projectionAvailable,
+      activeCameraParams,
+      correction2DReferences,
+    ],
+  )
+
+  // 修正點和參考視角一起三角化的誤差，讓使用者點完馬上知道和參考合不合
+  const correction2DGuideSummary = useMemo(
+    () => {
+      if (!correction2DGuide) return null
+
+      return {
+        referenceCount: correction2DGuide.references.length,
+        minimumError: correction2DGuide.minimum?.error ?? null,
+        correctionError: (
+          Number(activeCorrection?.visibility) === 1
+            ? evaluateGuideError(
+                activeCameraParams,
+                correction2DGuide.references,
+                Number(activeCorrection.x),
+                Number(activeCorrection.y),
+              ).error
+            : null
+        ),
+      }
+    },
+    [
+      correction2DGuide,
+      activeCorrection,
+      activeCameraParams,
+    ],
+  )
+
   const correctionOverlay = useMemo(
     () => (
       correction2DMode
         ? {
             original: activeOriginal2D,
             correction: activeCorrection,
+            guide: correction2DGuide,
           }
         : null
     ),
@@ -1191,6 +1475,7 @@ export default function VideoPanel() {
       correction2DMode,
       activeOriginal2D,
       activeCorrection,
+      correction2DGuide,
     ],
   )
 
@@ -1435,6 +1720,7 @@ export default function VideoPanel() {
   const toggleCorrection2DMode = () => {
     if (correction2DMode) {
       setCorrection2DMode(false)
+      setCorrection2DExcludedIndices([])
       return
     }
 
@@ -1475,6 +1761,16 @@ export default function VideoPanel() {
     && activeSource
       ? `${activeCamera.id}|${activeSource}`
       : null
+  )
+
+  // 影片內容（object-contain 之後）在 videoWrap 裡的範圍，放大鏡用
+  const getVideoContentRect = useCallback(
+    () => (
+      videoWrapRef.current && videoRef.current
+        ? getObjectContainRect(videoWrapRef.current, videoRef.current)
+        : null
+    ),
+    [],
   )
 
   const redrawOverlay = () => {
@@ -1671,6 +1967,7 @@ export default function VideoPanel() {
 
       setCorrection2DMode(false)
       setCorrection2DError('')
+      setCorrection2DExcludedIndices([])
     },
     [
       matchId,
@@ -1724,6 +2021,79 @@ export default function VideoPanel() {
     ],
   )
 
+  // 整台相機的 2D 球點一次抓完
+  const loadBall2DCamera = cameraIndex => {
+    if (
+      hasBall2DCameraLoaded(
+        cameraIndex,
+      )
+    ) {
+      return
+    }
+
+    // 同一台相機、同一個 2D 來源只發一次；換來源後舊的請求不擋新的
+    const inflightKey = `${cameraIndex}:${ball2DSource}`
+
+    if (
+      ball2DInflightRef.current.has(
+        inflightKey,
+      )
+    ) {
+      return
+    }
+
+    ball2DInflightRef.current.add(
+      inflightKey,
+    )
+
+    /*
+     * 切換相機時把這台的 2D 球點一次抓完，
+     * 不隨播放位置做滑動視窗。
+     *
+     * 實測單台約 1.6MB / 0.9s，和開場就一次載完的
+     * 3D 軌跡（2.8MB）同一個量級。原本的 ±300 格視窗
+     * 是以 `${matchId}-${cameraIndex}-${start}-${end}` 去重，
+     * 但 start/end 隨播放每格都在變，去重從來沒生效過：
+     * 回應還沒回來就已經每一格再發一次請求。
+     */
+    ;(async () => {
+      try {
+        const points = await api.getTraj2D(
+          matchId,
+          cameraIndex,
+          0,
+          ALL_FRAMES,
+          ball2DSource,
+        )
+
+        // 等待期間換了資料集或 2D 來源，這批已經作廢
+        if (
+          useAppStore.getState().matchId
+          !== matchId
+          || useAppStore.getState().ball2DSource
+          !== ball2DSource
+        ) {
+          return
+        }
+
+        upsertBall2DPoints(
+          cameraIndex,
+          points,
+        )
+
+        markBall2DCameraLoaded(
+          cameraIndex,
+        )
+      } catch (error) {
+        console.error(error)
+      } finally {
+        ball2DInflightRef.current.delete(
+          inflightKey,
+        )
+      }
+    })()
+  }
+
   useEffect(
     () => {
       if (
@@ -1739,79 +2109,9 @@ export default function VideoPanel() {
         return
       }
 
-      const cameraIndex = Number(
-        activeCamera.index,
+      loadBall2DCamera(
+        Number(activeCamera.index),
       )
-
-      if (
-        hasBall2DCameraLoaded(
-          cameraIndex,
-        )
-      ) {
-        return
-      }
-
-      // 同一台相機、同一個 2D 來源只發一次；換來源後舊的請求不擋新的
-      const inflightKey = `${cameraIndex}:${ball2DSource}`
-
-      if (
-        ball2DInflightRef.current.has(
-          inflightKey,
-        )
-      ) {
-        return
-      }
-
-      ball2DInflightRef.current.add(
-        inflightKey,
-      )
-
-      /*
-       * 切換相機時把這台的 2D 球點一次抓完，
-       * 不隨播放位置做滑動視窗。
-       *
-       * 實測單台約 1.6MB / 0.9s，和開場就一次載完的
-       * 3D 軌跡（2.8MB）同一個量級。原本的 ±300 格視窗
-       * 是以 `${matchId}-${cameraIndex}-${start}-${end}` 去重，
-       * 但 start/end 隨播放每格都在變，去重從來沒生效過：
-       * 回應還沒回來就已經每一格再發一次請求。
-       */
-      ;(async () => {
-        try {
-          const points = await api.getTraj2D(
-            matchId,
-            cameraIndex,
-            0,
-            ALL_FRAMES,
-            ball2DSource,
-          )
-
-          // 等待期間換了資料集或 2D 來源，這批已經作廢
-          if (
-            useAppStore.getState().matchId
-            !== matchId
-            || useAppStore.getState().ball2DSource
-            !== ball2DSource
-          ) {
-            return
-          }
-
-          upsertBall2DPoints(
-            cameraIndex,
-            points,
-          )
-
-          markBall2DCameraLoaded(
-            cameraIndex,
-          )
-        } catch (error) {
-          console.error(error)
-        } finally {
-          ball2DInflightRef.current.delete(
-            inflightKey,
-          )
-        }
-      })()
     },
     [
       matchId,
@@ -2869,13 +3169,23 @@ export default function VideoPanel() {
               )
 
               // 目前這格這台相機有看得見的 2D 標註；播放中每格都在變，
-              // 只在停下來時標示
+              // 只在停下來時標示。有 2D 修正就照修正（標成看不見就不算），
+              // 2D 來源是原始資料時修正不會反映在 camerasWith2DByFrame 裡
+              const frameCorrection = (
+                ball2DCorrections
+                  .get(Number(camera.index))
+                  ?.get(currentFrame)
+              )
               const has2DAtFrame = (
                 !playing
-                && Boolean(
-                  camerasWith2DByFrame
-                    .get(currentFrame)
-                    ?.has(Number(camera.index))
+                && (
+                  frameCorrection
+                    ? Number(frameCorrection.visibility) === 1
+                    : Boolean(
+                        camerasWith2DByFrame
+                          .get(currentFrame)
+                          ?.has(Number(camera.index))
+                      )
                 )
               )
 
@@ -3007,7 +3317,7 @@ export default function VideoPanel() {
                 className={overlayButtonClass(projectionAvailable, showProjection)}
                 title={
                   projectionAvailable
-                    ? '顯示或隱藏 3D 球點投影'
+                    ? '顯示或隱藏 3D 球點投影，和 3D 場景用同一份軌跡（純 2D 或 ball_traj）'
                     : '此視角沒有 camera params'
                 }
               >
@@ -3059,6 +3369,7 @@ export default function VideoPanel() {
                 <OverlayDot color="#facc15" active={projectionAvailable && showHands} />
                 手掌
               </button>
+
             </div>
 
             {/* 在影片上點選的編輯模式 */}
@@ -3267,6 +3578,14 @@ export default function VideoPanel() {
                       'pointer-events-none'
                     ),
               ].join(' ')}
+            />
+
+            <Magnifier
+              active={correction2DMode}
+              videoRef={videoRef}
+              overlayCanvasRef={overlayCanvasRef}
+              containerRef={videoWrapRef}
+              getContentRect={getVideoContentRect}
             />
           </div>
         )}
@@ -3738,6 +4057,9 @@ export default function VideoPanel() {
             onMarkHidden={markCorrection2DHidden}
             onClear={clearCorrection2D}
             onClose={toggleCorrection2DMode}
+            referenceOptions={correction2DReferenceOptions}
+            onToggleReference={toggleCorrection2DReference}
+            guideSummary={correction2DGuideSummary}
           />
         )}
     </div>

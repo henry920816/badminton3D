@@ -4,10 +4,13 @@ import { Html, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { useAppStore } from '../store.js'
 import { loadSmplForwardModel } from '../utils/smplForwardAssets.js'
 import { MAX_FRAME_GAP, toThreeVector } from '../utils/ballPath.js'
 import { useRallyBallData } from '../utils/useRallyBallData.js'
+import TrajectorySettingsPanel from './TrajectorySettingsPanel.jsx'
+import { formatPairwiseExplanation, usePairwiseExplanation } from '../utils/pairwiseExplanation.js'
 
 const SHUTTLECOCK_OBJ_URL = '/models/shuttlecock/shuttlecock.obj'
 const SHUTTLECOCK_MODEL_SCALE = 0.016
@@ -309,7 +312,9 @@ function sourceToThreePositions(source) {
 const SMPL_JOINT_COUNT = 24
 const SMPL_POSE_FEATURE_COUNT = 207
 const SMPL_POSEDIRS_TEXTURE_WIDTH = 2048
-const RACKET_OBJ_URL = '/models/racket/racket.obj'
+// 帶貼圖的球拍（由 badminton_dataset/body_models/racket/build_textured_racket.py 產生），
+// 頂點座標與 racket.obj 完全相同，下面的拍面 / 拍頂常數照樣適用
+const RACKET_GLB_URL = '/models/racket/racket_textured.glb'
 const RACKET_SCALE = 1
 const RACKET_PIVOT = new THREE.Vector3(0, 0, 0)
 const RACKET_OFFSET = new THREE.Vector3(0, 0, 0)
@@ -612,23 +617,19 @@ function prepareRacketObject(source) {
     child.geometry.translate(-RACKET_PIVOT.x, -RACKET_PIVOT.y, -RACKET_PIVOT.z)
     child.geometry.scale(RACKET_SCALE, RACKET_SCALE, RACKET_SCALE)
     child.geometry.translate(RACKET_OFFSET.x, RACKET_OFFSET.y, RACKET_OFFSET.z)
-    child.material = new THREE.MeshStandardMaterial({
-      color: '#111827',
-      roughness: 0.42,
-      metalness: 0,
-      side: THREE.DoubleSide,
-    })
   })
   return object
 }
 
 function loadRacketObject() {
   if (!racketObjectPromise) {
-    racketObjectPromise = new OBJLoader().loadAsync(RACKET_OBJ_URL).then((object) => {
-      object.traverse((child) => {
-        if (child.isMesh) child.geometry.computeVertexNormals()
+    // 沿用 GLB 內的材質與貼圖（拍框/拍桿、握把、球線、線孔），只補上雙面繪製
+    racketObjectPromise = new GLTFLoader().loadAsync(RACKET_GLB_URL).then((gltf) => {
+      gltf.scene.traverse((child) => {
+        if (!child.isMesh) return
+        for (const material of [].concat(child.material)) material.side = THREE.DoubleSide
       })
-      return object
+      return gltf.scene
     })
   }
   return racketObjectPromise
@@ -703,7 +704,7 @@ function SmplForwardAvatar({ playerReplay, ballContacts }) {
         if (!cancelled) setRacketObject(prepareRacketObject(object))
       })
       .catch((err) => {
-        console.warn('Racket OBJ unavailable:', err)
+        console.warn('Racket model unavailable:', err)
       })
 
     return () => {
@@ -1205,6 +1206,70 @@ function CursorZoomControls({
   return null
 }
 
+/**
+ * 3D 場景下方的說明列：目前這格的球位置是怎麼決定的（見 ballProvenance）。
+ * 獨立成一個元件，只有它跟著 currentFrame 每格重畫。
+ */
+function BallProvenanceBar() {
+  const show = useAppStore(s => s.showBallProvenance)
+
+  return show ? <BallProvenanceContent /> : null
+}
+
+
+function BallProvenanceContent() {
+  const currentFrame = useAppStore(s => s.currentFrame)
+  const toggleBallProvenance = useAppStore(s => s.toggleBallProvenance)
+  const { provenance, startFrame, endFrame } = useRallyBallData()
+  const explanation = usePairwiseExplanation(currentFrame)
+
+  let lines
+
+  if (startFrame == null || currentFrame < startFrame || currentFrame > endFrame) {
+    lines = { title: '目前這格不在 rally 範圍內' }
+  } else if (provenance.mode !== 'pure') {
+    lines = { title: provenance.modeText }
+  } else {
+    const record = provenance.get(currentFrame)
+
+    lines = record
+      ? {
+          title: record.title,
+          notes: record.notes.join(' · '),
+          adjustments: record.adjustments.length
+            ? '之後：' + record.adjustments.map(step => `${step.label} ${(step.shift * 100).toFixed(1)} 公分`).join('、')
+            : '',
+        }
+      : { title: '這格沒有球的位置' }
+  }
+
+  return (
+    <div className="absolute left-0 right-0 bottom-0 z-10 pointer-events-none px-3 py-1.5 pr-8 bg-zinc-950/80 border-t border-zinc-800 text-[11px] leading-5">
+      <button
+        type="button"
+        onClick={toggleBallProvenance}
+        className="pointer-events-auto absolute top-1 right-2 w-5 h-5 leading-5 text-center rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800"
+        title="收起重建說明（右上角「球軌跡」設定裡可以再打開）"
+      >
+        ×
+      </button>
+      <div className="text-zinc-200">
+        <span className="font-mono text-zinc-500 mr-2">F {currentFrame}</span>
+        {lines.title}
+      </div>
+      {lines.notes && <div className="text-zinc-400">{lines.notes}</div>}
+      {lines.adjustments && <div className="text-zinc-500">{lines.adjustments}</div>}
+      {explanation.status === 'ready' && formatPairwiseExplanation(explanation.data).map(line => (
+        <div key={line} className="text-sky-300/80">{line}</div>
+      ))}
+      {explanation.status === 'playing' && (
+        <div className="text-zinc-600">停下來時列出各相機的配對結果</div>
+      )}
+    </div>
+  )
+}
+
+
 export default function Scene3D() {
   const matchId = useAppStore(s => s.matchId)
   const currentFrame = useAppStore(s => s.currentFrame)
@@ -1218,14 +1283,10 @@ export default function Scene3D() {
   const replaySegments = useAppStore(s => s.replaySegments) || []
   const activeReplaySegmentId = useAppStore(s => s.activeReplaySegmentId)
   const setActiveReplaySegment = useAppStore(s => s.setActiveReplaySegment)
-  const showSmplReplay = useAppStore(s => s.showSmplReplay)
   const toggleSmplReplay = useAppStore(s => s.toggleSmplReplay)
   const smplReplayBySegmentId = useAppStore(s => s.smplReplayBySegmentId)
   const setSmplReplayData = useAppStore(s => s.setSmplReplayData)
-  const racketAimEnabled = useAppStore(s => s.racketAimEnabled)
-  const toggleRacketAim = useAppStore(s => s.toggleRacketAim)
   const showPairwiseTrajectory = useAppStore(s => s.showPairwiseTrajectory)
-  const toggleShowPairwiseTrajectory = useAppStore(s => s.toggleShowPairwiseTrajectory)
 
   const activeCamera = cameras.find(camera => camera.id === activeCameraId)
   const activeReplayIndex = replaySegments.findIndex(item => item.id === activeReplaySegmentId)
@@ -1234,9 +1295,8 @@ export default function Scene3D() {
   const [smplReplayStatus, setSmplReplayStatus] = useState('idle')
 
   const {
-    points,
+    displayPoints,
     pairwisePoints,
-    pairwiseStatus,
     contacts: ballContacts,
     startFrame: rangeStartFrame,
     endFrame: rangeEndFrame,
@@ -1351,66 +1411,7 @@ export default function Scene3D() {
       {/* Keep only task-specific controls here; camera/status badges were removed to reduce visual clutter. */}
       <div className="absolute top-2 right-2 z-20 flex items-start justify-end gap-2 pointer-events-none">
         <div className="pointer-events-auto flex flex-col items-end gap-1.5">
-          <div className="flex flex-wrap items-center justify-end gap-1.5">
-            {/* Every toggle lives in one pill; first:border-l-0 keeps the
-                divider correct no matter which of them actually render. */}
-            <div className="flex items-center bg-zinc-900/80 border border-zinc-800 rounded shadow backdrop-blur-md overflow-hidden text-xs">
-              <button
-                type="button"
-                onClick={toggleRacketAim}
-                disabled={!showSmplReplay}
-                className={`px-3 py-1.5 font-semibold border-l border-zinc-800 first:border-l-0 disabled:opacity-40 ${
-                  racketAimEnabled
-                    ? 'bg-violet-900/40 text-violet-200'
-                    : 'text-zinc-300'
-                }`}
-                title={
-                  `擊球瞬間把拍面中心轉到球上、拍面朝球飛出去的方向，接觸前後各 ${RACKET_AIM_BLEND_FRAMES} 格漸入漸出。`
-                  + '擊球時刻與位置用 2D 標註兩兩重建的 3D 點推算。'
-                  + '關掉的話球拍完全跟著 SMPL 手腕的姿態走，'
-                  + '開關兩邊比對就看得出這個修正改了什麼。'
-                }
-              >
-                球拍轉向 {racketAimEnabled ? '開' : '關'}
-              </button>
-
-              <button
-                type="button"
-                onClick={toggleShowPairwiseTrajectory}
-                className={`px-3 py-1.5 font-semibold border-l border-zinc-800 first:border-l-0 ${
-                  showPairwiseTrajectory
-                    ? 'bg-rose-900/40 text-rose-200'
-                    : 'text-zinc-300'
-                }`}
-                title={
-                  '畫出每格用各相機 2D 標註兩兩重建、取中位數的 3D 位置（紅線），'
-                  + '可和灰色的 ball_traj 比對。只畫至少 2 組相機、且位置在球場範圍內的格子，'
-                  + '也就是擊球偵測實際用的那批點。'
-                }
-              >
-                2D 重建軌跡 {showPairwiseTrajectory ? '開' : '關'}
-                {showPairwiseTrajectory && pairwiseStatus === 'loading' && ' · 載入中'}
-                {showPairwiseTrajectory && pairwiseStatus === 'error' && ' · 載入失敗'}
-                {showPairwiseTrajectory && pairwiseStatus === 'ready' && !pairwisePoints.length && ' · 無資料'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (repairMode) clearTrajSelection()
-                  setRepairMode(!repairMode)
-                }}
-                className={`px-3 py-1.5 font-semibold border-l border-zinc-800 ${
-                  repairMode
-                    ? 'bg-sky-900/40 text-sky-200'
-                    : 'text-zinc-300'
-                }`}
-                title="點兩個異常軌跡點，然後重算中間那一段"
-              >
-                修復模式 {repairMode ? '開' : '關'}
-              </button>
-            </div>
-          </div>
+          <TrajectorySettingsPanel racketAimBlendFrames={RACKET_AIM_BLEND_FRAMES} />
 
           {repairMode && selectedTrajFrames.length > 0 && (
             <div className="bg-zinc-900/80 border border-zinc-800 rounded p-3 text-sm shadow-xl flex flex-col gap-2 w-64 backdrop-blur-md">
@@ -1450,7 +1451,7 @@ export default function Scene3D() {
         <CourtRef />
         <RealCameraMarkers />
         <SmplReplayLayer replayData={replayData} ballContacts={ballContacts} />
-        <AnimatedTrajectory points={points} />
+        <AnimatedTrajectory points={displayPoints} />
         {showPairwiseTrajectory && <PairwiseTrajectory points={pairwisePoints} />}
         <PlaybackController />
 
@@ -1473,6 +1474,8 @@ export default function Scene3D() {
 
         <SceneCameraController />
       </Canvas>
+
+      <BallProvenanceBar />
     </div>
   )
 }

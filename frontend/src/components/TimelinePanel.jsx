@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useAppStore } from '../store.js'
 import { usePairwiseViewPoints } from '../utils/usePairwiseBallPoints.js'
-import { useRallyFrameRange } from '../utils/useRallyBallData.js'
+import { useDisplayTrajectoryLookup, useRallyFrameRange } from '../utils/useRallyBallData.js'
+import { useLabelConsistency } from '../utils/useLabelConsistency.js'
 
 
 // matplotlib 的 tab10，和 triangulation_3Dline.py 各視角的配色一樣
@@ -14,6 +15,10 @@ const VIEW_COLORS = [
 // 同 triangulation_3Dline.py 速度點圖的 y 軸上限：只靠一組相機重建的
 // 視角偶爾會跳出好幾百 m/s，不截掉整條軸都會被壓扁
 const SPEED_AXIS_MAX = 50
+
+
+// 依相機編號配色，距離、速度軌道裡同一台相機同一個顏色
+const viewColor = cameraIndex => VIEW_COLORS[cameraIndex % VIEW_COLORS.length]
 
 
 /**
@@ -30,7 +35,7 @@ function buildViewSeries(rows, fps) {
 
   return [...rowsByCamera.keys()]
     .sort((a, b) => a - b)
-    .map((cameraIndex, order) => {
+    .map((cameraIndex) => {
       const cameraRows = rowsByCamera.get(cameraIndex).sort((a, b) => a.frame - b.frame)
       const speed = []
 
@@ -52,7 +57,7 @@ function buildViewSeries(rows, fps) {
 
       return {
         cameraIndex,
-        color: VIEW_COLORS[order % VIEW_COLORS.length],
+        color: viewColor(cameraIndex),
         distance: cameraRows.map(row => ({ frame: row.frame, value: row.distance })),
         speed,
       }
@@ -233,6 +238,9 @@ const PLOT_TRACKS = [
   // 2D 標註兩兩重建、每個視角各一條（同 triangulation_3Dline.py）
   { id: 'view_distance', toggle: 'distance', label: '距離', unit: 'm·log', metric: 'distance', log: true },
   { id: 'view_speed', toggle: 'speed', label: '速度', unit: 'm/s', metric: 'speed' },
+  // 每一格所有視角的 2D 標註一起三角化、投影回各台的 RMS：各台極線交會
+  // 越集中越低，越高越該回去修那一格的標註
+  { id: 'label_consistency', toggle: 'consistency', label: '標註一致', unit: 'px', metric: 'consistency', log: true },
 ]
 
 const TRACK_TOGGLES = [
@@ -241,12 +249,17 @@ const TRACK_TOGGLES = [
   ['z', 'Z', '#34d399'],
   ['distance', '距離', '#a1a1aa'],
   ['speed', '速度', '#a1a1aa'],
+  ['consistency', '標註一致', '#a1a1aa'],
   ['reference', '3D 參考', '#e4e4e7', true],
 ]
 
-// ball_traj 的距離與速度，在距離 / 速度軌道上畫成白色虛線當參考，
-// 角色同 triangulation_3Dline.py 的 Ground truth 線
+// 3D 軌跡的距離與速度，在距離 / 速度軌道上畫成白色虛線當參考，
+// 角色同 triangulation_3Dline.py 的 Ground truth 線。用的是 3D 場景
+// 顯示的那一份（純 2D 或 ball_traj），不是固定 ball_traj
 const REFERENCE_COLOR = 'rgba(244,244,245,0.9)'
+
+// 標註一致軌道只有一條線，不分相機
+const CONSISTENCY_COLOR = 'rgba(244,244,245,0.85)'
 
 const DEFAULT_VISIBLE_TRACKS = {
   x: true,
@@ -254,6 +267,7 @@ const DEFAULT_VISIBLE_TRACKS = {
   z: true,
   distance: true,
   speed: true,
+  consistency: true,
   reference: true,
 }
 const VISIBLE_TRACKS_KEY = 'badminton3d.timeline.visibleTracks'
@@ -345,6 +359,8 @@ export default function TimelinePanel() {
   const anomalies = useAppStore(s => s.anomalies) || []
   const updateHit = useAppStore(s => s.updateHit)
   const trajMap = useAppStore(s => s.trajByFrame)
+  // 3D 參考線和 3D 場景畫同一份軌跡（可能是純 2D 補點、平滑過的）
+  const displayLookup = useDisplayTrajectoryLookup()
 
   const activeItem = useAppStore(s => s.activeItem)
   const setActiveItem = useAppStore(s => s.setActiveItem)
@@ -369,6 +385,50 @@ export default function TimelinePanel() {
   const [isPanning, setIsPanning] = useState(null)
   const [visibleTracks, setVisibleTracks] = useState(loadVisibleTracks)
 
+  // 軌道開關收在下拉選單裡（攤在標題列上會擋到其他按鈕）。標題列是
+  // overflow-hidden，選單用 fixed 定位在按鈕下方才不會被切掉
+  const trackMenuButtonRef = useRef(null)
+  const trackMenuRef = useRef(null)
+  const [trackMenuPosition, setTrackMenuPosition] = useState(null)
+
+  const toggleTrackMenu = () => {
+    if (trackMenuPosition) {
+      setTrackMenuPosition(null)
+      return
+    }
+
+    const bounds = trackMenuButtonRef.current?.getBoundingClientRect()
+    if (bounds) setTrackMenuPosition({ top: bounds.bottom + 4, right: window.innerWidth - bounds.right })
+  }
+
+  useEffect(() => {
+    if (!trackMenuPosition) return undefined
+
+    const close = () => setTrackMenuPosition(null)
+    const handlePointerDown = (event) => {
+      if (
+        trackMenuRef.current?.contains(event.target)
+        || trackMenuButtonRef.current?.contains(event.target)
+      ) {
+        return
+      }
+      close()
+    }
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') close()
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('resize', close)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('resize', close)
+    }
+  }, [trackMenuPosition])
+
   const toggleTrack = (key) => {
     setVisibleTracks((previous) => {
       const next = { ...previous, [key]: !previous[key] }
@@ -388,6 +448,40 @@ export default function TimelinePanel() {
   const viewSeries = useMemo(
     () => buildViewSeries(viewPoints.points, fps),
     [viewPoints.points, fps],
+  )
+
+
+  const consistency = useLabelConsistency(visibleTracks.consistency)
+  const consistencySeries = useMemo(
+    () => [{
+      cameraIndex: null,
+      color: CONSISTENCY_COLOR,
+      consistency: consistency.rows,
+    }],
+    [consistency.rows],
+  )
+  const consistencyByFrame = useMemo(
+    () => new Map(consistency.rows.map(row => [row.frame, row])),
+    [consistency.rows],
+  )
+
+  // 各曲線軌道畫哪一批、目前的載入狀態
+  const laneSource = lane => (
+    lane.metric === 'consistency'
+      ? {
+          series: consistencySeries,
+          status: consistency.status,
+          loadingText: '2D 標註載入中…',
+          errorText: '無法取得 2D 標註',
+          emptyText: '畫面範圍內沒有 3 台以上同時標到的格子',
+        }
+      : {
+          series: viewSeries,
+          status: viewPoints.status,
+          loadingText: '兩兩重建計算中…',
+          errorText: '無法取得兩兩重建（範圍過大或後端錯誤）',
+          emptyText: '畫面範圍內沒有重建點',
+        }
   )
 
   const lanes = useMemo(() => {
@@ -683,16 +777,17 @@ export default function TimelinePanel() {
       if (p) pts.push(p)
     }
 
-    // ball_traj 的距離與速度；速度同各視角，是和前一格的位移乘上 fps
+    // 3D 參考的距離與速度；速度同各視角，是和前一格的位移乘上 fps
     const referencePoints = { distance: [], speed: [] }
 
     if (visibleTracks.reference) {
-      for (const p of pts) {
-        if (![p.x, p.y, p.z].every(Number.isFinite)) continue
+      for (let f = sF; f <= eF; f += step) {
+        const p = displayLookup.get(f)
+        if (!p || ![p.x, p.y, p.z].every(Number.isFinite)) continue
 
         referencePoints.distance.push({ frame: p.frame, value: Math.hypot(p.x, p.y, p.z) })
 
-        const previous = trajMap.get(p.frame - 1)
+        const previous = displayLookup.get(p.frame - 1)
         if (previous && [previous.x, previous.y, previous.z].every(Number.isFinite)) {
           referencePoints.speed.push({
             frame: p.frame,
@@ -831,8 +926,9 @@ export default function TimelinePanel() {
     }
 
     const drawViewMetric = (lane) => {
-      const viewsReady = viewPoints.status === 'ready'
-      const reference = referencePoints[lane.metric]
+      const source = laneSource(lane)
+      const viewsReady = source.status === 'ready'
+      const reference = referencePoints[lane.metric] || []
       const isUsable = value => Number.isFinite(value) && !(lane.log && value <= 0)
 
       let minV = Infinity
@@ -844,7 +940,7 @@ export default function TimelinePanel() {
       }
 
       if (viewsReady) {
-        for (const series of viewSeries) {
+        for (const series of source.series) {
           for (const point of series[lane.metric]) {
             if (point.frame >= sF && point.frame <= eF) include(point.value)
           }
@@ -855,12 +951,12 @@ export default function TimelinePanel() {
 
       const statusMessage = {
         idle: '沒有 rally 範圍',
-        loading: '兩兩重建計算中…',
-        error: '無法取得兩兩重建（範圍過大或後端錯誤）',
-      }[viewPoints.status]
+        loading: source.loadingText,
+        error: source.errorText,
+      }[source.status]
 
       if (minV === Infinity) {
-        drawLaneMessage(lane, statusMessage || '畫面範圍內沒有重建點')
+        drawLaneMessage(lane, statusMessage || source.emptyText)
         return
       }
 
@@ -898,7 +994,7 @@ export default function TimelinePanel() {
       ctx.lineJoin = 'round'
       ctx.globalAlpha = 0.85
 
-      for (const series of viewsReady ? viewSeries : []) {
+      for (const series of viewsReady ? source.series : []) {
         ctx.strokeStyle = series.color
         ctx.beginPath()
 
@@ -1213,11 +1309,19 @@ export default function TimelinePanel() {
         )
       }
 
-      if (lane.metric && lane.height >= 36) {
-        const spacing = Math.min(16, (LABEL_W - 24) / Math.max(1, viewSeries.length - 1))
+      if (lane.metric === 'consistency' && lane.height >= 36) {
+        // 圖例那一行寫播放線所在這格的值和用了幾台
+        const row = consistencyByFrame.get(currentFrame)
+        ctx.font = `600 10px ${MONO}`
+        ctx.textAlign = 'left'
+        ctx.fillStyle = row ? '#e4e4e7' : '#52525b'
+        ctx.fillText(row ? `${row.value.toFixed(1)} · ${row.viewCount} 台` : '這格 —', 12, lane.top + 29)
+      } else if (lane.metric && lane.height >= 36) {
+        const { series: laneSeries } = laneSource(lane)
+        const spacing = Math.min(16, (LABEL_W - 24) / Math.max(1, laneSeries.length - 1))
         ctx.font = `600 10px ${MONO}`
         ctx.textAlign = 'center'
-        viewSeries.forEach((series, order) => {
+        laneSeries.forEach((series, order) => {
           ctx.fillStyle = series.color
           ctx.fillText(String(series.cameraIndex), 15 + order * spacing, lane.top + 29)
         })
@@ -1242,6 +1346,7 @@ export default function TimelinePanel() {
     scrollLeft,
     pxPerSec,
     trajMap,
+    displayLookup,
     rallies,
     hits,
     anomalies,
@@ -1255,6 +1360,9 @@ export default function TimelinePanel() {
     selection,
     viewPoints.status,
     viewSeries,
+    consistency.status,
+    consistencySeries,
+    consistencyByFrame,
     visibleTracks.reference,
   ])
 
@@ -1529,33 +1637,61 @@ export default function TimelinePanel() {
         </div>
 
         <div className="flex flex-1 basis-0 items-center justify-end gap-2 min-w-0">
-          <div className="flex bg-zinc-900 border border-zinc-800 rounded-md p-0.5 gap-0.5 shrink-0" title="顯示 / 隱藏軌道">
-            {TRACK_TOGGLES.map(([key, label, color, dashed]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => toggleTrack(key)}
-                className={`h-6 px-2 rounded flex items-center gap-1.5 text-[11px] transition-colors ${
-                  visibleTracks[key]
-                    ? 'bg-zinc-800 text-zinc-100'
-                    : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                {dashed ? (
-                  <span
-                    className="w-3 border-t border-dashed"
-                    style={{ borderColor: visibleTracks[key] ? color : '#3f3f46' }}
-                  />
-                ) : (
-                  <span
-                    className="w-1.5 h-1.5 rounded-full"
-                    style={{ background: visibleTracks[key] ? color : '#3f3f46' }}
-                  />
-                )}
-                {label}
-              </button>
-            ))}
-          </div>
+          <button
+            ref={trackMenuButtonRef}
+            type="button"
+            onClick={toggleTrackMenu}
+            className={`h-7 px-2.5 flex items-center gap-1.5 rounded-md border text-[11px] shrink-0 transition-colors ${
+              trackMenuPosition
+                ? 'border-zinc-600 bg-zinc-800 text-zinc-100'
+                : 'border-zinc-800 bg-zinc-900 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800'
+            }`}
+            title="顯示 / 隱藏軌道"
+            aria-haspopup="menu"
+            aria-expanded={Boolean(trackMenuPosition)}
+          >
+            軌道
+            <span className="font-mono text-zinc-500">
+              {TRACK_TOGGLES.filter(([key]) => visibleTracks[key]).length}/{TRACK_TOGGLES.length}
+            </span>
+            <span className="text-zinc-500">▾</span>
+          </button>
+
+          {trackMenuPosition && (
+            <div
+              ref={trackMenuRef}
+              role="menu"
+              className="fixed z-50 min-w-[9rem] py-1 rounded-md border border-zinc-700 bg-zinc-900 shadow-lg shadow-black/50"
+              style={{ top: trackMenuPosition.top, right: trackMenuPosition.right }}
+            >
+              {TRACK_TOGGLES.map(([key, label, color, dashed]) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={Boolean(visibleTracks[key])}
+                  onClick={() => toggleTrack(key)}
+                  className={`w-full h-7 px-3 flex items-center gap-2 text-left text-[11px] hover:bg-zinc-800 transition-colors ${
+                    visibleTracks[key] ? 'text-zinc-100' : 'text-zinc-500'
+                  }`}
+                >
+                  <span className={`w-3 text-center ${visibleTracks[key] ? 'text-zinc-200' : 'text-transparent'}`}>✓</span>
+                  {dashed ? (
+                    <span
+                      className="w-3 border-t border-dashed"
+                      style={{ borderColor: visibleTracks[key] ? color : '#3f3f46' }}
+                    />
+                  ) : (
+                    <span
+                      className="w-1.5 h-1.5 rounded-full"
+                      style={{ background: visibleTracks[key] ? color : '#3f3f46' }}
+                    />
+                  )}
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="hidden xl:flex items-center bg-zinc-900 border border-zinc-800 rounded-md overflow-hidden shrink-0">
             <button type="button" onClick={() => zoomBy(1 / 1.25)} className={`${headerButton} w-7`} title="縮小">

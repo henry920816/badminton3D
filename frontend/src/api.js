@@ -275,11 +275,34 @@ export const api = {
     )
   ),
 
+  // 某一格兩兩重建的說明：哪幾台有標註、各組配對通過與否與原因
+  explainPairwiseFrame: (
+    matchId,
+    frame,
+    source = 'original',
+    cameraMaxDistance = {},
+    thresholdPx = null,
+  ) => (
+    request(
+      `/matches/${matchId}/traj2d/pairwise/explain?frame=${encodeURIComponent(
+        frame,
+      )}&source=${encodeURIComponent(
+        source,
+      )}&camera_max_distance=${encodeURIComponent(
+        Object.entries(cameraMaxDistance).map(([camera, meters]) => `${camera}:${meters}`).join(','),
+      )}${thresholdPx ? `&reprojection_threshold_px=${encodeURIComponent(thresholdPx)}` : ''}`,
+    )
+  ),
+
+  // cameraMaxDistance：{ 相機編號: 公尺 }，這些相機只在球離它不超過
+  // 那個距離時才拿來重建
   getPairwiseBallPoints: (
     matchId,
     startFrame,
     endFrame,
     source = 'original',
+    cameraMaxDistance = {},
+    thresholdPx = null,
   ) => (
     request(
       `/matches/${matchId}/traj2d/pairwise?start_frame=${encodeURIComponent(
@@ -288,7 +311,9 @@ export const api = {
         endFrame,
       )}&source=${encodeURIComponent(
         source,
-      )}`,
+      )}&camera_max_distance=${encodeURIComponent(
+        Object.entries(cameraMaxDistance).map(([camera, meters]) => `${camera}:${meters}`).join(','),
+      )}${thresholdPx ? `&reprojection_threshold_px=${encodeURIComponent(thresholdPx)}` : ''}`,
     )
   ),
 

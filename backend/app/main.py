@@ -1,4 +1,5 @@
 import csv
+import math
 import os
 from datetime import datetime
 from io import StringIO
@@ -36,6 +37,8 @@ from .schemas import (
     TrajRepairPayload,
 )
 from .triangulation import (
+    QUALITY_REPROJECTION_THRESHOLD_PX,
+    explain_pairwise_frame,
     pairwise_consensus_point,
     per_view_pairwise_points,
     scan_2d_camera_grid,
@@ -542,6 +545,70 @@ def load_pairwise_inputs(
     return cameras_by_index, observations_by_frame
 
 
+def parse_reprojection_threshold(value: float) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="reprojection_threshold_px 必須大於 0",
+        )
+    return float(value)
+
+
+def parse_camera_max_distance(text: str) -> dict[int, float]:
+    """「相機編號:公尺」逗號分隔，例如 "3:7,4:5"。"""
+    try:
+        max_distance = {}
+
+        for item in text.split(","):
+            if not item.strip():
+                continue
+            camera_text, distance_text = item.split(":")
+            distance = float(distance_text)
+            if not math.isfinite(distance) or distance <= 0:
+                raise ValueError
+            max_distance[int(camera_text)] = distance
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="camera_max_distance 必須是逗號分隔的「相機編號:公尺」",
+        )
+
+    return max_distance
+
+
+@app.get(
+    "/matches/{match_id}/traj2d/pairwise/explain"
+)
+def explain_traj_2d_pairwise(
+    match_id: int,
+    frame: int,
+    db: Session = Depends(get_db),
+    source: Ball2DSource = "original",
+    camera_max_distance: str = "",
+    reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
+):
+    """說明某一格的兩兩重建：哪幾台有標註、每組配對通過與否與原因、
+    受距離限制的相機有沒有被拿掉、最後用了哪些相機（見
+    explain_pairwise_frame）。前端說明列解釋「為什麼這格沒有重建點」用。"""
+    cameras_by_index, observations_by_frame = load_pairwise_inputs(
+        match_id,
+        frame,
+        frame,
+        db,
+        source,
+    )
+
+    return {
+        "frame": frame,
+        **explain_pairwise_frame(
+            cameras_by_index,
+            observations_by_frame.get(frame, []),
+            reprojection_threshold_px=parse_reprojection_threshold(reprojection_threshold_px),
+            camera_max_distance=parse_camera_max_distance(camera_max_distance),
+        ),
+    }
+
+
 @app.get(
     "/matches/{match_id}/traj2d/pairwise"
 )
@@ -551,12 +618,42 @@ def get_traj_2d_pairwise(
     end_frame: int,
     db: Session = Depends(get_db),
     source: Ball2DSource = "original",
+    exclude_cameras: str = "",
+    camera_max_distance: str = "",
+    reprojection_threshold_px: float = QUALITY_REPROJECTION_THRESHOLD_PX,
 ):
     """每個 frame 用 2D 羽球位置兩兩重建，回傳各組 3D 點的中位數。
 
     前端拿這串點來偵測擊球，擊球前最後一格的點也是球拍拍面中心要對準的
     位置。沒有可用相機組合的 frame 不會出現在結果裡。
+
+    exclude_cameras 是逗號分隔的相機編號，這些相機的標註不拿來重建
+    （camera_count 也不算它們）。
+
+    camera_max_distance 是「相機編號:公尺」逗號分隔，例如 "3:7,4:5"：
+    這些相機只在球離它不超過那個距離時才拿來重建（見
+    pairwise_consensus_point）。
+
+    reprojection_threshold_px 是「同意」的像素門檻：配對重建點投影回各台，
+    和標註差在這個距離內才算同意（預設 QUALITY_REPROJECTION_THRESHOLD_PX）。
+
+    每一格另外回傳 used_cameras（實際拿來重建的相機）。
     """
+    try:
+        excluded = {
+            int(item)
+            for item in exclude_cameras.split(",")
+            if item.strip()
+        }
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="exclude_cameras 必須是逗號分隔的相機編號",
+        )
+
+    max_distance = parse_camera_max_distance(camera_max_distance)
+    threshold = parse_reprojection_threshold(reprojection_threshold_px)
+
     cameras_by_index, observations_by_frame = (
         load_pairwise_inputs(
             match_id,
@@ -567,6 +664,16 @@ def get_traj_2d_pairwise(
         )
     )
 
+    if excluded:
+        observations_by_frame = {
+            frame: [
+                observation
+                for observation in observations
+                if int(observation["camera_index"]) not in excluded
+            ]
+            for frame, observations in observations_by_frame.items()
+        }
+
     results = []
 
     for frame in sorted(observations_by_frame):
@@ -576,6 +683,8 @@ def get_traj_2d_pairwise(
                 frame,
                 [],
             ),
+            reprojection_threshold_px=threshold,
+            camera_max_distance=max_distance,
         )
 
         if consensus is None:
@@ -587,6 +696,10 @@ def get_traj_2d_pairwise(
                 **consensus["point"],
                 "pair_count":
                     consensus["pair_count"],
+                "camera_count":
+                    consensus["camera_count"],
+                "used_cameras":
+                    consensus["used_cameras"],
             }
         )
 
