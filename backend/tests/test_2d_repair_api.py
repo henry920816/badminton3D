@@ -12,8 +12,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auto_repair import AutoRepair2DPayload, auto_repair_traj_2d, UndoAutoRepairPayload, undo_auto_repair_traj_2d
 
-from app.main import (
-    get_traj_2d_pairwise,
+from app.routers.traj2d import get_traj_2d_pairwise
+from app.routers.traj2d_repair import (
     repair_traj_from_2d,
     undo_traj_2d_repair,
 )

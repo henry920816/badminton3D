@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from .cameras import cameras_by_index_for_match
 from .db import get_db
 from .models import BallPosition2D, Match, TrajectoryRepairHistory
 from .triangulation import project_raw_point, scan_2d_camera_grid, triangulate_observations
@@ -23,21 +24,6 @@ class AutoRepair2DPayload(BaseModel):
     start_frame: int
     end_frame: int
     dry_run: bool = False
-
-
-def cameras_by_index_for_match(match: Match) -> dict[int, dict]:
-    cameras = match.cameras if isinstance(match.cameras, list) else []
-    result = {}
-
-    for fallback_index, camera in enumerate(cameras):
-        if not isinstance(camera, dict):
-            continue
-        try:
-            result[int(camera.get("index", fallback_index))] = camera
-        except (TypeError, ValueError):
-            continue
-
-    return result
 
 
 def observation_dict(row: BallPosition2D) -> dict:
