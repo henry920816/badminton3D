@@ -21,6 +21,14 @@ import {
   PlaybackUI,
 } from './TimelinePanel.jsx'
 
+import {
+  usePanelSize,
+} from '../utils/usePanelSize.js'
+
+import {
+  useRallyNavigation,
+} from '../utils/useRallyNavigation.js'
+
 
 const ROW_HEIGHT_FALLBACK = 26
 const MIN_ROW_HEIGHT = 16
@@ -48,64 +56,6 @@ const STATUS_COLOR = {
 const INSUFFICIENT_COLOR = (
   'rgba(234,179,8,0.9)'
 )
-
-
-function usePanelSize(
-  ref,
-) {
-  const [
-    size,
-    setSize,
-  ] = useState({
-    width: 0,
-    height: 0,
-  })
-
-  useEffect(
-    () => {
-      if (
-        !ref.current
-      ) {
-        return
-      }
-
-      const observer = (
-        new ResizeObserver(
-          (
-            [
-              entry,
-            ],
-          ) => {
-            const {
-              width,
-              height,
-            } = (
-              entry.contentRect
-            )
-
-            setSize({
-              width,
-              height,
-            })
-          },
-        )
-      )
-
-      observer.observe(
-        ref.current,
-      )
-
-      return () => (
-        observer.disconnect()
-      )
-    },
-    [
-      ref,
-    ],
-  )
-
-  return size
-}
 
 
 function findCurrentRally(
@@ -198,13 +148,6 @@ export default function Quality2DPanel() {
     )
   )
 
-  const setCurrentTime = (
-    useAppStore(
-      state => (
-        state.setCurrentTime
-      ),
-    )
-  )
 
   const bottomView = (
     useAppStore(
@@ -256,21 +199,7 @@ export default function Quality2DPanel() {
     )
   )
 
-  const setActiveItem = (
-    useAppStore(
-      state => (
-        state.setActiveItem
-      ),
-    )
-  )
 
-  const setSelectionRange = (
-    useAppStore(
-      state => (
-        state.setSelectionRange
-      ),
-    )
-  )
 
   const setPlaying = (
     useAppStore(
@@ -1726,204 +1655,12 @@ export default function Quality2DPanel() {
   }
 
 
-  const goToRallyByIndex = (
-    targetIndex,
-  ) => {
-    const sorted = [
-      ...rallies,
-    ].sort(
-      (
-        first,
-        second,
-      ) => (
-        first.start_frame
-        - second.start_frame
-      ),
-    )
-
-    if (
-      sorted.length === 0
-    ) {
-      return
-    }
-
-    const index = (
-      Math.max(
-        0,
-        Math.min(
-          sorted.length - 1,
-          targetIndex,
-        ),
-      )
-    )
-
-    const rally = (
-      sorted[index]
-    )
-
-    const startSec = (
-      rally.start_frame
-      / fps
-    )
-
-    const endSec = (
-      rally.end_frame
-      / fps
-    )
-
-    setSelectionRange(
-      startSec,
-      endSec,
-    )
-
-    setCurrentTime(
-      startSec,
-    )
-
-    setActiveItem(
-      'rally',
-      rally.id,
-    )
-  }
-
-
-  const goPrevRally = () => {
-    const sorted = [
-      ...rallies,
-    ].sort(
-      (
-        first,
-        second,
-      ) => (
-        first.start_frame
-        - second.start_frame
-      ),
-    )
-
-    if (
-      sorted.length === 0
-    ) {
-      return
-    }
-
-    if (
-      activeItem?.type
-      === 'rally'
-    ) {
-      const index = (
-        sorted.findIndex(
-          rally => (
-            rally.id
-            === activeItem.id
-          ),
-        )
-      )
-
-      if (
-        index > 0
-      ) {
-        goToRallyByIndex(
-          index - 1,
-        )
-
-        return
-      }
-    }
-
-    let targetIndex = -1
-
-    for (
-      let index = (
-        sorted.length - 1
-      );
-      index >= 0;
-      index -= 1
-    ) {
-      if (
-        sorted[index]
-          .start_frame
-        < currentFrame
-      ) {
-        targetIndex = (
-          index
-        )
-
-        break
-      }
-    }
-
-    if (
-      targetIndex === -1
-    ) {
-      targetIndex = 0
-    }
-
-    goToRallyByIndex(
-      targetIndex,
-    )
-  }
-
-
-  const goNextRally = () => {
-    const sorted = [
-      ...rallies,
-    ].sort(
-      (
-        first,
-        second,
-      ) => (
-        first.start_frame
-        - second.start_frame
-      ),
-    )
-
-    if (
-      sorted.length === 0
-    ) {
-      return
-    }
-
-    if (
-      activeItem?.type
-      === 'rally'
-    ) {
-      const index = (
-        sorted.findIndex(
-          rally => (
-            rally.id
-            === activeItem.id
-          ),
-        )
-      )
-
-      if (
-        index !== -1
-        && index
-          < sorted.length - 1
-      ) {
-        goToRallyByIndex(
-          index + 1,
-        )
-
-        return
-      }
-    }
-
-    const targetIndex = (
-      sorted.findIndex(
-        rally => (
-          rally.start_frame
-          > currentFrame
-        ),
-      )
-    )
-
-    goToRallyByIndex(
-      targetIndex === -1
-        ? sorted.length - 1
-        : targetIndex,
-    )
-  }
+  const {
+    goPrevRally,
+    goNextRally,
+  } = useRallyNavigation(
+    fps,
+  )
 
 
   return (

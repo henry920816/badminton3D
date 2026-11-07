@@ -1,6 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import { useAppStore } from '../store.js'
 import { PlaybackUI } from './TimelinePanel.jsx'
+import { usePanelSize } from '../utils/usePanelSize.js'
+import { useRallyNavigation } from '../utils/useRallyNavigation.js'
 
 const COURT_WIDTH = 6.1
 const COURT_LENGTH = 13.4
@@ -57,22 +59,6 @@ function findNearest(items, getScore) {
   }
 
   return best
-}
-
-function usePanelSize(ref) {
-  const [size, setSize] = useState({ width: 0, height: 0 })
-
-  useEffect(() => {
-    if (!ref.current) return
-    const observer = new ResizeObserver(([entry]) => {
-      const { width, height } = entry.contentRect
-      setSize({ width, height })
-    })
-    observer.observe(ref.current)
-    return () => observer.disconnect()
-  }, [ref])
-
-  return size
 }
 
 function getAxes(view) {
@@ -417,10 +403,6 @@ export default function Projection2DPanel() {
   const trajMap = useAppStore((s) => s.trajByFrame)
   const bottomView = useAppStore((s) => s.bottomView)
   const setBottomView = useAppStore((s) => s.setBottomView)
-  const activeItem = useAppStore((s) => s.activeItem)
-  const setActiveItem = useAppStore((s) => s.setActiveItem)
-  const setSelectionRange = useAppStore((s) => s.setSelectionRange)
-  const setCurrentTime = useAppStore((s) => s.setCurrentTime)
 
   const points = useMemo(() => getVisiblePoints({
     selection,
@@ -446,58 +428,7 @@ export default function Projection2DPanel() {
     return anomalies.filter((anomaly) => anomaly.end_frame >= firstFrame && anomaly.start_frame <= lastFrame)
   }, [anomalies, firstFrame, lastFrame])
 
-  const goToRallyByIndex = (targetIdx) => {
-    const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
-    if (!sorted.length) return
-
-    const idx = Math.max(0, Math.min(sorted.length - 1, targetIdx))
-    const rally = sorted[idx]
-    const startSec = rally.start_frame / fps
-    const endSec = rally.end_frame / fps
-
-    setSelectionRange(startSec, endSec)
-    setCurrentTime(startSec)
-    setActiveItem('rally', rally.id)
-  }
-
-  const goPrevRally = () => {
-    const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
-    if (!sorted.length) return
-
-    if (activeItem?.type === 'rally') {
-      const idx = sorted.findIndex((rally) => rally.id === activeItem.id)
-      if (idx > 0) {
-        goToRallyByIndex(idx - 1)
-        return
-      }
-    }
-
-    let targetIdx = -1
-    for (let i = sorted.length - 1; i >= 0; i--) {
-      if (sorted[i].start_frame < currentFrame) {
-        targetIdx = i
-        break
-      }
-    }
-    if (targetIdx === -1) targetIdx = 0
-    goToRallyByIndex(targetIdx)
-  }
-
-  const goNextRally = () => {
-    const sorted = [...rallies].sort((a, b) => a.start_frame - b.start_frame)
-    if (!sorted.length) return
-
-    if (activeItem?.type === 'rally') {
-      const idx = sorted.findIndex((rally) => rally.id === activeItem.id)
-      if (idx !== -1 && idx < sorted.length - 1) {
-        goToRallyByIndex(idx + 1)
-        return
-      }
-    }
-
-    const targetIdx = sorted.findIndex((rally) => rally.start_frame > currentFrame)
-    goToRallyByIndex(targetIdx === -1 ? sorted.length - 1 : targetIdx)
-  }
+  const { goPrevRally, goNextRally } = useRallyNavigation(fps)
 
   return (
     <div className="h-full w-full min-h-0 min-w-0 flex flex-col bg-zinc-950">
