@@ -7,3 +7,4 @@ pydantic==2.9.2
 python-multipart==0.0.20
 pandas
 numpy
+scipy>=1.11,<2

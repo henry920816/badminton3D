@@ -1,6 +1,32 @@
+# 11/03 更新：Dataset 匯出沿用原始上傳檔案
+
+詳見 [`docs/原始輸入格式匯出_20261103.md`](docs/原始輸入格式匯出_20261103.md)。新匯入資料集會額外保留原始檔，匯出不再把 PTH 轉成 NPZ、或重建缺失的 NPY/Mask；2D CSV 保留原欄位與檔名並套用修正。舊資料集若沒有原始檔，需在 Update Dataset 補傳或重新匯入。
+
+---
+
+# 11/03 更新：所有 Rally 藍紅一鍵、Update Dataset、可選類別匯出
+
+參見 [`docs/20261103_全Rally藍紅一鍵與Dataset匯出.md`](docs/20261103_全Rally藍紅一鍵與Dataset匯出.md)。
+
+---
+
+# 2026-11-03：2D 品質檢查與修正新版
+
+**最新功能請先看 [`docs/2D品質檢查_新版規則.md`](docs/2D品質檢查_新版規則.md)**。優先抓視野外卻有 2D 的藍色格，紅色為可自動修正座標，紫色交人工，黃色表示輕微偏差，正常無色。藍色可一鍵清除目前 Rally 全部標註，也可雙擊移除單幀或長按移除連續區段，紅色保留批次修正；所有修正都有復原機制。
+
+---
+
+# 羽球 3D / 2D 標註檢查工具
+
+此版以 `bad.zip` 為基礎整理。保留原本的資料匯入、影片同步、SMPL、Timeline、品質檢查、2D 人工修正與修復 API；移除前端沒有入口的舊頁面和安裝依賴副本。
+
+**先看：[專案架構與維護](docs/專案架構與維護.md) · [整理紀錄與測試](docs/整理紀錄與測試.md)**
+
+---
+
 # Badminton 3D Debugger
 
-> 品質檢查新版的自動修復與復原僅修改 2D 標註；更新方式與限制請見 [QUALITY_UPDATE.md](QUALITY_UPDATE.md)。
+> 目前介面只保留 Timeline 和 2D 品質檢查，影片內仍可以手動修正 2D 標註。維護方式見 [docs/專案架構與維護.md](docs/專案架構與維護.md)。
 
 Badminton 3D Debugger 是一套用來檢視、同步與修正羽球比賽資料的網頁工具。系統會把多視角比賽影片、3D 羽球軌跡、Rally／擊球標註，以及人體與球拍重建結果放在同一個操作介面中，方便逐幀比對資料、找出異常並將修正結果保存到資料庫。
 
@@ -184,7 +210,7 @@ docker compose down
 - `Cam_{n}_extrinsic.npy`：外參，`(3, 4)` 的 `[R | t]`。
 - 每個相機的 intrinsic 和 extrinsic 必須成對。也接受 `cam0_intrinsic.npy`、`0_intrinsic.npy` 這類寫法。
 - 相機編號 `n` 必須和影片檔名 `n.mp4`、2D 標註的 `view{n}` 一致。
-- 可以用 [read_camera.py](read_camera.py) 印出內容確認（預設讀 `cameras/` 資料夾）。
+- 可以用 [scripts/read_camera.py](scripts/read_camera.py) 印出內容確認（預設讀 `cameras/` 資料夾）。
 
 ### 2. Rally 切分 `RallySeg.csv`
 
@@ -625,7 +651,10 @@ badminton3D/
 ├─ backend/
 │  ├─ app/
 │  │  ├─ main.py                 # FastAPI API、標註與軌跡操作
-│  │  ├─ dataset_upload.py       # 分批上傳、檢查、匯入與資料集管理
+│  │  ├─ dataset_upload.py       # 上傳檔案檢查及資料匯入
+│  │  ├─ dataset_routes.py       # 上傳、查詢、刪除的 API
+│  │  ├─ editing_routes.py       # 事件及軌跡編輯 API
+│  │  ├─ legacy_traj_repairs.py  # 舊版修復及復原 API
 │  │  ├─ models.py               # SQLAlchemy 資料表模型
 │  │  └─ reconstruction_assets.py# 人體／球拍重建資產處理
 │  ├─ tools/convert_finetune_json.py # fine-tune JSON → 上傳格式轉檔
@@ -668,3 +697,20 @@ docker compose logs -f db
 ```bash
 docker compose restart backend
 ```
+
+## 2D 檔案匯出、部分重傳與全場藍格清除（2026-11-03）
+
+- 品質檢查的「🔵 全部 Rally 藍色一鍵消除」處理**目前資料集的所有 Rally、所有視角**，按一次「上一步」可整批復原。
+- 右上方「2D 檔案」可匯出修正後的 2D CSV ZIP，也可一次選多個 `*_ball.csv`，重傳既有資料集的指定 Rally／Cam。
+- 新增資料集的上傳視窗中，每類檔案都可用「多選檔案／補傳」，無須清空整份上傳工作階段。
+- **重傳既有 CSV 會替換指定 Rally／Cam 的原始 2D；這不是 2D 修正歷史的一部分。** 重傳之前請先匯出備份；既有人工修正層會保留。
+
+詳細操作見 [`docs/所有Rally藍格_2D輸出與部分重傳.md`](docs/所有Rally藍格_2D輸出與部分重傳.md)。
+
+---
+
+## 2026/11/18 GitHub 功能整合
+
+保留本專案原有的 2D 品質檢查／批次修正／原格式匯出，另外整合比分顯示、
+Timeline 標註一致性、極線人工輔助與影片疊圖模組化。
+詳見 [`docs/GitHub更新整合紀錄_20261118.md`](docs/GitHub更新整合紀錄_20261118.md)。

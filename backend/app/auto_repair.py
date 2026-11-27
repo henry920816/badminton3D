@@ -8,434 +8,31 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .db import get_db
-from .models import BallPosition2D, Match, TrajectoryRepairHistory
+from .repair_geometry import (
+    cameras_by_index_for_match, observation_dict, status_map, bad_count,
+    single_frame_grid, projection_error, camera_image_bounds,
+    project_inside_image, robust_threshold, leave_one_out_errors,
+    ransac_consensus_observations, robust_multiview_candidate,
+    best_safe_replacement_subset,
+)
+from .models import BallPosition2D, BallPosition2DCorrection, BallTraj, Match, Hit, TrajectoryRepairHistory
 from .triangulation import project_raw_point, scan_2d_camera_grid, triangulate_observations
+from .ball2d_reference import attach_reference_3d, reference_evidence
+from .ball2d_corrections import load_ball_2d_rows
+from .edit_history import make_batch
+from .quality2d_temporal import attach_temporal_evidence, assess_temporal_candidate
 
 
 router = APIRouter()
 
 MAX_AUTO_REPAIR_FRAMES = 6000
-PAIR_INLIER_THRESHOLD_PX = 30.0
-LOO_BASE_THRESHOLD_PX = 45.0
 
 
 class AutoRepair2DPayload(BaseModel):
     start_frame: int
     end_frame: int
     dry_run: bool = False
-
-
-def cameras_by_index_for_match(match: Match) -> dict[int, dict]:
-    cameras = match.cameras if isinstance(match.cameras, list) else []
-    result = {}
-
-    for fallback_index, camera in enumerate(cameras):
-        if not isinstance(camera, dict):
-            continue
-        try:
-            result[int(camera.get("index", fallback_index))] = camera
-        except (TypeError, ValueError):
-            continue
-
-    return result
-
-
-def observation_dict(row: BallPosition2D) -> dict:
-    return {
-        "camera_index": int(row.camera_index),
-        "x": float(row.x),
-        "y": float(row.y),
-    }
-
-
-def status_map(grid_frame: dict) -> dict[int, str]:
-    return {
-        int(item["camera_index"]): str(item["status"])
-        for item in (grid_frame.get("cameras") or [])
-    }
-
-
-def bad_count(statuses: dict[int, str]) -> int:
-    return sum(1 for status in statuses.values() if status == "bad")
-
-
-def single_frame_grid(
-    cameras_by_index: dict[int, dict],
-    observations: list[dict],
-    frame: int,
-) -> dict:
-    return scan_2d_camera_grid(
-        cameras_by_index,
-        {frame: observations},
-        frame,
-        frame,
-    )[0]
-
-
-def projection_error(point: dict, camera: dict, observation: dict) -> float | None:
-    projected = project_raw_point(point, camera)
-
-    if projected is None:
-        return None
-
-    dx = float(projected["x"]) - float(observation["x"])
-    dy = float(projected["y"]) - float(observation["y"])
-    error = math.sqrt(dx * dx + dy * dy)
-
-    return float(error) if math.isfinite(error) else None
-
-
-def camera_image_bounds(camera: dict) -> tuple[float, float]:
-    projection = camera.get("projection") if isinstance(camera, dict) else None
-
-    if not isinstance(projection, dict):
-        return 1920.0, 1200.0
-
-    width = projection.get("imageWidth", projection.get("image_width", 1920.0))
-    height = projection.get("imageHeight", projection.get("image_height", 1200.0))
-
-    try:
-        width = float(width)
-        height = float(height)
-    except (TypeError, ValueError):
-        return 1920.0, 1200.0
-
-    if (
-        width <= 0
-        or height <= 0
-        or not math.isfinite(width)
-        or not math.isfinite(height)
-    ):
-        return 1920.0, 1200.0
-
-    return width, height
-
-
-def project_inside_image(point: dict, camera: dict) -> dict | None:
-    projected = project_raw_point(point, camera)
-
-    if projected is None:
-        return None
-
-    x = float(projected["x"])
-    y = float(projected["y"])
-    width, height = camera_image_bounds(camera)
-
-    if (
-        not math.isfinite(x)
-        or not math.isfinite(y)
-        or x < 0
-        or x > width
-        or y < 0
-        or y > height
-    ):
-        return None
-
-    return {
-        "x": x,
-        "y": y,
-        "depth": float(projected["depth"]),
-    }
-
-
-def robust_threshold(errors: list[float], minimum: float) -> float:
-    if not errors:
-        return minimum
-
-    values = np.asarray(errors, dtype=np.float64)
-    median = float(np.median(values))
-    mad = float(np.median(np.abs(values - median)))
-    robust_sigma = 1.4826 * mad
-
-    return float(max(minimum, median + 4.0 * robust_sigma))
-
-
-def leave_one_out_errors(
-    cameras_by_index: dict[int, dict],
-    observations: list[dict],
-) -> list[dict]:
-    if len(observations) < 3:
-        return []
-
-    by_camera = {
-        int(item["camera_index"]): item
-        for item in observations
-    }
-    results = []
-
-    for camera_index in sorted(by_camera):
-        others = [
-            observation
-            for other_index, observation in by_camera.items()
-            if other_index != camera_index
-        ]
-
-        if len(others) < 2:
-            continue
-
-        try:
-            reconstruction = triangulate_observations(cameras_by_index, others)
-        except ValueError:
-            continue
-
-        camera = cameras_by_index.get(camera_index)
-        if camera is None:
-            continue
-
-        error = projection_error(
-            reconstruction["point"],
-            camera,
-            by_camera[camera_index],
-        )
-
-        if error is not None:
-            results.append(
-                {
-                    "camera_index": camera_index,
-                    "pixel_error": error,
-                }
-            )
-
-    return results
-
-
-def ransac_consensus_observations(
-    cameras_by_index: dict[int, dict],
-    observations: list[dict],
-) -> tuple[list[dict], dict | None]:
-    if len(observations) < 3:
-        return observations, None
-
-    by_camera = {
-        int(item["camera_index"]): item
-        for item in observations
-    }
-    best = None
-
-    for first_index, second_index in combinations(sorted(by_camera), 2):
-        pair = [by_camera[first_index], by_camera[second_index]]
-
-        try:
-            result = triangulate_observations(cameras_by_index, pair)
-        except ValueError:
-            continue
-
-        errors = {}
-
-        for camera_index in sorted(by_camera):
-            camera = cameras_by_index.get(camera_index)
-            if camera is None:
-                continue
-
-            error = projection_error(
-                result["point"],
-                camera,
-                by_camera[camera_index],
-            )
-
-            if error is not None:
-                errors[camera_index] = error
-
-        inliers = [
-            camera_index
-            for camera_index, error in errors.items()
-            if error <= PAIR_INLIER_THRESHOLD_PX
-        ]
-
-        if len(inliers) < 3:
-            continue
-
-        median_error = float(
-            np.median([errors[camera_index] for camera_index in inliers])
-        )
-
-        candidate = {
-            "pair": [first_index, second_index],
-            "inlier_indices": inliers,
-            "inlier_count": len(inliers),
-            "median_inlier_error": median_error,
-        }
-
-        if (
-            best is None
-            or candidate["inlier_count"] > best["inlier_count"]
-            or (
-                candidate["inlier_count"] == best["inlier_count"]
-                and candidate["median_inlier_error"] < best["median_inlier_error"]
-            )
-        ):
-            best = candidate
-
-    if best is None:
-        return observations, None
-
-    return [by_camera[index] for index in best["inlier_indices"]], best
-
-
-def robust_multiview_candidate(
-    cameras_by_index: dict[int, dict],
-    observations: list[dict],
-) -> dict | None:
-    if len(observations) < 3:
-        return None
-
-    selected, ransac = ransac_consensus_observations(
-        cameras_by_index,
-        observations,
-    )
-
-    if len(selected) < 3:
-        return None
-
-    working = [dict(item) for item in selected]
-    removed = []
-
-    while len(working) > 3:
-        loo = leave_one_out_errors(cameras_by_index, working)
-
-        if len(loo) != len(working):
-            break
-
-        threshold = robust_threshold(
-            [float(item["pixel_error"]) for item in loo],
-            LOO_BASE_THRESHOLD_PX,
-        )
-        worst = max(loo, key=lambda item: item["pixel_error"])
-
-        if float(worst["pixel_error"]) <= threshold:
-            break
-
-        worst_index = int(worst["camera_index"])
-        working = [
-            item
-            for item in working
-            if int(item["camera_index"]) != worst_index
-        ]
-        removed.append(
-            {
-                "camera_index": worst_index,
-                "pixel_error": float(worst["pixel_error"]),
-                "threshold": threshold,
-            }
-        )
-
-    final_loo = leave_one_out_errors(cameras_by_index, working)
-
-    if len(final_loo) != len(working):
-        return None
-
-    final_errors = [float(item["pixel_error"]) for item in final_loo]
-    final_threshold = robust_threshold(final_errors, LOO_BASE_THRESHOLD_PX)
-
-    # 只擋明顯崩掉，不把它當一般 RMS 生死線。
-    if final_errors and max(final_errors) > max(90.0, final_threshold):
-        return None
-
-    try:
-        reconstruction = triangulate_observations(
-            cameras_by_index,
-            working,
-        )
-    except ValueError:
-        return None
-
-    return {
-        "mode": "multiview",
-        "point": reconstruction["point"],
-        "reliable_camera_indices": [
-            int(item["camera_index"])
-            for item in working
-        ],
-        "rms_error": float(reconstruction["rms_error"]),
-        "max_error": float(reconstruction["max_error"]),
-        "condition_ratio": float(reconstruction["condition_ratio"]),
-        "loo": final_loo,
-        "ransac": ransac,
-        "removed_cameras": removed,
-    }
-
-
-def best_safe_replacement_subset(
-    cameras_by_index: dict[int, dict],
-    frame: int,
-    frame_observations: dict[int, dict],
-    candidate_bad_points: dict[int, dict],
-    original_ok_indices: set[int],
-) -> dict | None:
-    candidate_indices = sorted(candidate_bad_points)
-
-    if not candidate_indices:
-        return None
-
-    baseline_statuses = status_map(
-        single_frame_grid(
-            cameras_by_index,
-            list(frame_observations.values()),
-            frame,
-        )
-    )
-    baseline_bad_count = bad_count(baseline_statuses)
-    best = None
-
-    # 從一次修最多支 bad camera 的組合開始找。
-    for subset_size in range(len(candidate_indices), 0, -1):
-        for subset in combinations(candidate_indices, subset_size):
-            trial_observations = {
-                camera_index: dict(observation)
-                for camera_index, observation in frame_observations.items()
-            }
-
-            for camera_index in subset:
-                trial_observations[camera_index] = dict(
-                    candidate_bad_points[camera_index]
-                )
-
-            trial_grid = single_frame_grid(
-                cameras_by_index,
-                list(trial_observations.values()),
-                frame,
-            )
-            trial_statuses = status_map(trial_grid)
-            trial_bad_count = bad_count(trial_statuses)
-
-            new_bad_on_original_ok = [
-                camera_index
-                for camera_index in original_ok_indices
-                if trial_statuses.get(camera_index) != "ok"
-            ]
-            repaired_still_bad = [
-                camera_index
-                for camera_index in subset
-                if trial_statuses.get(camera_index) != "ok"
-            ]
-
-            if new_bad_on_original_ok or repaired_still_bad:
-                continue
-
-            if trial_bad_count >= baseline_bad_count:
-                continue
-
-            candidate = {
-                "camera_indices": list(subset),
-                "observations": trial_observations,
-                "statuses": trial_statuses,
-                "bad_count": trial_bad_count,
-            }
-
-            if (
-                best is None
-                or len(candidate["camera_indices"]) > len(best["camera_indices"])
-                or (
-                    len(candidate["camera_indices"]) == len(best["camera_indices"])
-                    and candidate["bad_count"] < best["bad_count"]
-                )
-            ):
-                best = candidate
-
-        if best is not None:
-            break
-
-    return best
+    source: str = "corrected"
 
 
 @router.post("/matches/{match_id}/traj2d/auto-repair")
@@ -444,7 +41,7 @@ def auto_repair_traj_2d(
     payload: AutoRepair2DPayload,
     db: Session = Depends(get_db),
 ):
-    match = db.get(Match, match_id)
+    match = db.query(Match).filter(Match.id == match_id).with_for_update().first()
 
     if match is None:
         raise HTTPException(status_code=404, detail="match not found")
@@ -469,47 +66,71 @@ def auto_repair_traj_2d(
     if len(cameras_by_index) < 2:
         raise HTTPException(status_code=400, detail="可用相機不足")
 
-    rows = (
-        db.query(BallPosition2D)
-        .filter(
-            BallPosition2D.match_id == match_id,
-            BallPosition2D.frame >= start_frame,
-            BallPosition2D.frame <= end_frame,
-            BallPosition2D.visibility > 0,
-        )
-        .order_by(
-            BallPosition2D.frame,
-            BallPosition2D.camera_index,
-        )
-        .all()
+    # All decisions use the same corrected 2D overlay as the quality grid.
+    # Original points are never modified by this endpoint.
+    if payload.source != "corrected":
+        raise HTTPException(status_code=400, detail="自動修正請使用 corrected 2D 來源（原始標註會保留）")
+
+    rows = load_ball_2d_rows(
+        db, match_id, start_frame, end_frame, source="corrected", visible_only=True,
     )
-
-    rows_by_frame_camera = {}
     observations_by_frame = {}
-
     for row in rows:
-        camera_index = int(row.camera_index)
-
+        camera_index = int(row["camera_index"])
         if camera_index not in cameras_by_index:
             continue
+        frame = int(row["frame"])
+        observations_by_frame.setdefault(frame, []).append({
+            "camera_index": camera_index,
+            "x": float(row["x"]),
+            "y": float(row["y"]),
+            "corrected": bool(row.get("corrected")),
+        })
 
-        frame = int(row.frame)
-        rows_by_frame_camera[(frame, camera_index)] = row
-        observations_by_frame.setdefault(frame, []).append(
-            observation_dict(row)
+    # The preexisting correction layer is snapshotted so undo can restore it.
+    preexisting_corrections = {
+        (int(row.frame), int(row.camera_index)): row
+        for row in db.query(BallPosition2DCorrection).filter(
+            BallPosition2DCorrection.match_id == match_id,
+            BallPosition2DCorrection.frame >= start_frame,
+            BallPosition2DCorrection.frame <= end_frame,
+        ).all()
+    }
+    nearby_hits = {
+        int(row.new_hit_frame if row.new_hit_frame is not None else row.hit_frame)
+        for row in db.query(Hit).filter(
+            Hit.match_id == match_id,
+            Hit.hit_frame >= start_frame - 3,
+            Hit.hit_frame <= end_frame + 3,
         )
+    }
+    observations_snapshot = {
+        frame: [dict(item) for item in items]
+        for frame, items in observations_by_frame.items()
+    }
 
-    # Use the same detector as the quality grid.
-    original_grid = scan_2d_camera_grid(
-        cameras_by_index,
-        observations_by_frame,
-        start_frame,
-        end_frame,
-    )
+    # 原始 3D 僅於其他至少三視角獨立佐證後才有第一順位。
+    original_3d_by_frame = {
+        int(row.frame): {"x": row.x, "y": row.y, "z": row.z}
+        for row in db.query(BallTraj).filter(
+            BallTraj.match_id == match_id,
+            BallTraj.frame >= start_frame,
+            BallTraj.frame <= end_frame,
+        )
+    }
+
+    # 品質檢查與修復統一使用相同優先序：可信原始 3D > 雙錨點 > 2D。
+    original_grid = attach_temporal_evidence(attach_reference_3d(
+        scan_2d_camera_grid(
+            cameras_by_index, observations_by_frame, start_frame, end_frame,
+        ),
+        cameras_by_index, observations_by_frame, original_3d_by_frame,
+    ), observations_by_frame)
     original_status_by_frame = {
         int(item["frame"]): status_map(item)
         for item in original_grid
     }
+    original_grid_by_frame = {int(item["frame"]): item for item in original_grid}
 
     bad_frames = [
         frame
@@ -520,6 +141,7 @@ def auto_repair_traj_2d(
     results = []
     repaired_2d_points = []
     history_ids = []
+    history_batch = None
 
     try:
         for frame in bad_frames:
@@ -539,50 +161,133 @@ def auto_repair_traj_2d(
                 int(item["camera_index"]): dict(item)
                 for item in observations_by_frame.get(frame, [])
             }
+            reference_3d = reference_evidence(
+                cameras_by_index,
+                list(frame_observations.values()),
+                original_3d_by_frame.get(frame),
+            )
+            reference_is_supported = reference_3d["trust"] == "corroborated"
             good_observations = [
                 frame_observations[camera_index]
                 for camera_index in sorted(original_ok_indices)
                 if camera_index in frame_observations
             ]
 
-            # Geometry is temporary: this route never reads or writes BallTraj.
-            candidate = robust_multiview_candidate(
-                cameras_by_index,
-                good_observations,
-            )
-
-            if candidate is None:
-                results.append(
-                    {
-                        "frame": frame,
-                        "status": "skipped",
-                        "reason": "找不到可驗證的可靠重建候選",
-                        "original_bad_camera_indices": original_bad_indices,
-                    }
-                )
-                continue
-
-            candidate_bad_points = {}
-
+            # 原始 3D 是第一順位的「候選修正來源」。僅對已經由
+            # 至少三台其他相機獨立佐證，且當前偏差 >30px 的 Bad 視角使用。
+            # 否則才退回多視角 2D 重建，避免自我驗證及無條件信任原始 3D。
+            primary_replacements = {}
+            evidence_by_camera = {
+                int(item["camera_index"]): item
+                for item in original_grid_by_frame[frame].get("cameras", [])
+            }
             for camera_index in original_bad_indices:
+                item = evidence_by_camera.get(camera_index, {})
+                if not (
+                    item.get("original_3d_primary")
+                    and item.get("reference_3d_status") == "disagrees"
+                    and item.get("reference_3d_independently_supported")
+                ):
+                    continue
                 camera = cameras_by_index.get(camera_index)
-
                 if camera is None:
                     continue
+                projected = project_inside_image(original_3d_by_frame[frame], camera)
+                if projected is not None:
+                    primary_replacements[camera_index] = {
+                        "camera_index": camera_index,
+                        "x": float(projected["x"]),
+                        "y": float(projected["y"]),
+                    }
 
-                projected = project_inside_image(
-                    candidate["point"],
-                    camera,
+            remaining_bad = [i for i in original_bad_indices if i not in primary_replacements]
+            geometry_candidate = (
+                robust_multiview_candidate(cameras_by_index, good_observations)
+                if remaining_bad else None
+            )
+            candidate_bad_points = dict(primary_replacements)
+            replacement_source = {i: "original_3d_primary" for i in primary_replacements}
+            if geometry_candidate is not None:
+                for camera_index in remaining_bad:
+                    camera = cameras_by_index.get(camera_index)
+                    if camera is None:
+                        continue
+                    projected = project_inside_image(geometry_candidate["point"], camera)
+                    if projected is None:
+                        continue
+                    independent = reference_3d["independent_by_camera"].get(camera_index, {})
+                    # 若該視角確實有可信原始 3D，但計算出的候選與其
+                    # 相差過大，不能利用次順位的雙視角結果覆蓋它。
+                    if independent.get("supported"):
+                        reference_prediction = project_inside_image(
+                            original_3d_by_frame[frame], camera,
+                        )
+                        if (reference_prediction is None or math.hypot(
+                            reference_prediction["x"] - projected["x"],
+                            reference_prediction["y"] - projected["y"],
+                        ) > 24.0):
+                            continue
+                    candidate_bad_points[camera_index] = {
+                        "camera_index": camera_index,
+                        "x": float(projected["x"]),
+                        "y": float(projected["y"]),
+                    }
+                    replacement_source[camera_index] = "multiview_2d_fallback"
+
+            # Time continuity is an independent safeguard, not a geometry vote.
+            # Near a hit, a discontinuity may be real and is left for review.
+            temporal_checks = {}
+            for camera_index in list(candidate_bad_points):
+                check = assess_temporal_candidate(
+                    observations_snapshot, frame, camera_index,
+                    candidate_bad_points[camera_index],
                 )
+                if any(abs(frame - hit) <= 2 for hit in nearby_hits):
+                    check = dict(check, status="review", reason="擊球點附近請人工核對")
+                temporal_checks[camera_index] = check
+                if check["status"] == "review":
+                    candidate_bad_points.pop(camera_index)
+                    replacement_source.pop(camera_index, None)
 
-                if projected is None:
-                    continue
+            if not candidate_bad_points:
+                results.append({
+                    "frame": frame,
+                    "status": "skipped",
+                    "reason": (
+                        "候選與前後影格不一致或接近擊球點，需要人工檢查"
+                        if any(item["status"] == "review" for item in temporal_checks.values())
+                        else "可信原始 3D 與備援 2D 重建均未產生安全候選"
+                    ),
+                    "temporal": temporal_checks,
+                    "original_bad_camera_indices": original_bad_indices,
+                })
+                continue
 
-                candidate_bad_points[camera_index] = {
-                    "camera_index": camera_index,
-                    "x": float(projected["x"]),
-                    "y": float(projected["y"]),
+            # 保留既有 API/修復紀錄的欄位。3D 第一順位並不偽造 DLT 品質指標。
+            if geometry_candidate is not None:
+                candidate = dict(geometry_candidate)
+            else:
+                supporting_errors = [
+                    float(error) for error in reference_3d["by_camera"].values()
+                    if math.isfinite(float(error)) and float(error) <= 12.0
+                ]
+                rms = math.sqrt(sum(e * e for e in supporting_errors) / len(supporting_errors)) if supporting_errors else None
+                candidate = {
+                    "point": original_3d_by_frame[frame],
+                    "mode": "original_3d_primary",
+                    "reliable_camera_indices": sorted(
+                        int(i) for i, e in reference_3d["by_camera"].items()
+                        if math.isfinite(float(e)) and float(e) <= 12.0
+                    ),
+                    "rms_error": rms,
+                    "max_error": max(supporting_errors) if supporting_errors else None,
+                    "condition_ratio": None,
+                    "loo": [],
+                    "ransac": None,
+                    "removed_cameras": [],
                 }
+
+            candidate["temporal"] = temporal_checks
 
             safe_replacement = best_safe_replacement_subset(
                 cameras_by_index,
@@ -590,6 +295,7 @@ def auto_repair_traj_2d(
                 frame_observations,
                 candidate_bad_points,
                 original_ok_indices,
+                original_3d_by_frame.get(frame),
             )
 
             if safe_replacement is None:
@@ -598,13 +304,20 @@ def auto_repair_traj_2d(
                         "frame": frame,
                         "status": "skipped",
                         "reason": "候選未通過原 detector 的安全回驗",
-                        "mode": candidate["mode"],
+                        "mode": "unverified",
                         "original_bad_camera_indices": original_bad_indices,
                     }
                 )
                 continue
 
             accepted_indices = safe_replacement["camera_indices"]
+            accepted_sources = {i: replacement_source[i] for i in accepted_indices}
+            chosen_modes = set(accepted_sources.values())
+            repair_mode = (
+                "original_3d_primary" if chosen_modes == {"original_3d_primary"}
+                else "multiview_2d_fallback" if chosen_modes == {"multiview_2d_fallback"}
+                else "original_3d_primary_and_2d_fallback"
+            )
             working_observations = safe_replacement["observations"]
             final_statuses = safe_replacement["statuses"]
 
@@ -624,32 +337,24 @@ def auto_repair_traj_2d(
             new_2d = []
 
             for camera_index in accepted_indices:
-                row = rows_by_frame_camera.get((frame, camera_index))
-
-                if row is None:
+                current = frame_observations.get(camera_index)
+                if current is None:
                     continue
-
-                original_2d.append(
-                    {
-                        "camera_index": camera_index,
-                        "existed": True,
-                        "visibility": int(row.visibility),
-                        "x": float(row.x),
-                        "y": float(row.y),
-                    }
-                )
-
+                previous = preexisting_corrections.get((frame, camera_index))
+                original_2d.append({
+                    "camera_index": camera_index,
+                    "existed": previous is not None,
+                    "visibility": int(previous.visibility) if previous is not None else 0,
+                    "x": float(previous.x) if previous is not None else 0.0,
+                    "y": float(previous.y) if previous is not None else 0.0,
+                })
                 replacement = working_observations[camera_index]
-
-                new_2d.append(
-                    {
-                        "camera_index": camera_index,
-                        "frame": frame,
-                        "visibility": 1,
-                        "x": float(replacement["x"]),
-                        "y": float(replacement["y"]),
-                    }
-                )
+                new_2d.append({
+                    "camera_index": camera_index, "frame": frame,
+                    "existed": True, "visibility": 1,
+                    "x": float(replacement["x"]),
+                    "y": float(replacement["y"]),
+                })
 
             if not new_2d:
                 results.append(
@@ -665,23 +370,34 @@ def auto_repair_traj_2d(
 
             if not payload.dry_run:
                 for item in new_2d:
-                    row = rows_by_frame_camera[
-                        (frame, int(item["camera_index"]))
-                    ]
-                    row.visibility = 1
-                    row.x = float(item["x"])
-                    row.y = float(item["y"])
+                    key = (frame, int(item["camera_index"]))
+                    correction = preexisting_corrections.get(key)
+                    if correction is None:
+                        correction = BallPosition2DCorrection(
+                            match_id=match_id, camera_index=key[1], frame=frame,
+                            created_at=datetime.utcnow(),
+                        )
+                        db.add(correction)
+                        preexisting_corrections[key] = correction
+                    correction.visibility = 1
+                    correction.x = float(item["x"])
+                    correction.y = float(item["y"])
+                    correction.updated_at = datetime.utcnow()
 
+                if history_batch is None:
+                    history_batch = make_batch(db, match_id)
                 history = TrajectoryRepairHistory(
                     match_id=match_id,
                     frame=frame,
-                    source="auto_2d_only",
+                    source="auto_2d_overlay",
                     original_point=None,
                     repaired_point={},
                     original_2d=original_2d,
                     repaired_2d=new_2d,
                     reprojection={
-                        "mode": candidate["mode"],
+                        "edit_batch": history_batch,
+                        "edit_label": "原有 2D 自動修復",
+                        "mode": repair_mode,
                         "reliable_camera_indices":
                             candidate["reliable_camera_indices"],
                         "rms_error": candidate["rms_error"],
@@ -693,6 +409,13 @@ def auto_repair_traj_2d(
                         "removed_cameras":
                             candidate.get("removed_cameras", []),
                         "accepted_camera_indices": accepted_indices,
+                        "replacement_sources": accepted_sources,
+                        "original_3d_reference": {
+                            "trust": reference_3d["trust"],
+                            "support_count": reference_3d["support_count"],
+                            "evaluated_count": reference_3d["evaluated_count"],
+                            "used_as_safety_check": reference_is_supported,
+                        },
                     },
                     created_at=datetime.utcnow(),
                 )
@@ -725,25 +448,31 @@ def auto_repair_traj_2d(
                     "frame": frame,
                     "status": "would_repair" if payload.dry_run else "repaired",
                     "repair_id": repair_id,
-                    "mode": candidate["mode"],
+                    "mode": repair_mode,
                     "reliable_camera_indices":
                         candidate["reliable_camera_indices"],
                     "original_bad_camera_indices": original_bad_indices,
                     "repaired_camera_indices": accepted_indices,
+                    "replacement_sources": accepted_sources,
                     "rms_error": candidate["rms_error"],
                     "max_error": candidate["max_error"],
                     "condition_ratio": candidate["condition_ratio"],
                     "temporal": candidate.get("temporal"),
+                    "original_3d_reference": {
+                        "trust": reference_3d["trust"],
+                        "support_count": reference_3d["support_count"],
+                        "used_as_safety_check": reference_is_supported,
+                    },
                 }
             )
 
         # Recheck the complete range with the current detector.
-        final_grid = scan_2d_camera_grid(
-            cameras_by_index,
-            observations_by_frame,
-            start_frame,
-            end_frame,
-        )
+        final_grid = attach_temporal_evidence(attach_reference_3d(
+            scan_2d_camera_grid(
+                cameras_by_index, observations_by_frame, start_frame, end_frame,
+            ),
+            cameras_by_index, observations_by_frame, original_3d_by_frame,
+        ), observations_by_frame)
         final_status_by_frame = {
             int(item["frame"]): status_map(item)
             for item in final_grid
@@ -822,7 +551,8 @@ def auto_repair_traj_2d(
         "skipped_frames": len(skipped_frames),
         "repair_ids": history_ids,
         "trajectory_points": [],
-        "scope": "2d_only",
+        "scope": "2d_correction_overlay",
+        "source": "corrected",
         "ball_2d_points": repaired_2d_points,
         "frames": results,
         "grid": final_grid,
@@ -857,8 +587,8 @@ def undo_auto_repair_traj_2d(
             raise HTTPException(status_code=400, detail='同一次復原不可包含重複 frame')
         points2d = []
         for history in histories:
-            if history.source != 'auto_2d_only' or history.reverted_at is not None:
-                raise HTTPException(status_code=409, detail='只可復原新版純 2D 修復；此紀錄屬於其他修復類型或已復原')
+            if history.source not in ('auto_2d_only', 'auto_2d_overlay') or history.reverted_at is not None:
+                raise HTTPException(status_code=409, detail='紀錄不是可復原的 2D 修復，或已復原')
             indices = {int(item['camera_index']) for item in history.repaired_2d or []}
             later = db.query(TrajectoryRepairHistory).filter(
                 TrajectoryRepairHistory.match_id == match_id,
@@ -868,6 +598,38 @@ def undo_auto_repair_traj_2d(
             ).all()
             if any(indices.intersection(int(point['camera_index']) for point in item.repaired_2d or []) for item in later):
                 raise HTTPException(status_code=409, detail=f'frame {history.frame} 的 2D 標註已有後續修復，整批未復原')
+            if history.source == 'auto_2d_overlay':
+                for repaired in history.repaired_2d or []:
+                    index = int(repaired['camera_index'])
+                    correction = db.query(BallPosition2DCorrection).filter_by(
+                        match_id=match_id, frame=history.frame, camera_index=index,
+                    ).with_for_update().first()
+                    if (correction is None or int(correction.visibility) != int(repaired['visibility'])
+                        or not math.isclose(correction.x, float(repaired['x']), abs_tol=1e-7, rel_tol=0)
+                        or not math.isclose(correction.y, float(repaired['y']), abs_tol=1e-7, rel_tol=0)):
+                        raise HTTPException(status_code=409, detail=f'frame {history.frame} Cam {index} 已有後續變動，不能復原')
+                    previous = next((row for row in history.original_2d or []
+                                     if int(row['camera_index']) == index), None)
+                    if previous is None:
+                        raise HTTPException(status_code=409, detail='缺少修復前的資料')
+                    if previous.get('existed'):
+                        correction.visibility = int(previous['visibility'])
+                        correction.x = float(previous['x'])
+                        correction.y = float(previous['y'])
+                    else:
+                        db.delete(correction)
+                    # Return the effective corrected overlay after undo.
+                    if previous.get('existed'):
+                        restored = previous
+                    else:
+                        raw = db.query(BallPosition2D).filter_by(
+                            match_id=match_id, frame=history.frame, camera_index=index,
+                        ).first()
+                        restored = {'visibility': raw.visibility, 'x': raw.x, 'y': raw.y} if raw else {'visibility': 0, 'x': 0, 'y': 0}
+                    points2d.append(dict(camera_index=index, frame=history.frame,
+                                         x=restored['x'], y=restored['y'], visibility=restored['visibility']))
+                history.reverted_at = datetime.utcnow()
+                continue
             current2d = {}
             for repaired in history.repaired_2d or []:
                 index = int(repaired['camera_index'])

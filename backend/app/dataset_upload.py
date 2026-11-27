@@ -13,12 +13,21 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import HTTPException
 from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
-from .db import get_db
-from .models import Anomaly, BallPosition2D, BallTraj, Hit, Match, MatchPlayer, Rally
+from .dataset_originals import safe_path
+from .dataset_helpers import (
+    safe_int, safe_float, safe_str, safe_bool, positive_float,
+    positive_int, record_file_path,
+)
+from .dataset_cameras import (
+    CAMERA_PATTERN, DEFAULT_COURT_TRANSFORM, ALLOWED_COORDINATE_MODES,
+    camera_record_map, load_intrinsic, load_extrinsic, inspect_cameras,
+    camera_pose, court_transform, camera_setting, load_cameras,
+)
+from .models import BallPosition2D, BallTraj, Hit, Match, Rally
 from .players import (
     apply_match_gender,
     build_match_roster,
@@ -26,16 +35,9 @@ from .players import (
     resolve_up_team,
 )
 from .reconstruction_assets import (
-    dataset_catalog_entry,
     import_reconstruction_assets,
     inspect_reconstruction_records,
-    reconstruction_router,
-    reconstruction_summary,
-    remove_match_assets,
 )
-
-
-router = APIRouter()
 
 
 MAX_SESSION_BYTES = int(
@@ -92,29 +94,6 @@ REQUIRED_RALLY_COLUMNS = {
     "End",
 }
 
-ALLOWED_COORDINATE_MODES = {
-    "raw",
-    "scene",
-    "flipX",
-    "flipY",
-    "flipZ",
-    "flipXFlipZ",
-    "flipXFlipYFlipZ",
-}
-
-DEFAULT_COURT_TRANSFORM = {
-    "xOffset": 0.0,
-    "zOffset": 0.0,
-    "rotateDeg": 0.0,
-    "xScale": 1.0,
-    "zScale": 1.0,
-    "yOffset": 0.0,
-}
-
-CAMERA_PATTERN = re.compile(
-    r"^(?:cam(?:era)?[_-]?)?(\d+)[_-](intrinsic|extrinsic)\.npy$",
-    re.IGNORECASE,
-)
 
 BALL_2D_FILENAME_PATTERN = re.compile(
     r"^match(?P<match>\d+)_(?P<rally>\d+)_"
@@ -145,161 +124,8 @@ PLAIN_NUMBER_PATTERN = re.compile(
 
 
 # -----------------------------------------------------------------------------
-# Basic conversion helpers
+# 資料集欄位處理
 # -----------------------------------------------------------------------------
-
-
-def safe_int(
-    value: Any,
-    default: int | None = None,
-) -> int | None:
-    try:
-        if value is None:
-            return default
-
-        if pd.isna(value):
-            return default
-
-        return int(
-            float(value)
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return default
-
-
-def safe_float(
-    value: Any,
-    default: float = 0.0,
-) -> float:
-    try:
-        number = float(value)
-
-        if math.isfinite(number):
-            return number
-
-        return default
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return default
-
-
-def safe_str(
-    value: Any,
-    default: str = "",
-) -> str:
-    if value is None:
-        return default
-
-    try:
-        if pd.isna(value):
-            return default
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        pass
-
-    return str(value).strip()
-
-
-def safe_bool(
-    value: Any,
-    default: bool = False,
-) -> bool:
-    if value is None:
-        return default
-
-    if isinstance(
-        value,
-        bool,
-    ):
-        return value
-
-    if isinstance(
-        value,
-        (
-            int,
-            float,
-        ),
-    ):
-        return bool(value)
-
-    text = str(value).strip().lower()
-
-    if text in {
-        "true",
-        "1",
-        "yes",
-        "on",
-    }:
-        return True
-
-    if text in {
-        "false",
-        "0",
-        "no",
-        "off",
-    }:
-        return False
-
-    return default
-
-
-def positive_float(
-    value: Any,
-    name: str,
-) -> float:
-    try:
-        number = float(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ) as exc:
-        raise ValueError(
-            f"{name} 必須是數字"
-        ) from exc
-
-    if (
-        not math.isfinite(number)
-        or number <= 0
-    ):
-        raise ValueError(
-            f"{name} 必須大於 0"
-        )
-
-    return number
-
-
-def positive_int(
-    value: Any,
-    name: str,
-) -> int:
-    try:
-        number = int(value)
-
-    except (
-        TypeError,
-        ValueError,
-    ) as exc:
-        raise ValueError(
-            f"{name} 必須是整數"
-        ) from exc
-
-    if number <= 0:
-        raise ValueError(
-            f"{name} 必須大於 0"
-        )
-
-    return number
 
 
 def normalize_key(
@@ -310,8 +136,7 @@ def normalize_key(
     if not text:
         return ""
 
-    # Do not pass names such as 1_01_00 to float(). Python accepts underscores
-    # inside numeric strings and would incorrectly turn it into 10100.
+    # 1_01_00 是檔案名稱，不該被 float 當成 10100。
     if not PLAIN_NUMBER_PATTERN.fullmatch(text):
         return text
 
@@ -328,7 +153,7 @@ def normalize_key(
 
 
 # -----------------------------------------------------------------------------
-# Upload-session storage
+# 分批上傳暫存資料
 # -----------------------------------------------------------------------------
 
 
@@ -602,33 +427,6 @@ def category_dir(
     return path
 
 
-def record_file_path(
-    base: Path,
-    record: dict,
-) -> Path:
-    relative = str(
-        record.get("stored_path", "")
-    )
-
-    path = (
-        base
-        / relative
-    ).resolve()
-
-    try:
-        path.relative_to(
-            base.resolve()
-        )
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="暫存檔案路徑無效",
-        ) from exc
-
-    return path
-
-
 def current_session_size(
     manifest: dict,
 ) -> int:
@@ -691,15 +489,18 @@ def find_replacement_record(
     relative_path: str,
 ) -> dict | None:
     for record in records:
-        if category in {
-            "rally-data",
-            "ball-2d",
-            "human-racket",
-        }:
-            existing_key = str(
-                record.get("relative_path", "")
-            ).replace("\\", "/").lower()
-
+        if category == "ball-2d":
+            # 檔案改從不同資料夾補傳時，依 Rally/視角/Frame 範圍辨認同一份 CSV。
+            # 不要只比路徑，否則舊檔與新檔會重複匯入。
+            previous = BALL_2D_FILENAME_PATTERN.fullmatch(str(record.get("original_name", "")))
+            incoming = BALL_2D_FILENAME_PATTERN.fullmatch(original_name)
+            if previous and incoming and all(
+                previous.group(key) == incoming.group(key)
+                for key in ("rally", "start", "end", "camera")
+            ):
+                return record
+        elif category in {"rally-data", "human-racket"}:
+            existing_key = str(record.get("relative_path", "")).replace("\\", "/").lower()
             if existing_key == relative_path.lower():
                 return record
 
@@ -778,7 +579,6 @@ async def store_uploaded_files(
         category
     ]
 
-    incoming_size = 0
     session_size = current_session_size(
         manifest
     )
@@ -841,10 +641,24 @@ async def store_uploaded_files(
                 ),
             )
 
+        original_relative_path = safe_path(paths[index] if index < len(paths) else original_name)
         relative_path = normalize_relative_path(
-            paths[index] if index < len(paths) else None,
+            original_relative_path,
             original_name,
         )
+
+        # 單檔補傳時，瀏覽器沒有原本的資料夾路徑；同名只出現一次才允許自動配回。
+        # 多個 Set 都有 RallySeg.csv 時不猜測，請使用資料夾上傳保留路徑。
+        if category in {"rally-data", "human-racket"} and relative_path == original_name:
+            name_matches = [record for record in records
+                            if str(record.get("original_name", "")).lower() == original_name.lower()]
+            if len(name_matches) == 1:
+                relative_path = str(name_matches[0].get("relative_path", relative_path))
+            elif len(name_matches) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{original_name} 在多個資料夾有同名檔案，請使用『選擇資料夾』保留原路徑",
+                )
 
         replace_record = find_replacement_record(
             category,
@@ -854,25 +668,11 @@ async def store_uploaded_files(
         )
 
         if replace_record is not None:
-            order = int(
-                replace_record.get("order", 0)
-            )
-            session_size -= int(
-                replace_record.get("size", 0)
-                or 0
-            )
-            remove_record_file(
-                base,
-                replace_record,
-            )
-            records.remove(
-                replace_record
-            )
-
+            order = int(replace_record.get("order", 0))
+            old_size = int(replace_record.get("size", 0) or 0)
         else:
-            order = next_record_order(
-                records
-            )
+            order = next_record_order(records)
+            old_size = 0
 
         stored_name = (
             f"{order:05d}_"
@@ -903,13 +703,7 @@ async def store_uploaded_files(
                         break
 
                     file_size += len(chunk)
-                    incoming_size += len(chunk)
-
-                    if (
-                        session_size
-                        + incoming_size
-                        > MAX_SESSION_BYTES
-                    ):
+                    if session_size - old_size + file_size > MAX_SESSION_BYTES:
                         raise HTTPException(
                             status_code=413,
                             detail=(
@@ -939,12 +733,18 @@ async def store_uploaded_files(
                 detail=f"{original_name} 是空檔案",
             )
 
+        # 新檔完整寫入後，才替換先前的檔案；失敗時舊檔不會先被刪掉。
+        if replace_record is not None:
+            records.remove(replace_record)
+            remove_record_file(base, replace_record)
+        session_size = session_size - old_size + file_size
         records.append(
             {
                 "id": uuid.uuid4().hex,
                 "order": order,
                 "original_name": original_name,
                 "relative_path": relative_path,
+                "original_relative_path": original_relative_path,
                 "stored_path": str(
                     destination.relative_to(base)
                 ).replace("\\", "/"),
@@ -952,6 +752,8 @@ async def store_uploaded_files(
                 "uploaded_at": time.time(),
             }
         )
+        # 多檔上傳中途失敗時，前面已成功的檔案仍然有完整 manifest。
+        save_manifest(base, manifest)
 
     records.sort(
         key=lambda record: int(
@@ -968,586 +770,6 @@ async def store_uploaded_files(
 # -----------------------------------------------------------------------------
 # Camera validation and conversion
 # -----------------------------------------------------------------------------
-
-
-def camera_record_map(
-    base: Path,
-    manifest: dict,
-) -> dict[int, dict[str, dict]]:
-    result: dict[
-        int,
-        dict[str, dict],
-    ] = {}
-
-    for record in manifest[
-        "categories"
-    ]["cameras"]:
-        filename = str(
-            record.get("original_name", "")
-        )
-
-        match = CAMERA_PATTERN.fullmatch(
-            filename
-        )
-
-        if not match:
-            continue
-
-        index = int(
-            match.group(1)
-        )
-
-        kind = match.group(2).lower()
-
-        result.setdefault(
-            index,
-            {},
-        )[kind] = {
-            **record,
-            "path": record_file_path(
-                base,
-                record,
-            ),
-        }
-
-    return result
-
-
-def load_intrinsic(
-    path: Path,
-    camera_id: str,
-) -> np.ndarray:
-    try:
-        raw = np.load(
-            path,
-            allow_pickle=False,
-        )
-
-    except Exception as exc:
-        raise ValueError(
-            f"{camera_id} intrinsic 無法載入：{exc}"
-        ) from exc
-
-    if not np.issubdtype(
-        raw.dtype,
-        np.number,
-    ):
-        raise ValueError(
-            f"{camera_id} intrinsic 必須是數字陣列"
-        )
-
-    value = np.asarray(
-        raw,
-        dtype=np.float64,
-    ).reshape(-1)
-
-    if value.size != 9:
-        raise ValueError(
-            f"{camera_id} intrinsic 總元素數必須是 9，"
-            f"目前 shape 為 {list(raw.shape)}"
-        )
-
-    if not np.isfinite(value).all():
-        raise ValueError(
-            f"{camera_id} intrinsic 包含 NaN 或 Infinity"
-        )
-
-    return value
-
-
-def load_extrinsic(
-    path: Path,
-    camera_id: str,
-) -> np.ndarray:
-    try:
-        raw = np.load(
-            path,
-            allow_pickle=False,
-        )
-
-    except Exception as exc:
-        raise ValueError(
-            f"{camera_id} extrinsic 無法載入：{exc}"
-        ) from exc
-
-    if not np.issubdtype(
-        raw.dtype,
-        np.number,
-    ):
-        raise ValueError(
-            f"{camera_id} extrinsic 必須是數字陣列"
-        )
-
-    value = np.asarray(
-        raw,
-        dtype=np.float64,
-    )
-
-    if value.shape != (3, 4):
-        raise ValueError(
-            f"{camera_id} extrinsic shape 必須是 (3, 4)，"
-            f"目前為 {list(raw.shape)}"
-        )
-
-    if not np.isfinite(value).all():
-        raise ValueError(
-            f"{camera_id} extrinsic 包含 NaN 或 Infinity"
-        )
-
-    return value
-
-
-def inspect_cameras(
-    base: Path,
-    manifest: dict,
-) -> dict:
-    records = manifest[
-        "categories"
-    ]["cameras"]
-
-    errors: list[str] = []
-    warnings: list[str] = []
-    cameras: list[dict] = []
-
-    invalid_names = []
-
-    for record in records:
-        filename = str(
-            record.get("original_name", "")
-        )
-
-        if not CAMERA_PATTERN.fullmatch(filename):
-            invalid_names.append(filename)
-
-    if invalid_names:
-        errors.append(
-            "以下相機檔名無法辨識："
-            + ", ".join(invalid_names[:10])
-        )
-
-    files = camera_record_map(
-        base,
-        manifest,
-    )
-
-    if not files:
-        errors.append(
-            "尚未上傳相機參數。"
-            "請選擇 Cam_0_intrinsic.npy、"
-            "Cam_0_extrinsic.npy 等檔案"
-        )
-
-    for index in sorted(files):
-        pair = files[index]
-        camera_id = f"cam{index}"
-        item_errors: list[str] = []
-        intrinsic_shape = None
-        extrinsic_shape = None
-
-        intrinsic_record = pair.get(
-            "intrinsic"
-        )
-        extrinsic_record = pair.get(
-            "extrinsic"
-        )
-
-        if intrinsic_record is None:
-            item_errors.append(
-                f"缺少 Cam_{index}_intrinsic.npy"
-            )
-
-        else:
-            try:
-                raw = np.load(
-                    intrinsic_record["path"],
-                    allow_pickle=False,
-                )
-                intrinsic_shape = list(raw.shape)
-                load_intrinsic(
-                    intrinsic_record["path"],
-                    camera_id,
-                )
-
-            except Exception as exc:
-                item_errors.append(str(exc))
-
-        if extrinsic_record is None:
-            item_errors.append(
-                f"缺少 Cam_{index}_extrinsic.npy"
-            )
-
-        else:
-            try:
-                raw = np.load(
-                    extrinsic_record["path"],
-                    allow_pickle=False,
-                )
-                extrinsic_shape = list(raw.shape)
-                load_extrinsic(
-                    extrinsic_record["path"],
-                    camera_id,
-                )
-
-            except Exception as exc:
-                item_errors.append(str(exc))
-
-        cameras.append(
-            {
-                "id": camera_id,
-                "index": index,
-                "valid": not item_errors,
-                "intrinsic_shape": intrinsic_shape,
-                "extrinsic_shape": extrinsic_shape,
-                "errors": item_errors,
-            }
-        )
-
-        errors.extend(item_errors)
-
-    indices = [
-        camera["index"]
-        for camera in cameras
-    ]
-
-    if indices:
-        missing_indices = [
-            index
-            for index in range(
-                min(indices),
-                max(indices) + 1,
-            )
-            if index not in indices
-        ]
-
-        if missing_indices:
-            errors.append(
-                "相機編號不連續，缺少："
-                + ", ".join(
-                    f"Cam {index}"
-                    for index in missing_indices
-                )
-            )
-
-        if min(indices) != 0:
-            warnings.append(
-                "相機編號不是從 Cam 0 開始"
-            )
-
-    return {
-        "file_count": len(records),
-        "camera_count": len(cameras),
-        "valid": not errors,
-        "items": cameras,
-        "errors": errors,
-        "warnings": warnings,
-    }
-
-
-def camera_pose(
-    extrinsic: list[list[float]],
-    distance: float = 4.0,
-) -> dict:
-    rotation = np.asarray(
-        [
-            row[:3]
-            for row in extrinsic
-        ],
-        dtype=np.float64,
-    )
-
-    translation = np.asarray(
-        [
-            row[3]
-            for row in extrinsic
-        ],
-        dtype=np.float64,
-    )
-
-    center = -(
-        rotation.T
-        @ translation
-    )
-
-    forward = (
-        rotation.T
-        @ np.asarray(
-            [
-                0.0,
-                0.0,
-                1.0,
-            ]
-        )
-    )
-
-    target = center + forward * distance
-
-    return {
-        "position": [
-            float(center[0]),
-            float(-center[1]),
-            float(-center[2]),
-        ],
-        "target": [
-            float(target[0]),
-            float(-target[1]),
-            float(-target[2]),
-        ],
-    }
-
-
-def court_transform(
-    settings: dict,
-) -> dict:
-    raw = (
-        settings.get(
-            "courtWorldTransform"
-        )
-        or {}
-    )
-
-    if not isinstance(raw, dict):
-        raise ValueError(
-            "球場座標設定格式錯誤"
-        )
-
-    result: dict[str, float] = {}
-
-    for key, default in DEFAULT_COURT_TRANSFORM.items():
-        try:
-            value = float(
-                raw.get(
-                    key,
-                    default,
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ) as exc:
-            raise ValueError(
-                f"球場設定 {key} 必須是數字"
-            ) from exc
-
-        if not math.isfinite(value):
-            raise ValueError(
-                f"球場設定 {key} 必須是有效數字"
-            )
-
-        result[key] = value
-
-    return result
-
-
-def camera_setting(
-    settings: dict,
-    index: int,
-) -> dict:
-    all_settings = (
-        settings.get(
-            "cameraSettings"
-        )
-        or {}
-    )
-
-    if not isinstance(
-        all_settings,
-        dict,
-    ):
-        raise ValueError(
-            "各相機設定格式錯誤"
-        )
-
-    for key in (
-        f"cam{index}",
-        f"Cam_{index}",
-        f"cam_{index}",
-        str(index),
-    ):
-        value = all_settings.get(key)
-
-        if value is None:
-            continue
-
-        if not isinstance(
-            value,
-            dict,
-        ):
-            raise ValueError(
-                f"Cam {index} 設定格式錯誤"
-            )
-
-        return value
-
-    return {}
-
-
-def load_cameras(
-    base: Path,
-    manifest: dict,
-    settings: dict,
-    fps: float,
-) -> list[dict]:
-    files = camera_record_map(
-        base,
-        manifest,
-    )
-
-    if not files:
-        raise ValueError(
-            "尚未上傳相機參數"
-        )
-
-    width = positive_int(
-        settings.get(
-            "imageWidth",
-            1920,
-        ),
-        "影片寬度",
-    )
-
-    height = positive_int(
-        settings.get(
-            "imageHeight",
-            1200,
-        ),
-        "影片高度",
-    )
-
-    mode = safe_str(
-        settings.get(
-            "coordinateMode"
-        ),
-        "raw",
-    )
-
-    if mode not in ALLOWED_COORDINATE_MODES:
-        raise ValueError(
-            "座標模式無效"
-        )
-
-    distortion = safe_bool(
-        settings.get(
-            "useLensDistortion"
-        ),
-        True,
-    )
-
-    transform = court_transform(settings)
-    result: list[dict] = []
-
-    for index in sorted(files):
-        pair = files[index]
-
-        if "intrinsic" not in pair:
-            raise ValueError(
-                f"缺少 Cam_{index}_intrinsic.npy"
-            )
-
-        if "extrinsic" not in pair:
-            raise ValueError(
-                f"缺少 Cam_{index}_extrinsic.npy"
-            )
-
-        intrinsic = load_intrinsic(
-            pair["intrinsic"]["path"],
-            f"cam{index}",
-        ).tolist()
-
-        extrinsic = load_extrinsic(
-            pair["extrinsic"]["path"],
-            f"cam{index}",
-        ).tolist()
-
-        current = camera_setting(
-            settings,
-            index,
-        )
-
-        camera_width = positive_int(
-            current.get(
-                "imageWidth",
-                width,
-            ),
-            f"Cam {index} 影片寬度",
-        )
-
-        camera_height = positive_int(
-            current.get(
-                "imageHeight",
-                height,
-            ),
-            f"Cam {index} 影片高度",
-        )
-
-        camera_fps = positive_float(
-            current.get(
-                "fps",
-                fps,
-            ),
-            f"Cam {index} FPS",
-        )
-
-        pose = camera_pose(extrinsic)
-
-        result.append(
-            {
-                "id": f"cam{index}",
-                "index": index,
-                "label": safe_str(
-                    current.get("label"),
-                    f"Cam {index}",
-                ),
-                "fileName": safe_str(
-                    current.get("fileName"),
-                    f"{index}.mp4",
-                ),
-                "description": (
-                    "Uploaded NPY parameters "
-                    f"cam{index}"
-                ),
-                "video_url": None,
-                "fps": camera_fps,
-                "offset_frame": (
-                    safe_int(
-                        current.get("offsetFrame"),
-                        0,
-                    )
-                    or 0
-                ),
-                "position": pose["position"],
-                "target": pose["target"],
-                "enabled": safe_bool(
-                    current.get("enabled"),
-                    True,
-                ),
-                "projection": {
-                    "imageWidth": camera_width,
-                    "imageHeight": camera_height,
-                    "uOffset": safe_float(
-                        current.get("uOffset"),
-                        0.0,
-                    ),
-                    "vOffset": safe_float(
-                        current.get("vOffset"),
-                        0.0,
-                    ),
-                    "intrinsic": intrinsic,
-                    "extrinsic": extrinsic,
-                    "coordinateMode": safe_str(
-                        current.get("coordinateMode"),
-                        mode,
-                    ),
-                    "useLensDistortion": safe_bool(
-                        current.get("useLensDistortion"),
-                        distortion,
-                    ),
-                    "courtWorldTransform": transform,
-                },
-            }
-        )
-
-    return result
 
 
 # -----------------------------------------------------------------------------
@@ -3314,512 +2536,8 @@ def import_dataset_from_session(
 # -----------------------------------------------------------------------------
 
 
-@router.post(
-    "/datasets/upload-sessions"
-)
-def create_upload_session():
-    clean_expired_sessions()
-
-    token = uuid.uuid4().hex
-    base = session_dir(token)
-
-    base.mkdir(
-        parents=True,
-        exist_ok=False,
-    )
-
-    manifest = default_manifest(token)
-    save_manifest(base, manifest)
-
-    return inspect_upload_session(
-        base,
-        manifest,
-    )
-
-
-@router.get(
-    "/datasets/upload-sessions/{session_token}"
-)
-def get_upload_session(
-    session_token: str,
-):
-    clean_expired_sessions()
-    base, manifest = load_session(
-        session_token
-    )
-
-    return inspect_upload_session(
-        base,
-        manifest,
-    )
-
-
-@router.post(
-    "/datasets/upload-sessions/{session_token}/categories/{category}"
-)
-async def upload_session_category(
-    session_token: str,
-    category: str,
-    files: list[UploadFile] = File(...),
-    relative_paths: list[str] | None = Form(
-        default=None
-    ),
-):
-    clean_expired_sessions()
-    category = validate_category(category)
-    base, manifest = load_session(
-        session_token
-    )
-
-    try:
-        await store_uploaded_files(
-            base,
-            manifest,
-            category,
-            files,
-            relative_paths,
-        )
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"{CATEGORY_NAMES[category]}上傳失敗：{exc}"
-            ),
-        ) from exc
-
-    return inspect_upload_session(
-        base,
-        manifest,
-    )
-
-
-@router.delete(
-    "/datasets/upload-sessions/{session_token}/categories/{category}"
-)
-def clear_upload_session_category(
-    session_token: str,
-    category: str,
-):
-    clean_expired_sessions()
-    category = validate_category(category)
-    base, manifest = load_session(
-        session_token
-    )
-
-    for record in manifest[
-        "categories"
-    ][category]:
-        remove_record_file(
-            base,
-            record,
-        )
-
-    manifest[
-        "categories"
-    ][category] = []
-
-    category_path = (
-        base
-        / "files"
-        / category
-    )
-
-    shutil.rmtree(
-        category_path,
-        ignore_errors=True,
-    )
-
-    save_manifest(
-        base,
-        manifest,
-    )
-
-    return inspect_upload_session(
-        base,
-        manifest,
-    )
-
-
-@router.delete(
-    "/datasets/upload-sessions/{session_token}"
-)
-def delete_upload_session(
-    session_token: str,
-):
-    base = session_dir(
-        session_token
-    )
-
-    existed = base.exists()
-
-    shutil.rmtree(
-        base,
-        ignore_errors=True,
-    )
-
-    return {
-        "ok": True,
-        "deleted": existed,
-    }
-
-
-@router.post(
-    "/datasets/upload-sessions/{session_token}/finalize"
-)
-def finalize_upload_session(
-    session_token: str,
-    settings_json: str = Form("{}"),
-    db: Session = Depends(get_db),
-):
-    clean_expired_sessions()
-    base, manifest = load_session(
-        session_token
-    )
-
-    inspection = inspect_upload_session(
-        base,
-        manifest,
-    )
-
-    if not inspection["can_finalize"]:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "message": "資料尚未準備完成",
-                "errors": inspection["errors"],
-            },
-        )
-
-    created_match_id: int | None = None
-
-    try:
-        settings = json.loads(
-            settings_json
-            or "{}"
-        )
-
-        if not isinstance(
-            settings,
-            dict,
-        ):
-            raise ValueError(
-                "上傳設定格式錯誤"
-            )
-
-        result = import_dataset_from_session(
-            db,
-            base,
-            manifest,
-            settings,
-        )
-        created_match_id = int(result["match_id"])
-
-        db.commit()
-
-    except ValueError as exc:
-        db.rollback()
-        if created_match_id is not None:
-            remove_match_assets(created_match_id)
-
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    except HTTPException:
-        db.rollback()
-        if created_match_id is not None:
-            remove_match_assets(created_match_id)
-        raise
-
-    except Exception as exc:
-        db.rollback()
-        if created_match_id is not None:
-            remove_match_assets(created_match_id)
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "資料集匯入失敗："
-                f"{exc}"
-            ),
-        ) from exc
-
-    shutil.rmtree(
-        base,
-        ignore_errors=True,
-    )
-
-    return result
-
-
 # -----------------------------------------------------------------------------
 # Dataset list and delete API
 # -----------------------------------------------------------------------------
 
 
-@router.get(
-    "/datasets"
-)
-def list_datasets(
-    db: Session = Depends(get_db),
-):
-    matches = (
-        db.query(Match)
-        .order_by(
-            Match.created_at.desc(),
-            Match.id.desc(),
-        )
-        .all()
-    )
-
-    datasets = []
-
-    for match in matches:
-        cameras = (
-            match.cameras
-            if isinstance(
-                match.cameras,
-                list,
-            )
-            else []
-        )
-        catalog = dataset_catalog_entry(db, match.id)
-        reconstruction = catalog["reconstruction"]
-
-        datasets.append(
-            {
-                "match_id": match.id,
-                "title": match.title,
-                "fps": match.fps,
-                "duration_frame": match.duration_frame,
-                "created_at": (
-                    match.created_at.isoformat()
-                    if match.created_at
-                    else None
-                ),
-                "rally_count": (
-                    db.query(Rally)
-                    .filter(
-                        Rally.match_id
-                        == match.id
-                    )
-                    .count()
-                ),
-                "hit_count": (
-                    db.query(Hit)
-                    .filter(
-                        Hit.match_id
-                        == match.id
-                    )
-                    .count()
-                ),
-                "trajectory_count": (
-                    db.query(BallTraj)
-                    .filter(
-                        BallTraj.match_id
-                        == match.id
-                    )
-                    .count()
-                ),
-                "ball_2d_point_count": (
-                    db.query(BallPosition2D)
-                    .filter(
-                        BallPosition2D.match_id
-                        == match.id
-                    )
-                    .count()
-                ),
-                "ball_2d_file_count": sum(
-                    int(
-                        camera.get(
-                            "ball_2d_file_count",
-                            0,
-                        )
-                        or 0
-                    )
-                    for camera in cameras
-                ),
-                "anomaly_count": (
-                    db.query(Anomaly)
-                    .filter(
-                        Anomaly.match_id
-                        == match.id
-                    )
-                    .count()
-                ),
-                "camera_count": len(cameras),
-                "reconstruction_competition": reconstruction.get("competition"),
-                "reconstruction_gender": reconstruction.get("gender"),
-                "reconstruction_motion_count": reconstruction.get(
-                    "motion_file_count",
-                    0,
-                ),
-                "reconstruction_score_count": reconstruction.get(
-                    "score_count",
-                    0,
-                ),
-                "players": catalog["players"],
-                "discipline": catalog["discipline"],
-                "games": catalog["games"],
-            }
-        )
-
-    return {
-        "datasets": datasets,
-    }
-
-
-@router.delete(
-    "/datasets/{match_id}"
-)
-def delete_dataset(
-    match_id: int,
-    db: Session = Depends(get_db),
-):
-    match = db.get(
-        Match,
-        match_id,
-    )
-
-    if match is None:
-        raise HTTPException(
-            status_code=404,
-            detail="找不到指定的資料集",
-        )
-
-    title = match.title
-
-    counts = {
-        "hits": (
-            db.query(Hit)
-            .filter(
-                Hit.match_id
-                == match_id
-            )
-            .count()
-        ),
-        "anomalies": (
-            db.query(Anomaly)
-            .filter(
-                Anomaly.match_id
-                == match_id
-            )
-            .count()
-        ),
-        "rallies": (
-            db.query(Rally)
-            .filter(
-                Rally.match_id
-                == match_id
-            )
-            .count()
-        ),
-        "trajectories": (
-            db.query(BallTraj)
-            .filter(
-                BallTraj.match_id
-                == match_id
-            )
-            .count()
-        ),
-        "ball_2d_positions": (
-            db.query(BallPosition2D)
-            .filter(
-                BallPosition2D.match_id
-                == match_id
-            )
-            .count()
-        ),
-    }
-
-    try:
-        db.query(Hit).filter(
-            Hit.match_id
-            == match_id
-        ).delete(
-            synchronize_session=False
-        )
-
-        db.query(Anomaly).filter(
-            Anomaly.match_id
-            == match_id
-        ).delete(
-            synchronize_session=False
-        )
-
-        db.query(BallTraj).filter(
-            BallTraj.match_id
-            == match_id
-        ).delete(
-            synchronize_session=False
-        )
-
-        db.query(BallPosition2D).filter(
-            BallPosition2D.match_id
-            == match_id
-        ).delete(
-            synchronize_session=False
-        )
-
-        # 選手本身留著（同一人可能還有別場比賽，也可能已經被改過顯示名稱），
-        # 只清掉這場比賽的出賽名單。
-        db.query(MatchPlayer).filter(
-            MatchPlayer.match_id
-            == match_id
-        ).delete(
-            synchronize_session=False
-        )
-
-        db.query(Rally).filter(
-            Rally.match_id
-            == match_id
-        ).delete(
-            synchronize_session=False
-        )
-
-        db.delete(match)
-        db.commit()
-
-    except Exception as exc:
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "刪除資料集失敗："
-                f"{exc}"
-            ),
-        ) from exc
-
-    assets_deleted = remove_match_assets(match_id)
-
-    next_match = (
-        db.query(Match)
-        .order_by(
-            Match.created_at.desc(),
-            Match.id.desc(),
-        )
-        .first()
-    )
-
-    return {
-        "ok": True,
-        "deleted_match_id": match_id,
-        "deleted_title": title,
-        "deleted_counts": counts,
-        "assets_deleted": assets_deleted,
-        "next_match_id": (
-            next_match.id
-            if next_match
-            else None
-        ),
-    }
-
-
-# Uploaded-dataset timeline and SMPL replay routes.
-router.include_router(reconstruction_router)

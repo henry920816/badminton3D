@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_db
 from .models import BallPosition2D, BallPosition2DCorrection, Match, Rally
+from .edit_history import make_batch, add_history, snapshot
 
 
 Ball2DSource = Literal["original", "corrected"]
@@ -192,8 +193,9 @@ def save_ball_2d_correction(
     db: Session = Depends(get_db),
 ):
     """新增或覆寫一格的修正。看不見（visibility 0）時座標存成 0，同原始 CSV。"""
-    match = _require_match(db, match_id)
-
+    match = db.query(Match).filter(Match.id == match_id).with_for_update().first()
+    if match is None:
+        raise HTTPException(404, detail="找不到資料集")
     if payload.frame > match.duration_frame:
         raise HTTPException(status_code=400, detail="frame 超出資料集範圍")
 
@@ -205,6 +207,15 @@ def save_ball_2d_correction(
         match_id=match_id, camera_index=payload.camera_index, frame=payload.frame,
     ).first()
 
+    before = snapshot(correction, payload.camera_index, payload.frame)
+    after = {'camera_index': payload.camera_index, 'frame': payload.frame,
+             'existed': True, 'visibility': int(payload.visibility),
+             'x': float(payload.x) if visible else 0.0,
+             'y': float(payload.y) if visible else 0.0}
+    changed = (not before['existed'] or any(before[key] != after[key] for key in ('visibility', 'x', 'y')))
+    if changed:
+        batch = make_batch(db, match_id)
+        add_history(db, match_id, payload.frame, [before], [after], batch, '人工修正 2D')
     now = datetime.utcnow()
     if correction is None:
         correction = BallPosition2DCorrection(
@@ -237,14 +248,18 @@ def delete_ball_2d_correction(
     db: Session = Depends(get_db),
 ):
     """刪掉一格的修正，回到原始值。回傳原始值讓前端還原畫面。"""
-    _require_match(db, match_id)
-
+    match = db.query(Match).filter(Match.id == match_id).with_for_update().first()
+    if match is None:
+        raise HTTPException(404, detail='找不到資料集')
     correction = db.query(BallPosition2DCorrection).filter_by(
         match_id=match_id, camera_index=camera_index, frame=frame,
-    ).first()
+    ).with_for_update().first()
     if correction is None:
         raise HTTPException(status_code=404, detail="這格沒有修正")
-
+    before = snapshot(correction, camera_index, frame)
+    after = snapshot(None, camera_index, frame)
+    batch = make_batch(db, match_id)
+    add_history(db, match_id, frame, [before], [after], batch, '清除 2D 修正')
     db.delete(correction)
     db.commit()
 

@@ -19,6 +19,7 @@ from app.main import (
 )
 from app.models import (
     BallPosition2D,
+    BallPosition2DCorrection,
     BallTraj,
     Base,
     Match,
@@ -457,7 +458,11 @@ class Repair2DApiTest(unittest.TestCase):
         self.assertEqual(self.trajectory_snapshot(), before3d)
         applied = auto_repair_traj_2d(self.match_id, AutoRepair2DPayload(start_frame=100, end_frame=100), self.db)
         self.assertEqual(applied["repaired_frames"], 1)
-        self.assertAlmostEqual(row.x, original_x - 120, places=5)
+        self.assertAlmostEqual(row.x, original_x, places=5)
+        overlay = self.db.query(BallPosition2DCorrection).filter_by(
+            match_id=self.match_id, frame=100, camera_index=2,
+        ).one()
+        self.assertAlmostEqual(overlay.x, original_x - 120, places=5)
         self.assertTrue(all(c["status"] == "ok" for c in applied["grid"][0]["cameras"]))
         self.assertEqual(self.trajectory_snapshot(), before3d)
         self.assertEqual(applied['trajectory_points'], [])
@@ -466,6 +471,9 @@ class Repair2DApiTest(unittest.TestCase):
                 self.assertEqual((point.x, point.y, point.visibility), before2d[point.camera_index])
         undo_auto_repair_traj_2d(self.match_id, UndoAutoRepairPayload(repair_ids=applied['repair_ids']), self.db)
         self.assertAlmostEqual(row.x, original_x)
+        self.assertEqual(self.db.query(BallPosition2DCorrection).filter_by(
+            match_id=self.match_id, frame=100, camera_index=2,
+        ).count(), 0)
         self.assertEqual(self.trajectory_snapshot(), before3d)
         self.assertEqual({p.camera_index: (p.x, p.y, p.visibility) for p in self.db.query(BallPosition2D).all()}, before2d)
 

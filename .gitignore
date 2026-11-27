@@ -1,12 +1,26 @@
+# 套件與建置結果
 node_modules/
 frontend/node_modules/
 frontend/dist/
+dist/
+
+# Python 暫存
 __pycache__/
+.pytest_cache/
 *.py[cod]
+*.egg-info/
+.venv/
+
+# 本機設定及資料
 .env
+.env.*
+!.env.example
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
 backend/app/datasets/
 body_models/
-docs/
+*.sqlite
+*.sqlite3
+*.db

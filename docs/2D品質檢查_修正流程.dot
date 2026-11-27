@@ -1,0 +1,71 @@
+digraph badminton_2d_quality {
+  graph [layout=dot, rankdir=TB, bgcolor="#0b1220", pad="0.55", nodesep="0.55", ranksep="0.65", splines=polyline,
+         fontname="Noto Sans CJK TC", label="2D 羽球標註｜品質檢查與修正流程", labelloc=t,
+         fontsize=26, fontcolor="#f8fafc"];
+  node [fontname="Noto Sans CJK TC", fontsize=14, shape=box, style="rounded,filled", fillcolor="#1e293b", color="#64748b", fontcolor="#f8fafc", penwidth=1.3, margin="0.22,0.14"];
+  edge [fontname="Noto Sans CJK TC", fontsize=11, color="#94a3b8", fontcolor="#cbd5e1", arrowsize=0.75, penwidth=1.5];
+
+  Start [label="讀取同一 Frame\n原始 3D・2D 標註／修正層・相機參數・擊球影格", fillcolor="#164e63", color="#38bdf8"];
+  Has3D [shape=diamond, label="原始 3D\n位置有效？", fillcolor="#334155"];
+  No3D [shape=diamond, label="2D 幾何／時間資訊\n本身可疑？"];
+  No3DReview [label="🟣 須人工檢視\n沒有可靠投影，不自動修改", fillcolor="#581c87", color="#c084fc"];
+  No3DOK [label="無色｜不做判斷／不修改", fillcolor="#18181b", color="#52525b"];
+
+  Reproj [label="原始 3D 投影到各相機\n判斷畫面內／畫面外／投影失敗", fillcolor="#0f766e", color="#2dd4bf"];
+  ProjValid [shape=diamond, label="投影可用？\n（畫面內或能確定畫面外）"];
+  ProjUnknown [label="投影失敗／缺少畫面尺寸\n可疑時🟣人工檢視；否則不修改", fillcolor="#581c87", color="#c084fc"];
+  IsOut [shape=diamond, label="這台相機的 3D\n明確在視野外？"];
+  OutHas2D [shape=diamond, label="此視角仍有\n可見 2D 標註？"];
+  OutCheck [shape=diamond, label="其他 ≥ 2 視角支持 3D（≤20px）\n超出畫面 >50px・非擊球 ±5 幀\n沒有既有修正？"];
+  BlueAuto [label="🔵 視野外誤標：可自動處理\n將 2D 設為不可見 (visibility = 0)", fillcolor="#075985", color="#38bdf8"];
+  BlueReview [label="🔵 視野外衝突：人工確認\n邊界／佐證不足／擊球附近", fillcolor="#0c4a6e", color="#38bdf8"];
+  OutNormal [label="無色｜畫面外且沒有 2D 標註", fillcolor="#18181b", color="#52525b"];
+
+  Has2D [shape=diamond, label="畫面內有\n2D 標註？"];
+  Missing2D [label="🟣 可能漏標／遮擋\n有其他視角佐證才列入人工檢視", fillcolor="#581c87", color="#c084fc"];
+  Error [shape=diamond, label="同幀 2D 與 3D\n投影誤差多少？"];
+  Normal [label="無色｜≤20px\n保留原始 2D，不改座標", fillcolor="#18181b", color="#52525b"];
+  Yellow [label="🟡 20–50px｜輕微偏差\n暫時保留", fillcolor="#713f12", color="#facc15"];
+  CanFix [shape=diamond, label=">50px・其他 ≥ 2 視角支持\n非擊球 ±5 幀・未經修正？"];
+  Red [label="🔴 可自動修正\n採用原始 3D 的 2D 投影座標", fillcolor="#7f1d1d", color="#f87171"];
+  Purple [label="🟣 須人工檢視\n偏差 >50px 但佐證不足／擊球附近／已有修正", fillcolor="#581c87", color="#c084fc"];
+
+  Batch [label="合併同視角的連續異常影格\n藍／紅：先顯示修正數量與預覽\n紫：跳到影片人工點選", fillcolor="#1e3a8a", color="#60a5fa"];
+  Confirm [shape=diamond, label="使用者確認\n批次套用？"];
+  Save [label="只寫入 2D 修正層\n保留原始資料・記錄歷史・支援復原", fillcolor="#166534", color="#4ade80"];
+  Stop [label="不改動原資料\n保留待檢視", fillcolor="#292524", color="#a8a29e"];
+  Recheck [label="重新掃描品質格\n已修正資料回到正常分類", fillcolor="#14532d", color="#4ade80"];
+
+  Start -> Has3D;
+  Has3D -> No3D [label="否"];
+  No3D -> No3DReview [label="是"];
+  No3D -> No3DOK [label="否"];
+  Has3D -> Reproj [label="是"];
+  Reproj -> ProjValid;
+  ProjValid -> IsOut [label="可用"];
+  ProjValid -> ProjUnknown [label="不可用"];
+  IsOut -> OutHas2D [label="是"];
+  OutHas2D -> OutNormal [label="否"];
+  OutHas2D -> OutCheck [label="是"];
+  OutCheck -> BlueAuto [label="全部符合"];
+  OutCheck -> BlueReview [label="其他情況"];
+  IsOut -> Has2D [label="否／畫面內"];
+  Has2D -> Missing2D [label="否"];
+  Has2D -> Error [label="是"];
+  Error -> Normal [label="≤20px"];
+  Error -> Yellow [label="20–50px"];
+  Error -> CanFix [label=">50px"];
+  CanFix -> Red [label="是"];
+  CanFix -> Purple [label="否"];
+  BlueAuto -> Batch;
+  Red -> Batch;
+  BlueReview -> Batch;
+  Purple -> Batch;
+  Missing2D -> Batch;
+  No3DReview -> Batch;
+  ProjUnknown -> Batch;
+  Batch -> Confirm;
+  Confirm -> Save [label="是（藍／紅）"];
+  Confirm -> Stop [label="否／人工檢視"];
+  Save -> Recheck;
+}

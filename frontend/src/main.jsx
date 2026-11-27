@@ -1,23 +1,14 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-
-import './styles.css'
-
-import App from './App.jsx'
-import DatasetBootstrap from './components/DatasetBootstrap.jsx'
-
-
-const rootElement = document.getElementById(
-  'root',
-)
-
-
-ReactDOM.createRoot(
-  rootElement,
-).render(
-  <React.StrictMode>
-    <DatasetBootstrap>
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import './styles.css';
+import App from './App.jsx';
+import RenderErrorBoundary from './components/RenderErrorBoundary.jsx';
+import DatasetBootstrap from './components/DatasetBootstrap.jsx';
+const rootElement = document.getElementById('root');
+ReactDOM.createRoot(rootElement).render(<React.StrictMode>
+    <RenderErrorBoundary>
+      <DatasetBootstrap>
       <App />
-    </DatasetBootstrap>
-  </React.StrictMode>,
-)
+      </DatasetBootstrap>
+    </RenderErrorBoundary>
+  </React.StrictMode>);

@@ -1,0 +1,9 @@
+{
+  "local_base": "badminton3D_原始格式輸出_完整專案_20261103.zip",
+  "github_repository": "henry920816/badminton3D",
+  "github_reviewed_branch": "refactor/perf-and-cleanup",
+  "github_reviewed_commit": "2507de198d79a5b580f6f9ddcc2e4c7b899096d9",
+  "integration_type": "feature-backport-on-nov03-source",
+  "github_branch_exact_mirror": false,
+  "documentation": "docs/GitHub更新整合紀錄_20261118.md"
+}

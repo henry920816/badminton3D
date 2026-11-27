@@ -184,3 +184,33 @@ class Anomaly(Base):
     severity: Mapped[int] = mapped_column(Integer, default=3)  # 1..5
     status: Mapped[str] = mapped_column(String(20), default="open")  # open|fixed|false_positive|needs_rebuild
     comment: Mapped[str] = mapped_column(String(400), default="")
+
+class Trajectory3DVersion(Base):
+    """Immutable repair batch; never changes the uploaded ball_traj rows."""
+    __tablename__ = "trajectory_3d_versions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    start_frame: Mapped[int] = mapped_column(Integer)
+    end_frame: Mapped[int] = mapped_column(Integer)
+    source_2d: Mapped[str] = mapped_column(String(20), default="corrected")
+    source_fingerprint: Mapped[str] = mapped_column(String(64))
+    base_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Trajectory3DPoint(Base):
+    __tablename__ = "trajectory_3d_points"
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    version_id: Mapped[int] = mapped_column(ForeignKey("trajectory_3d_versions.id", ondelete="CASCADE"), index=True)
+    frame: Mapped[int] = mapped_column(Integer)
+    x: Mapped[float] = mapped_column(Float)
+    y: Mapped[float] = mapped_column(Float)
+    z: Mapped[float] = mapped_column(Float)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    quality: Mapped[str] = mapped_column(String(20), default="auto")
+    diagnostics: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+Index("uq_trajectory_3d_version_frame", Trajectory3DPoint.version_id, Trajectory3DPoint.frame, unique=True)
